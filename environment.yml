@@ -1,0 +1,47 @@
+name: ppi-leakage
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+
+  # Core scientific Python
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - statsmodels
+  - pyarrow
+
+  # Protein / bioinformatics utilities
+  - biopython
+  - mmseqs2
+  - cd-hit
+
+  # Graphs, splitting, and analysis
+  - networkx
+  - python-igraph
+  - leidenalg
+
+  # PyTorch GPU stack
+  - pytorch
+
+  # Plotting / notebooks
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - tqdm
+
+  # Utilities
+  - pyyaml
+  - requests
+
+  # Protein language model packages
+  - pip
+  - pip:
+      - fair-esm
+      - transformers
+      - accelerate
