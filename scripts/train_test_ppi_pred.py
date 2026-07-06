@@ -1,380 +1,392 @@
 #!/usr/bin/env python3
 
+"""
+Command-line entry point for training and evaluating PPI predictors.
+
+This script owns CLI parsing and high-level orchestration. Domain-specific
+input validation, feature extraction, model evaluation, and result writing live
+in focused helper modules so future pipeline variants can reuse them.
+"""
+
 import argparse
+import uuid
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import hstack
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-from sklearn.linear_model import LogisticRegression, SGDClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    f1_score,
-    roc_auc_score,
+
+from ppi_features import FEATURE_CHOICES, build_feature_matrices
+from ppi_inputs import (
+    load_or_make_split,
+    prepare_input_data,
+    read_fasta,
+    validate_train_test_splits,
 )
-from sklearn.model_selection import train_test_split
-from sklearn.svm import LinearSVC
+from ppi_models import (
+    BASELINE_CLASSIFIER_CHOICES,
+    CLASSIFIER_CHOICES,
+    get_metrics,
+    get_scores_and_predictions,
+    make_classifier,
+)
+from ppi_results import (
+    append_dataframe,
+    default_summary_path,
+    reset_output_file,
+    summarize_metrics,
+    write_dataframe_threadsafe,
+)
 
-from utils import BM25Vectorizer
+FEATURELESS_FEATURE = "none"
 
 
-def read_fasta(sequences_path: str) -> dict[str, str]:
+#######
+# CLI #
+#######
+def positive_int(value: str) -> int:
     """
-    Read a protein sequence from a FASTA file
+    Parse a positive integer argparse value.
     """
-    sequences = {}
-    current_id = None
-    chunks = []
-
-    with open(sequences_path, "r") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-
-            if line.startswith(">"):
-                if current_id is not None:
-                    sequences[current_id] = "".join(chunks)
-
-                current_id = line[1:].split()[0]
-                chunks = []
-            else:
-                chunks.append(line)
-
-    if current_id is not None:
-        sequences[current_id] = "".join(chunks)
-
-    return sequences
-
-
-def check_input_data(
-        protein_pairs: pd.DataFrame, sequences: dict[str, str]) -> None:
-    """
-    QC checks for the protein pairs and sequences. 
-    """
-    # Check for missing columns in pairs.csv
-    required = {"protein_a", "protein_b", "label"}
-    missing_cols = required - set(protein_pairs.columns)
-    if missing_cols:
-        raise ValueError(f"pairs.csv missing columns: {missing_cols}")
-
-    # Check for missing sequences in FASTA
-    proteins = set(protein_pairs["protein_a"]) |\
-               set(protein_pairs["protein_b"])
-    missing_sequences = sorted(proteins - set(sequences))
-    if missing_sequences:
-        raise ValueError(
-            f"{len(missing_sequences)} proteins in pairs.csv are missing from FASTA. Examples: {missing_sequences[:10]}")
-    
-
-
-
-def make_vectorizer(args: argparse.Namespace) -> Any:
-    """
-    Create a vectorizer to extract features from protein sequences
-    """
-    if args.features == "tfidf":
-        return TfidfVectorizer(
-            analyzer="char",
-            ngram_range=(args.k, args.k),
-            lowercase=False,
-        )
-
-    if args.features == "count":
-        return CountVectorizer(
-            analyzer="char",
-            ngram_range=(args.k, args.k),
-            lowercase=False,
-        )
-
-    if args.features == "binary":
-        return CountVectorizer(
-            analyzer="char",
-            ngram_range=(args.k, args.k),
-            lowercase=False,
-            binary=True,
-        )
-
-    if args.features == "bm25":
-        return BM25Vectorizer(
-            k=args.k,
-            k1=args.bm25_k1,
-            b=args.bm25_b,
-        )
-
-    raise ValueError(f"Unknown feature type: {args.features}")
-
-
-def make_pair_features(
-        df: pd.DataFrame, sequences: dict[str, str], vectorizer: Any):
-    """
-    Create features for each protein pair.
-    """
-    # Get sequences for each protein in the pair NOTE: handle miss data
-    sequence_a = df["protein_a"].map(sequences).tolist()
-    sequence_b = df["protein_b"].map(sequences).tolist()
-
-    # Extract features for each protein
-    prot_a_fts = vectorizer.transform(sequence_a)
-    prot_b_fts = vectorizer.transform(sequence_b)
-
-    # Create protein pair features: sum, absolute difference, & product
-    ft_sums = prot_a_fts + prot_b_fts
-    ft_diffs = np.abs(prot_a_fts - prot_b_fts)
-    ft_prods = prot_a_fts.multiply(prot_b_fts)
-    feature_matrix = hstack([ft_sums, ft_diffs, ft_prods], format="csr")
-
-    return feature_matrix
-
-
-def make_classifier(args: argparse.Namespace) -> Any:
-    """
-    Create a classifier based on the specified type in args.
-    """
-    if args.classifier == "logistic":
-        return LogisticRegression(
-            max_iter=args.max_iter,
-            class_weight="balanced",
-            solver="liblinear",
-            random_state=args.seed,
-        )
-
-    if args.classifier == "linear_svm":
-        return LinearSVC(
-            class_weight="balanced",
-            max_iter=args.max_iter,
-            random_state=args.seed,
-        )
-
-    if args.classifier == "sgd_logistic":
-        return SGDClassifier(
-            loss="log_loss",
-            penalty="l2",
-            class_weight="balanced",
-            max_iter=args.max_iter,
-            random_state=args.seed,
-        )
-
-    raise ValueError(f"Unknown classifier: {args.classifier}")
-
-
-def get_scores_and_predictions(model, x):
-    """
-    Returns:
-      y_score: probability-like score for AUROC/AUPRC
-      y_pred: hard 0/1 prediction
-    """
-    if hasattr(model, "predict_proba"):
-        y_score = model.predict_proba(x)[:, 1]
-        y_pred = (y_score >= 0.5).astype(int)
-        return y_score, y_pred
-
-    if hasattr(model, "decision_function"):
-        y_score = model.decision_function(x)
-        y_pred = (y_score >= 0.0).astype(int)
-        return y_score, y_pred
-
-    y_pred = model.predict(x)
-    return y_pred.astype(float), y_pred
-
-
-def get_metrics(
-        y_true: np.ndarray, y_score: np.ndarray, y_pred: np.ndarray,
-        split_name: str) -> dict[str, float]:
-    """
-    Return classificaiton metrics for the binary protein-protein interaction
-    task.
-    """
-    # Precision
-    if y_pred.sum() != 0:
-        precision = y_true[y_pred == 1].sum() / y_pred.sum()
-    else:
-        precision = np.nan
-    
-    # Recall
-    if y_true.sum() != 0:
-        recall = y_pred[y_true == 1].sum() / y_true.sum()
-    else:
-        recall = np.nan
-
-    # F1 score
-    if precision + recall != 0:
-        f1_score = 2 * (precision * recall) / (precision + recall)
-    else:
-        f1_score = np.nan
-    
-    # All metrics
-    metrics = {
-        f"accuracy ({split_name})": accuracy_score(y_true, y_pred),
-        f"precision ({split_name})": precision,
-        f"recall ({split_name})": recall,
-        f"f1 ({split_name})": f1_score,
-        f"auprc ({split_name})": average_precision_score(y_true, y_score),
-    }
-    try:
-        metrics[f"auroc ({split_name})"] = roc_auc_score(y_true, y_score)
-    except ValueError:
-        metrics[f"auroc ({split_name})"] = float("nan")
-
-    return metrics
-
-
-def load_or_make_split(pairs: pd.DataFrame, args):
-    """
-    Load the pre-defined train/test split of protein pairs
-    OR
-    Create a train/test split from the protein pairs
-    """
-    # Load the split
-    if args.split_col and (args.split_col in pairs.columns):
-        split_values = pairs[args.split_col].astype(str).str.lower()
-        train_df = pairs[split_values == "train"].copy()
-        test_df = pairs[split_values == "test"].copy()
-        if len(train_df) == 0 or len(test_df) == 0:
-            raise ValueError(
-                "split-col must contain both 'train' and 'test' rows.")
-    # Create a train/test split
-    else:
-        train_df, test_df = train_test_split(
-            pairs,
-            test_size=args.test_size,
-            random_state=args.seed,
-            stratify=pairs["label"],
-        )
-    return train_df, test_df
+    parsed_value = int(value)
+    if parsed_value < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed_value
 
 
 def argument_parser() -> argparse.Namespace:
     """
-    Argument parser for the protein-protein interaction prediction.
+    Argument parser for protein-protein interaction prediction.
     """
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pairs", required=True, 
-                        help="CSV with protein_a, protein_b, label")
-    parser.add_argument("--fasta", required=True, 
-                        help="FASTA file with protein sequences")
-    parser.add_argument("--pred-out", default="predictions.csv")
-    parser.add_argument("--metrics-out", default="metrics.csv")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train and evaluate protein-protein interaction classifiers over "
+            "one or more feature/model configurations."))
 
-    # Args: Features
+    # Input data args
+    input_group = parser.add_argument_group("Input data")
+    input_group.add_argument(
+        "--pairs", required=True,
+        help="CSV with columns for protein_a, protein_b, label")
+    input_group.add_argument(
+        "--fasta", required=True,
+        help="FASTA file of protein sequences")
+
+    # Output data args
+    output_group = parser.add_argument_group("Outputs")
+    output_group.add_argument(
+        "--pred-out", default="predictions.csv",
+        help="CSV file for appended test-set predictions")
+    output_group.add_argument(
+        "--metrics-out", default="metrics.csv",
+        help="CSV file for appended per-run metrics")
+    output_group.add_argument(
+        "--metrics-summary-out", default=None,
+        help="CSV file for per-model metric means and standard errors. "
+            "Defaults to <metrics-out stem>_summary.csv.")
+    output_group.add_argument(
+        "--append-results", action="store_true",
+        help="Append to existing output files instead of starting fresh.")
+    output_group.add_argument(
+        "--execution-id", default=None,
+        help="Optional identifier stored with each model run row.")
+
+    # Feature extraction args
     feature_group = parser.add_argument_group("Features")
     feature_group.add_argument(
-        "--features",
-        choices=["tfidf", "bm25", "count", "binary"],
-        default="tfidf",
-        help="Protein sequence feature type",
-    )
+        "--features", choices=FEATURE_CHOICES, nargs="+", default=["tfidf"],
+        help="One or more protein sequence feature types")
     feature_group.add_argument("--k", type=int, default=3, help="k-mer size")
     feature_group.add_argument("--bm25-k1", type=float, default=1.5)
     feature_group.add_argument("--bm25-b", type=float, default=0.75)
-    
-    # Args: Classifier
-    parser.add_argument(
-        "--classifier",
-        choices=["logistic", "linear_svm", "sgd_logistic"],
-        default="logistic",
-        help="Classifier type",
+
+    # Model args
+    model_group = parser.add_argument_group("Models")
+    model_group.add_argument(
+        "--classifier", "--classifiers", dest="classifiers",
+        choices=CLASSIFIER_CHOICES, nargs="+", default=["logistic"],
+        help="One or more classifier model types")
+
+    # Training args
+    training_group = parser.add_argument_group("Training")
+    training_group.add_argument("--max-iter", type=int, default=1000)
+    training_group.add_argument("--test-size", type=float, default=0.2)
+    training_group.add_argument("--seed", type=int, default=0)
+    training_group.add_argument(
+        "--split-col", default=None,
+        help="Optional column with train/test labels")
+    training_group.add_argument(
+        "--num-reruns", type=positive_int, default=1,
+        help="Number of times to rerun each classifier with consecutive seeds")
+
+    return parser.parse_args()
+
+
+####################
+# Pipeline helpers #
+####################
+def make_model_name(feature_type: str, classifier_name: str) -> str:
+    """
+    Return a stable, machine-readable model configuration name.
+    """
+    if feature_type == FEATURELESS_FEATURE:
+        return classifier_name
+
+    return f"{feature_type}__{classifier_name}"
+
+
+def is_baseline_classifier(classifier_name: str) -> bool:
+    """
+    Return whether a classifier ignores feature matrices.
+    """
+    return classifier_name in BASELINE_CLASSIFIER_CHOICES
+
+
+def feature_metadata(
+        feature_type: str, args: argparse.Namespace
+    ) -> dict[str, float | int | str]:
+    """
+    Return feature metadata stored with each result row.
+    """
+    if feature_type == FEATURELESS_FEATURE:
+        feature_metadata = { 
+            "features": FEATURELESS_FEATURE,
+            "k": np.nan,
+            "bm25_k1": np.nan,
+            "bm25_b": np.nan,
+        }
+    else:
+        feature_metadata = {
+            "features": feature_type,
+            "k": args.k,
+            "bm25_k1": args.bm25_k1,
+            "bm25_b": args.bm25_b,
+        }
+
+    return feature_metadata
+
+
+def evaluate_model_run(
+        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any, 
+        x_test: Any, feature_type: str, classifier_name: str, run_number: int, 
+        execution_id: str, args: argparse.Namespace
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Train and evaluate one model configuration for one run number.
+    """
+    # Define model metadata
+    model_name = make_model_name(feature_type, classifier_name)
+    is_baseline = is_baseline_classifier(classifier_name)
+    run_seed = args.seed + run_number - 1
+    model_seed = np.nan if is_baseline else run_seed
+    max_iter = np.nan if is_baseline else args.max_iter
+    feature_meta = feature_metadata(feature_type, args)
+
+    # Define training and test labels
+    y_train = train_df["label"].to_numpy()
+    y_test = test_df["label"].to_numpy()
+
+    # Define model
+    model = make_classifier(
+        classifier_name=classifier_name,
+        max_iter=args.max_iter,
+        random_state=run_seed,
     )
-
-    # Args: Training
-    parser.add_argument("--max-iter", type=int, default=1000)
-    parser.add_argument("--test-size", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--split-col", default=None, 
-                        help="Optional column with train/test labels")
-
-    args = parser.parse_args()
-    
-    return args
-
-
-def main():
-
-    # Parse CLI arguments
-    args = argument_parser()
-
-    """
-    Load and process data
-    """
-    # Read input data
-    protein_pairs = pd.read_csv(args.pairs)
-    sequences = read_fasta(args.fasta)
-
-    # QC checks
-    check_input_data(protein_pairs, sequences)
-
-    # Process data
-    protein_pairs["label"] = protein_pairs["label"].astype(int)
-    
-    # Split into train/test # NOTE: add val_df
-    train_df, test_df = load_or_make_split(protein_pairs, args) 
-    train_proteins = sorted(
-              set(train_df["protein_a"]) |\
-              set(train_df["protein_b"]))
-    train_sequences = [sequences[protein] for protein in train_proteins]
-
-    # Prepare features
-    vectorizer = make_vectorizer(args)
-    vectorizer.fit(train_sequences)
-    x_train = make_pair_features(train_df, sequences, vectorizer)
-    x_test = make_pair_features(test_df, sequences, vectorizer)
-
-    # Prepare labels
-    y_train = train_df["label"].values
-    y_test = test_df["label"].values
-    if len(set(y_train)) < 2:
-        raise ValueError(
-            "Training split has only 1 class. Needs 0 and 1 labels.")
-
-
-    """
-    Training
-    """
-    # Train the classifier
-    model = make_classifier(args)
+    # Fit the model to the training data
     model.fit(x_train, y_train)
 
-
-    """
-    Evaluation 
-    """
-    # Evaluate the classifier: training set
-    y_train_score, y_train_pred = (
-        get_scores_and_predictions(model, x_train))
+    # Evaluate on the training data
+    y_train_score, y_train_pred = get_scores_and_predictions(model, x_train)
     train_metrics = get_metrics(
-        y_true=y_train, y_score=y_train_score, 
-        y_pred=y_train_pred, split_name="train")
+        y_true=y_train,
+        y_score=y_train_score,
+        y_pred=y_train_pred,
+        split_name="train",
+    )
 
-    # Evaluate the classifier: test set
-    y_test_score, y_test_pred = (
-        get_scores_and_predictions(model, x_test))
+    # Evaluate on the test data
+    y_test_score, y_test_pred = get_scores_and_predictions(model, x_test)
     test_metrics = get_metrics(
-        y_true=y_test, y_score=y_test_score, 
-        y_pred=y_test_pred, split_name="test")
-    pred_test_df = test_df[["protein_a", "protein_b", "label"]].copy()
-    pred_test_df["pred_score"] = y_test_score
-    pred_test_df["pred_label"] = y_test_pred
-    pred_test_df.to_csv(args.pred_out, index=False)
+        y_true=y_test,
+        y_score=y_test_score,
+        y_pred=y_test_pred,
+        split_name="test",
+    )
 
-    # Evaluate: classification metrics
-    metrics_df = pd.DataFrame([
-        {
-            "n_train": len(train_df),
-            "n_test": len(test_df),
-            "features": args.features,
-            "classifier": args.classifier,
-            "k": args.k,
-            **train_metrics,
-            **test_metrics,
-        }
-    ])
-    metrics_df.to_csv(args.metrics_out, index=False)
+    # Define the evaluate metrics table
+    metrics_df = pd.DataFrame(
+        [
+            {
+                "execution_id": execution_id,
+                "model_name": model_name,
+                "run_number": run_number,
+                "model_seed": model_seed,
+                "split_seed": args.seed,
+                "n_train": len(train_df),
+                "n_test": len(test_df),
+                **feature_meta,
+                "classifier": classifier_name,
+                "max_iter": max_iter,
+                "test_size": args.test_size,
+                **train_metrics,
+                **test_metrics,
+            }
+        ]
+    )
+
+    # Define the predictions table
+    predictions_df = test_df[["protein_a", "protein_b", "label"]].copy()
+    predictions_df.insert(0, "execution_id", execution_id)
+    predictions_df.insert(1, "model_name", model_name)
+    predictions_df.insert(2, "run_number", run_number)
+    predictions_df.insert(3, "model_seed", model_seed)
+    predictions_df.insert(4, "features", feature_meta["features"])
+    predictions_df.insert(5, "classifier", classifier_name)
+    predictions_df.insert(6, "k", feature_meta["k"])
+    predictions_df["pred_score"] = y_test_score
+    predictions_df["pred_label"] = y_test_pred
+
+    return metrics_df, predictions_df
+
+
+def run_model_reruns(
+        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any, 
+        x_test: Any, feature_type: str, classifier_name: str,
+        execution_id: str, args: argparse.Namespace, metrics_path: Path, 
+        predictions_path: Path,
+    ) -> None:
+    """
+    Run one model configuration repeatedly and append each result.
+    """
+    model_name = make_model_name(feature_type, classifier_name)
+
+    # Re-run the model
+    for run_number in range(1, args.num_reruns + 1):
+        metrics_df, predictions_df = evaluate_model_run(
+            train_df=train_df,
+            test_df=test_df,
+            x_train=x_train,
+            x_test=x_test,
+            feature_type=feature_type,
+            classifier_name=classifier_name,
+            run_number=run_number,
+            execution_id=execution_id,
+            args=args,
+        )
+        append_dataframe(metrics_df, metrics_path)
+        append_dataframe(predictions_df, predictions_path)
+        print(
+            f"Finished model={model_name} "
+            f"run={run_number}/{args.num_reruns}")
+
+
+def prepare_outputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    """
+    Resolve and initialize output paths.
+    """
+    # Define output paths
+    predictions_path = Path(args.pred_out)
+    metrics_path = Path(args.metrics_out)
+    summary_path = (
+        Path(args.metrics_summary_out)
+        if args.metrics_summary_out
+        else default_summary_path(metrics_path)
+    )
+
+    # Prepare to write to output paths
+    reset_output_file(predictions_path, append_results=args.append_results)
+    reset_output_file(metrics_path, append_results=args.append_results)
+    reset_output_file(summary_path, append_results=False)
+
+    return predictions_path, metrics_path, summary_path
+
+
+def main() -> None:
+    """
+    Run the full CLI pipeline.
+    """
+    args = argument_parser()
+
+    # Load and process input data
+    protein_pairs = pd.read_csv(args.pairs)
+    sequences = read_fasta(args.fasta)
+    protein_pairs = prepare_input_data(protein_pairs, sequences)
+
+    # Split into train/test sets
+    train_df, test_df = load_or_make_split(protein_pairs, args)
+    validate_train_test_splits(train_df, test_df)
+
+    # Prepare to run the models
+    execution_id = args.execution_id or uuid.uuid4().hex
+    predictions_path, metrics_path, summary_path = prepare_outputs(args)
+
+    # Define the model configurations to run
+    baseline_classifiers = [
+        classifier_name
+        for classifier_name in args.classifiers
+        if is_baseline_classifier(classifier_name)
+    ]
+    learned_classifiers = [
+        classifier_name
+        for classifier_name in args.classifiers
+        if not is_baseline_classifier(classifier_name)
+    ]
+
+    # Run the baseline models
+    for classifier_name in baseline_classifiers:
+        run_model_reruns(
+            train_df=train_df,
+            test_df=test_df,
+            x_train=train_df,
+            x_test=test_df,
+            feature_type=FEATURELESS_FEATURE,
+            classifier_name=classifier_name,
+            execution_id=execution_id,
+            args=args,
+            metrics_path=metrics_path,
+            predictions_path=predictions_path,
+        )
+
+    # Extract features
+    for feature_type in args.features:
+        if not learned_classifiers:
+            continue
+        x_train, x_test = build_feature_matrices(
+            train_df=train_df,
+            test_df=test_df,
+            sequences=sequences,
+            feature_type=feature_type,
+            args=args,
+        )
+
+        # Run the learned classifiers
+        for classifier_name in args.classifiers:
+            if classifier_name not in learned_classifiers:
+                continue
+            run_model_reruns(
+                train_df=train_df,
+                test_df=test_df,
+                x_train=x_train,
+                x_test=x_test,
+                feature_type=feature_type,
+                classifier_name=classifier_name,
+                execution_id=execution_id,
+                args=args,
+                metrics_path=metrics_path,
+                predictions_path=predictions_path,
+            )
+
+    # Summarize model performance
+    summary_df = summarize_metrics(metrics_path)
+    write_dataframe_threadsafe(summary_df, summary_path)
+
     print(
-        f"{metrics_df.to_string(index=False)}"
-        f"\nSaved predictions to: {args.pred_out}"
-        f"\nSaved metrics to: {args.metrics_out}")
+        f"\n{summary_df.to_string(index=False)}"
+        f"\nSaved predictions to: {predictions_path}"
+        f"\nSaved per-run metrics to: {metrics_path}"
+        f"\nSaved metric summary to: {summary_path}"
+    )
+
 
 if __name__ == "__main__":
     main()
