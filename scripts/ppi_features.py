@@ -16,7 +16,10 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 
 FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
 
-# BM25 vectorizer for protein k-mers
+
+###################
+# BM25 vectorizer #
+###################
 class BM25Vectorizer:
     """
     Minimal BM25 vectorizer for protein k-mers.
@@ -78,15 +81,19 @@ class BM25Vectorizer:
             1.0 - self.b + self.b * doc_lengths[rows] / self.avgdl_
         )
         data = self.idf_[cols] * ((tf * (self.k1 + 1.0)) / denom)
+        features = csr_matrix((data, (rows, cols)), shape=counts.shape)
 
-        return csr_matrix((data, (rows, cols)), shape=counts.shape)
+        return features
 
 
+#######################
+# Feature vectorizers #
+#######################
 def make_vectorizer(feature_type: str, args: argparse.Namespace) -> Any:
     """
     Create a vectorizer to extract features from protein sequences.
     """
-    # TF-IDF 
+    # TF-IDF
     if feature_type == "tfidf":
         vectorizer = TfidfVectorizer(
             analyzer="char",
@@ -125,7 +132,9 @@ def make_vectorizer(feature_type: str, args: argparse.Namespace) -> Any:
     return vectorizer
 
 
-
+#################
+# Pair features #
+#################
 def make_pair_features(
         df: pd.DataFrame, sequences: dict[str, str], vectorizer: Any,
     ) -> Any:
@@ -150,7 +159,7 @@ def make_pair_features(
 
 
 def build_feature_matrices(
-        train_df: pd.DataFrame, test_df: pd.DataFrame, 
+        train_df: pd.DataFrame, test_df: pd.DataFrame,
         sequences: dict[str, str], feature_type: str, args: argparse.Namespace
     ) -> tuple[Any, Any]:
     """

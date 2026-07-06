@@ -9,7 +9,6 @@ calibration, threshold tuning, neural-model adapters, and expanded metrics.
 from typing import Any
 
 import numpy as np
-from typing import Any
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -27,9 +26,9 @@ LEARNED_CLASSIFIER_CHOICES = ("logistic", "linear_svm", "sgd_logistic")
 CLASSIFIER_CHOICES = LEARNED_CLASSIFIER_CHOICES + BASELINE_CLASSIFIER_CHOICES
 
 
-########################
-# Baseline Classifiers #
-########################
+#######################
+# Baseline estimators #
+#######################
 # Baseline classifier: predicts always positive or negative
 class ConstantClassifier:
     """
@@ -51,8 +50,9 @@ class ConstantClassifier:
         """
         n_samples = self._n_samples(x)
         label = int(self.positive_probability >= 0.5)
+        predictions = np.full(n_samples, label, dtype=int)
 
-        return np.full(n_samples, label, dtype=int)
+        return predictions
 
     def predict_proba(self, x: Any) -> np.ndarray:
         """
@@ -64,17 +64,23 @@ class ConstantClassifier:
             self.positive_probability,
             dtype=float,
         )
+        probabilities = np.column_stack((1.0 - positive, positive))
 
-        return np.column_stack((1.0 - positive, positive))
+        return probabilities
 
     @staticmethod
     def _n_samples(x: Any) -> int:
         if hasattr(x, "shape"):
-            return x.shape[0]
+            n_samples = x.shape[0]
+        else:
+            n_samples = len(x)
 
-        return len(x)
+        return n_samples
 
 
+#################
+# Model factory #
+#################
 def make_classifier(
         classifier_name: str, max_iter: int, random_state: int,
     ) -> Any:
@@ -117,6 +123,9 @@ def make_classifier(
     return model
 
 
+####################
+# Model evaluation #
+####################
 def get_scores_and_predictions(
         model: Any, x: Any,
     ) -> tuple[np.ndarray, np.ndarray]:

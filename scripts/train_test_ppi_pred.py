@@ -9,6 +9,7 @@ in focused helper modules so future pipeline variants can reuse them.
 """
 
 import argparse
+import logging
 import uuid
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ from ppi_results import (
 )
 
 FEATURELESS_FEATURE = "none"
+LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+LOGGER = logging.getLogger(__name__)
 
 
 #######
@@ -90,6 +93,9 @@ def argument_parser() -> argparse.Namespace:
     output_group.add_argument(
         "--execution-id", default=None,
         help="Optional identifier stored with each model run row.")
+    output_group.add_argument(
+        "--log-level", choices=LOG_LEVEL_CHOICES, default="INFO",
+        help="Logging verbosity.")
 
     # Feature extraction args
     feature_group = parser.add_argument_group("Features")
@@ -119,7 +125,19 @@ def argument_parser() -> argparse.Namespace:
         "--num-reruns", type=positive_int, default=1,
         help="Number of times to rerun each classifier with consecutive seeds")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    return args
+
+
+def configure_logging(args: argparse.Namespace) -> None:
+    """
+    Configure command-line logging.
+    """
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(message)s",
+    )
 
 
 ####################
@@ -130,16 +148,20 @@ def make_model_name(feature_type: str, classifier_name: str) -> str:
     Return a stable, machine-readable model configuration name.
     """
     if feature_type == FEATURELESS_FEATURE:
-        return classifier_name
+        model_name = classifier_name
+    else:
+        model_name = f"{feature_type}__{classifier_name}"
 
-    return f"{feature_type}__{classifier_name}"
+    return model_name
 
 
 def is_baseline_classifier(classifier_name: str) -> bool:
     """
     Return whether a classifier ignores feature matrices.
     """
-    return classifier_name in BASELINE_CLASSIFIER_CHOICES
+    is_baseline = classifier_name in BASELINE_CLASSIFIER_CHOICES
+
+    return is_baseline
 
 
 def feature_metadata(
@@ -149,7 +171,7 @@ def feature_metadata(
     Return feature metadata stored with each result row.
     """
     if feature_type == FEATURELESS_FEATURE:
-        feature_metadata = { 
+        feature_metadata = {
             "features": FEATURELESS_FEATURE,
             "k": np.nan,
             "bm25_k1": np.nan,
@@ -167,8 +189,8 @@ def feature_metadata(
 
 
 def evaluate_model_run(
-        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any, 
-        x_test: Any, feature_type: str, classifier_name: str, run_number: int, 
+        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any,
+        x_test: Any, feature_type: str, classifier_name: str, run_number: int,
         execution_id: str, args: argparse.Namespace
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -250,9 +272,9 @@ def evaluate_model_run(
 
 
 def run_model_reruns(
-        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any, 
+        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any,
         x_test: Any, feature_type: str, classifier_name: str,
-        execution_id: str, args: argparse.Namespace, metrics_path: Path, 
+        execution_id: str, args: argparse.Namespace, metrics_path: Path,
         predictions_path: Path,
     ) -> None:
     """
@@ -275,9 +297,12 @@ def run_model_reruns(
         )
         append_dataframe(metrics_df, metrics_path)
         append_dataframe(predictions_df, predictions_path)
-        print(
-            f"Finished model={model_name} "
-            f"run={run_number}/{args.num_reruns}")
+        LOGGER.info(
+            "Finished model=%s run=%s/%s",
+            model_name,
+            run_number,
+            args.num_reruns,
+        )
 
 
 def prepare_outputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
@@ -306,6 +331,7 @@ def main() -> None:
     Run the full CLI pipeline.
     """
     args = argument_parser()
+    configure_logging(args)
 
     # Load and process input data
     protein_pairs = pd.read_csv(args.pairs)
@@ -380,11 +406,14 @@ def main() -> None:
     summary_df = summarize_metrics(metrics_path)
     write_dataframe_threadsafe(summary_df, summary_path)
 
-    print(
-        f"\n{summary_df.to_string(index=False)}"
-        f"\nSaved predictions to: {predictions_path}"
-        f"\nSaved per-run metrics to: {metrics_path}"
-        f"\nSaved metric summary to: {summary_path}"
+    LOGGER.info(
+        "\n%s\nSaved predictions to: %s"
+        "\nSaved per-run metrics to: %s"
+        "\nSaved metric summary to: %s",
+        summary_df.to_string(index=False),
+        predictions_path,
+        metrics_path,
+        summary_path,
     )
 
 

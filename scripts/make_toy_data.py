@@ -1,21 +1,30 @@
-import random
 import argparse
+import logging
+import random
+
 import pandas as pd
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 MOTIFS = ["ACDEFG", "KLMNPQ", "RSTVWY", "GHIKLM", "NPQRST"]
+LOGGER = logging.getLogger(__name__)
 
 
 def random_seq(length=120):
-    return "".join(random.choice(AA) for _ in range(length))
+    sequence = "".join(random.choice(AA) for _ in range(length))
+
+    return sequence
 
 
 def insert_motif(seq, motif):
     i = random.randint(0, len(seq) - len(motif))
-    return seq[:i] + motif + seq[i + len(motif):]
+    sequence = seq[:i] + motif + seq[i + len(motif):]
+
+    return sequence
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-proteins", type=int, default=200)
     parser.add_argument("--n-pairs", type=int, default=1000)
@@ -64,7 +73,7 @@ def main():
         for pid, seq in seqs.items():
             f.write(f">{pid}\n{seq}\n")
 
-    print("Wrote toy_pairs.csv and toy_sequences.fasta")
+    LOGGER.info("Wrote toy_pairs.csv and toy_sequences.fasta")
 
 
 if __name__ == "__main__":

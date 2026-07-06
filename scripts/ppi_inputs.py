@@ -15,8 +15,12 @@ from sklearn.model_selection import train_test_split
 
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
 EXPECTED_LABEL_VALUES = {0, 1}
+EXPECTED_SPLIT_VALUES = {"train", "test"}
 
 
+#################
+# FASTA parsing #
+#################
 def read_fasta(sequences_path: str | Path) -> dict[str, str]:
     """
     Read protein sequences from a FASTA file.
@@ -46,6 +50,9 @@ def read_fasta(sequences_path: str | Path) -> dict[str, str]:
     return sequences
 
 
+####################
+# Data-checking QC #
+####################
 def normalize_labels(labels: pd.Series, context: str) -> pd.Series:
     """
     Return labels as ints after validating they are binary 0/1 values.
@@ -68,14 +75,16 @@ def normalize_labels(labels: pd.Series, context: str) -> pd.Series:
             f"{context} label column must contain only 0/1 values. "
             f"Found: {unexpected_values}")
 
-    return numeric_labels.astype(int)
+    normalized_labels = numeric_labels.astype(int)
+
+    return normalized_labels
 
 
 def validate_binary_labeling(labels: pd.Series, context: str) -> None:
     """
     Fail fast unless a label series contains both binary classes.
     """
-    # Check that both classes are present 
+    # Check that both classes are present
     observed_labels = set(labels.unique())
     missing_labels = sorted(EXPECTED_LABEL_VALUES - observed_labels)
     if missing_labels:
@@ -109,20 +118,25 @@ def prepare_input_data(
         labels=prepared_pairs["label"], context="pairs.csv")
 
     # Check for proteins without FASTA sequences
-    proteins = set(protein_pairs["protein_a"]) |\
-               set(protein_pairs["protein_b"])
+    proteins = (
+        set(protein_pairs["protein_a"])
+        | set(protein_pairs["protein_b"])
+    )
     missing_sequences = sorted(proteins - set(sequences))
     if missing_sequences:
         examples = missing_sequences[:10]
         raise ValueError(
-            f"{len(missing_sequences)} protein pairs are missing sequences"
+            f"{len(missing_sequences)} protein pairs are missing sequences. "
             f"Examples: {examples}")
 
     return prepared_pairs
 
 
+####################
+# Train/test split #
+####################
 def validate_train_test_splits(
-        train_df: pd.DataFrame,  test_df: pd.DataFrame) -> None:
+        train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
     """
     Validate split labels before feature construction and training.
     """
@@ -137,8 +151,18 @@ def load_or_make_split(
     Load a pre-defined train/test split or create one from the protein pairs.
     """
     # Load train/test split or ...
-    if args.split_col and args.split_col in pairs.columns:
+    if args.split_col:
+        if args.split_col not in pairs.columns:
+            raise ValueError(
+                f"split_col '{args.split_col}' is not in pairs.csv.")
+
         split_values = pairs[args.split_col].astype(str).str.lower()
+        unexpected_values = sorted(set(split_values) - EXPECTED_SPLIT_VALUES)
+        if unexpected_values:
+            raise ValueError(
+                f"split_col must contain only 'train' and 'test'. "
+                f"Found: {unexpected_values}")
+
         train_df = pairs[split_values == "train"].copy()
         test_df = pairs[split_values == "test"].copy()
         if len(train_df) == 0 or len(test_df) == 0:
