@@ -4,3 +4,6 @@
 *npy
 *fasta
 *pyc
+
+results/*
+processed/*

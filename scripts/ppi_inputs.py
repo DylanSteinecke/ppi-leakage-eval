@@ -21,9 +21,11 @@ EXPECTED_SPLIT_VALUES = {"train", "test"}
 PROVIDED_SPLIT_STRATEGY = "provided_column"
 RANDOM_SPLIT_STRATEGY = "random"
 PROTEIN_COMPONENT_SPLIT_STRATEGY = "protein_disjoint_components"
+PROTEIN_PRUNE_SPLIT_STRATEGY = "protein_disjoint_prune_edges"
 SPLIT_STRATEGY_CHOICES = (
     RANDOM_SPLIT_STRATEGY,
     PROTEIN_COMPONENT_SPLIT_STRATEGY,
+    PROTEIN_PRUNE_SPLIT_STRATEGY,
 )
 LOGGER = logging.getLogger(__name__)
 
@@ -362,9 +364,16 @@ def make_protein_component_split(
     n_components = len(component_sizes)
     args.n_connected_components = n_components
     if n_components < 2:
+        n_pairs = len(pairs)
+        n_proteins = len(protein_ids_in_pairs(pairs))
+        largest_component_size = int(component_sizes.max())
         raise ValueError(
             "protein_disjoint_components split requires at least two "
-            "connected components.")
+            f"connected components. Found {n_components} connected "
+            f"component(s) across {n_pairs} pairs and {n_proteins} "
+            f"proteins. Largest component has {largest_component_size} "
+            "pairs, so assigning whole components would put every pair in "
+            "one split.")
 
     train_components = choose_train_components(
         component_sizes=component_sizes,
@@ -374,6 +383,79 @@ def make_protein_component_split(
     train_mask = component_ids.isin(train_components)
     train_df = pairs.loc[train_mask].copy()
     test_df = pairs.loc[~train_mask].copy()
+
+    return train_df, test_df
+
+
+############################
+# Protein-disjoint pruning #
+############################
+def estimate_train_protein_fraction(train_size: float) -> float:
+    """
+    Estimate the protein split needed for the target retained pair split.
+
+    Under random protein assignment, within-train pairs scale with p^2 and
+    within-test pairs scale with (1 - p)^2. Solving that approximation keeps
+    the retained train/test pair ratio closer to the requested pair ratio after
+    crossing pairs are pruned.
+    """
+    train_weight = train_size ** 0.5
+    test_weight = (1.0 - train_size) ** 0.5
+    train_protein_fraction = train_weight / (train_weight + test_weight)
+
+    return train_protein_fraction
+
+
+def choose_train_proteins(
+        pairs: pd.DataFrame, train_size: float, seed: int,
+    ) -> set[str]:
+    """
+    Choose proteins assigned to the training side of a disjoint split.
+    """
+    proteins = sorted(protein_ids_in_pairs(pairs))
+    if len(proteins) < 2:
+        raise ValueError(
+            "protein_disjoint_prune_edges split requires at least two "
+            "proteins.")
+
+    train_protein_fraction = estimate_train_protein_fraction(train_size)
+    n_train_proteins = round(len(proteins) * train_protein_fraction)
+    n_train_proteins = max(1, min(n_train_proteins, len(proteins) - 1))
+
+    rng = random.Random(seed)
+    rng.shuffle(proteins)
+    train_proteins = set(proteins[:n_train_proteins])
+
+    return train_proteins
+
+
+def make_protein_prune_split(
+        pairs: pd.DataFrame, args: argparse.Namespace,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Make a protein-disjoint split by pruning train/test crossing pairs.
+    """
+    train_proteins = choose_train_proteins(
+        pairs=pairs,
+        train_size=args.train_size,
+        seed=args.seed,
+    )
+    protein_a_is_train = pairs["protein_a"].isin(train_proteins)
+    protein_b_is_train = pairs["protein_b"].isin(train_proteins)
+
+    train_mask = protein_a_is_train & protein_b_is_train
+    test_mask = (~protein_a_is_train) & (~protein_b_is_train)
+    pruned_mask = ~(train_mask | test_mask)
+    args.n_pruned_pairs = int(pruned_mask.sum())
+    args.pruned_pair_fraction = args.n_pruned_pairs / len(pairs)
+
+    train_df = pairs.loc[train_mask].copy()
+    test_df = pairs.loc[test_mask].copy()
+    if train_df.empty or test_df.empty:
+        raise ValueError(
+            "protein_disjoint_prune_edges split produced an empty train or "
+            "test split after pruning crossing pairs. Try a different "
+            "--seed, a larger dataset, or a less extreme --train-size.")
 
     return train_df, test_df
 
@@ -398,6 +480,11 @@ def log_split_summary(
         message = (
             f"{message}; connected components={args.n_connected_components}"
         )
+    if args.effective_split_strategy == PROTEIN_PRUNE_SPLIT_STRATEGY:
+        message = (
+            f"{message}; pruned crossing pairs={args.n_pruned_pairs}; "
+            f"pruned fraction={args.pruned_pair_fraction:.3f}"
+        )
     LOGGER.info(message)
 
 
@@ -407,6 +494,9 @@ def load_or_make_split(
     """
     Load a pre-defined train/test split or create one from the protein pairs.
     """
+    args.n_pruned_pairs = 0
+    args.pruned_pair_fraction = 0.0
+
     # Load train/test split
     if args.split_col:
         train_df, test_df = load_split_column(pairs, args.split_col)
@@ -414,6 +504,11 @@ def load_or_make_split(
     # Create a protein-disjoint train/test split
     elif args.effective_split_strategy == PROTEIN_COMPONENT_SPLIT_STRATEGY:
         train_df, test_df = make_protein_component_split(pairs, args)
+        validate_disjoint_proteins(train_df, test_df)
+
+    # Create a protein-disjoint train/test split by pruning crossing pairs
+    elif args.effective_split_strategy == PROTEIN_PRUNE_SPLIT_STRATEGY:
+        train_df, test_df = make_protein_prune_split(pairs, args)
         validate_disjoint_proteins(train_df, test_df)
 
     # Create a random train/test split

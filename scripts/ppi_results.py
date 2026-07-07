@@ -37,6 +37,8 @@ SUMMARY_GROUP_COLUMNS = (
     "actual_train_size",
     "actual_test_size",
     "n_connected_components",
+    "n_pruned_pairs",
+    "pruned_pair_fraction",
     "n_train",
     "n_test",
 )

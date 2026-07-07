@@ -182,6 +182,8 @@ def argument_parser() -> argparse.Namespace:
         args.effective_split_strategy = (
             args.split_strategy or RANDOM_SPLIT_STRATEGY)
     args.n_connected_components = None
+    args.n_pruned_pairs = 0
+    args.pruned_pair_fraction = 0.0
 
     try:
         args.features = normalize_feature_types(args.features)
@@ -347,6 +349,8 @@ def train_and_evaluate_model_run(
         "actual_train_size": actual_train_size,
         "actual_test_size": actual_test_size,
         "n_connected_components": args.n_connected_components,
+        "n_pruned_pairs": args.n_pruned_pairs,
+        "pruned_pair_fraction": args.pruned_pair_fraction,
     }
     train_metrics_df = make_metrics_df(
         metadata=metrics_metadata,

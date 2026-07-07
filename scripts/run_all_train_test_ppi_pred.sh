@@ -17,6 +17,7 @@ USER_ARGS=("$@")
 SPLIT_STRATEGIES=(
     random
     protein_disjoint_components
+    #protein_disjoint_prune_edges
 )
 
 FEATURE_SETS=(
@@ -52,14 +53,15 @@ the_date=$(date +%m-%d-%y__%H_%M_%S)
 
 for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     STRATEGY_EXECUTION_ID="${EXECUTION_ID}__${split_strategy}"
+    RUN_SUFFIX="${split_strategy}_${the_date}"
 
-    PRED_OUT="$OUT_DIR/predictions_all_${split_strategy}_${the_date}.csv"
-    TRAIN_METRICS_OUT="$OUT_DIR/train_metrics_runs_${split_strategy}_${the_date}.csv"
-    TEST_METRICS_OUT="$OUT_DIR/test_metrics_runs_${split_strategy}_${the_date}.csv"
-    TRAIN_SUMMARY_OUT="$OUT_DIR/train_metrics_summary_${split_strategy}_${the_date}.csv"
-    TEST_SUMMARY_OUT="$OUT_DIR/test_metrics_summary_${split_strategy}_${the_date}.csv"
-    TRAIN_PLOT_OUT="$OUT_DIR/train_metrics_summary_${split_strategy}_${the_date}.svg"
-    TEST_PLOT_OUT="$OUT_DIR/test_metrics_summary_${split_strategy}_${the_date}.svg"
+    PRED_OUT="$OUT_DIR/predictions_all_${RUN_SUFFIX}.csv"
+    TRAIN_METRICS_OUT="$OUT_DIR/train_metrics_runs_${RUN_SUFFIX}.csv"
+    TEST_METRICS_OUT="$OUT_DIR/test_metrics_runs_${RUN_SUFFIX}.csv"
+    TRAIN_SUMMARY_OUT="$OUT_DIR/train_metrics_summary_${RUN_SUFFIX}.csv"
+    TEST_SUMMARY_OUT="$OUT_DIR/test_metrics_summary_${RUN_SUFFIX}.csv"
+    TRAIN_PLOT_OUT="$OUT_DIR/train_metrics_summary_${RUN_SUFFIX}.svg"
+    TEST_PLOT_OUT="$OUT_DIR/test_metrics_summary_${RUN_SUFFIX}.svg"
 
     APPEND_ARGS=()
 
