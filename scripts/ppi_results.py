@@ -15,20 +15,15 @@ import pandas as pd
 
 
 METRIC_COLUMNS = (
-    "accuracy_train",
-    "precision_train",
-    "recall_train",
-    "f1_train",
-    "auprc_train",
-    "auroc_train",
-    "accuracy_test",
-    "precision_test",
-    "recall_test",
-    "f1_test",
-    "auprc_test",
-    "auroc_test",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "auprc",
+    "auroc",
 )
 SUMMARY_GROUP_COLUMNS = (
+    "split",
     "model_name",
     "features",
     "classifier",
@@ -36,8 +31,12 @@ SUMMARY_GROUP_COLUMNS = (
     "bm25_k1",
     "bm25_b",
     "max_iter",
+    "split_strategy",
     "split_seed",
-    "test_size",
+    "target_train_size",
+    "actual_train_size",
+    "actual_test_size",
+    "n_connected_components",
     "n_train",
     "n_test",
 )

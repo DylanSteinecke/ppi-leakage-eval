@@ -15,6 +15,42 @@ from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 
 FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
+FEATURE_NAME_SEPARATOR = "+"
+
+
+####################
+# Feature-set args #
+####################
+def normalize_feature_types(
+        feature_types: list[str] | tuple[str, ...],
+    ) -> tuple[str, ...]:
+    """
+    Validate and return a stable feature-type tuple.
+    """
+    normalized_types = tuple(feature_types)
+    if not normalized_types:
+        raise ValueError("At least one feature type is required.")
+
+    duplicate_types = sorted(
+        feature_type
+        for feature_type in set(normalized_types)
+        if normalized_types.count(feature_type) > 1
+    )
+    if duplicate_types:
+        raise ValueError(
+            f"Feature types cannot be repeated: {duplicate_types}")
+
+    return normalized_types
+
+
+def make_feature_name(feature_types: list[str] | tuple[str, ...]) -> str:
+    """
+    Return a stable name for one feature set.
+    """
+    normalized_types = normalize_feature_types(feature_types)
+    feature_name = FEATURE_NAME_SEPARATOR.join(normalized_types)
+
+    return feature_name
 
 
 ###################
@@ -160,20 +196,43 @@ def make_pair_features(
 
 def build_feature_matrices(
         train_df: pd.DataFrame, test_df: pd.DataFrame,
-        sequences: dict[str, str], feature_type: str, args: argparse.Namespace
+        sequences: dict[str, str], feature_types: tuple[str, ...],
+        args: argparse.Namespace,
     ) -> tuple[Any, Any]:
     """
-    Fit the requested feature extractor on train proteins and transform pairs.
+    Fit feature extractors on train proteins and concatenate pair features.
     """
     # Define and extract features based on the training set
+    feature_types = normalize_feature_types(feature_types)
     train_proteins = sorted(
         set(train_df["protein_a"]) | set(train_df["protein_b"]))
     train_sequences = [sequences[protein] for protein in train_proteins]
-    vectorizer = make_vectorizer(feature_type, args)
-    vectorizer.fit(train_sequences)
 
-    # Make train and test features
-    x_train = make_pair_features(train_df, sequences, vectorizer)
-    x_test = make_pair_features(test_df, sequences, vectorizer)
+    # Make train and test features for each requested feature type
+    train_feature_blocks = []
+    test_feature_blocks = []
+    for feature_type in feature_types:
+        vectorizer = make_vectorizer(feature_type, args)
+        vectorizer.fit(train_sequences)
+        train_feature_block = make_pair_features(
+            train_df,
+            sequences,
+            vectorizer,
+        )
+        test_feature_block = make_pair_features(
+            test_df,
+            sequences,
+            vectorizer,
+        )
+        train_feature_blocks.append(train_feature_block)
+        test_feature_blocks.append(test_feature_block)
+
+    # Preserve feature blocks as separate sparse columns
+    if len(train_feature_blocks) == 1:
+        x_train = train_feature_blocks[0]
+        x_test = test_feature_blocks[0]
+    else:
+        x_train = hstack(train_feature_blocks, format="csr")
+        x_test = hstack(test_feature_blocks, format="csr")
 
     return x_train, x_test

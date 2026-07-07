@@ -152,7 +152,7 @@ def get_scores_and_predictions(
 
 def get_metrics(
         y_true: np.ndarray, y_score: np.ndarray, y_pred: np.ndarray,
-        split_name: str,
+        split_name: str | None = None,
     ) -> dict[str, float]:
     """
     Return binary classification metrics for a split.
@@ -169,7 +169,7 @@ def get_metrics(
             "y_true, y_score, and y_pred must have the same length.")
 
     # Define metrics
-    prefix = f"_{split_name}"
+    prefix = f"_{split_name}" if split_name else ""
     has_predicted_positive = np.any(y_pred == 1)
     metrics = {
         f"accuracy{prefix}": accuracy_score(y_true, y_pred),
