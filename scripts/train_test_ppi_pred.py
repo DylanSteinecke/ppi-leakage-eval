@@ -40,7 +40,14 @@ from ppi_models import (
     get_scores_and_predictions,
     make_classifier,
 )
-from ppi_plots import default_plot_path, plot_metrics_summary
+from ppi_plots import (
+    default_combined_plot_path,
+    default_plot_path,
+    default_png_plot_path,
+    plot_metrics_summary,
+    plot_train_test_metrics_summary,
+    plot_train_test_metrics_summary_png,
+)
 from ppi_results import (
     append_dataframe,
     default_summary_path,
@@ -136,6 +143,14 @@ def argument_parser() -> argparse.Namespace:
         help="SVG file for the test metrics plot. Defaults to "
             "<test-metrics-summary-out stem>.svg.")
     plot_group.add_argument(
+        "--train-test-metrics-plot-out", default=None,
+        help="SVG file for the combined train/test metrics plot. Defaults "
+            "to a train_test_* companion next to the train metrics plot.")
+    plot_group.add_argument(
+        "--train-test-metrics-png-out", default=None,
+        help="PNG file for the combined train/test metrics plot. Defaults "
+            "to a .png companion next to the combined train/test SVG.")
+    plot_group.add_argument(
         "--no-metrics-plots", action="store_true",
         help="Do not create train/test metrics summary plots.")
 
@@ -218,6 +233,8 @@ class OutputPaths:
     test_summary_path: Path
     train_plot_path: Path | None
     test_plot_path: Path | None
+    train_test_plot_path: Path | None
+    train_test_png_path: Path | None
 
 
 def make_model_name(feature_name: str, classifier_name: str) -> str:
@@ -434,6 +451,8 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     )
     train_plot_path = None
     test_plot_path = None
+    train_test_plot_path = None
+    train_test_png_path = None
     if not args.no_metrics_plots:
         train_plot_path = (
             Path(args.train_metrics_plot_out)
@@ -444,6 +463,16 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
             Path(args.test_metrics_plot_out)
             if args.test_metrics_plot_out
             else default_plot_path(test_summary_path)
+        )
+        train_test_plot_path = (
+            Path(args.train_test_metrics_plot_out)
+            if args.train_test_metrics_plot_out
+            else default_combined_plot_path(train_plot_path)
+        )
+        train_test_png_path = (
+            Path(args.train_test_metrics_png_out)
+            if args.train_test_metrics_png_out
+            else default_png_plot_path(train_test_plot_path)
         )
 
     # Prepare to write to output paths
@@ -456,6 +485,10 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         reset_output_file(train_plot_path, append_results=False)
     if test_plot_path is not None:
         reset_output_file(test_plot_path, append_results=False)
+    if train_test_plot_path is not None:
+        reset_output_file(train_test_plot_path, append_results=False)
+    if train_test_png_path is not None:
+        reset_output_file(train_test_png_path, append_results=False)
 
     output_paths = OutputPaths(
         predictions_path=predictions_path,
@@ -465,6 +498,8 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         test_summary_path=test_summary_path,
         train_plot_path=train_plot_path,
         test_plot_path=test_plot_path,
+        train_test_plot_path=train_test_plot_path,
+        train_test_png_path=train_test_png_path,
     )
 
     return output_paths
@@ -564,6 +599,18 @@ def main() -> None:
             plot_path=output_paths.test_plot_path,
             split_name="test",
         )
+    if output_paths.train_test_plot_path is not None:
+        plot_train_test_metrics_summary(
+            train_summary_path=output_paths.train_summary_path,
+            test_summary_path=output_paths.test_summary_path,
+            plot_path=output_paths.train_test_plot_path,
+        )
+    if output_paths.train_test_png_path is not None:
+        plot_train_test_metrics_summary_png(
+            train_summary_path=output_paths.train_summary_path,
+            test_summary_path=output_paths.test_summary_path,
+            plot_path=output_paths.train_test_png_path,
+        )
 
     log_message = (
         f"\nTrain metric summary\n{train_summary_df.to_string(index=False)}"
@@ -585,6 +632,16 @@ def main() -> None:
         log_message = (
             f"{log_message}\nSaved test metric plot to: "
             f"{output_paths.test_plot_path}"
+        )
+    if output_paths.train_test_plot_path is not None:
+        log_message = (
+            f"{log_message}\nSaved train/test metric plot to: "
+            f"{output_paths.train_test_plot_path}"
+        )
+    if output_paths.train_test_png_path is not None:
+        log_message = (
+            f"{log_message}\nSaved train/test metric PNG to: "
+            f"{output_paths.train_test_png_path}"
         )
 
     LOGGER.info(log_message)
