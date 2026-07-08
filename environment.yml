@@ -38,6 +38,7 @@ dependencies:
   # Utilities
   - pyyaml
   - requests
+  - pytest
 
   # Protein language model packages
   - pip

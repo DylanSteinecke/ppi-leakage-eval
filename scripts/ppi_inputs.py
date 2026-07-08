@@ -44,6 +44,18 @@ def read_fasta(sequences_path: str | Path) -> dict[str, str]:
     current_id = None
     chunks = []
 
+    def save_current_record() -> None:
+        """
+        Save the current FASTA record after checking it has sequence text.
+        """
+        if current_id is None:
+            return
+        if not chunks:
+            raise ValueError(
+                f"FASTA record '{current_id}' has no sequence.")
+
+        sequences[current_id] = "".join(chunks)
+
     with Path(sequences_path).open("r", encoding="utf-8") as fin:
         for line in fin:
             line = line.strip()
@@ -51,16 +63,25 @@ def read_fasta(sequences_path: str | Path) -> dict[str, str]:
                 continue
 
             if line.startswith(">"):
-                if current_id is not None:
-                    sequences[current_id] = "".join(chunks)
+                save_current_record()
 
-                current_id = line[1:].split()[0]
+                header_parts = line[1:].split()
+                if not header_parts:
+                    raise ValueError(
+                        "FASTA record header is missing a sequence ID.")
+
+                current_id = header_parts[0]
+                if current_id in sequences:
+                    raise ValueError(
+                        f"Duplicate FASTA sequence ID: {current_id}")
                 chunks = []
             else:
+                if current_id is None:
+                    raise ValueError(
+                        "FASTA sequence line found before any header.")
                 chunks.append(line)
 
-    if current_id is not None:
-        sequences[current_id] = "".join(chunks)
+    save_current_record()
 
     return sequences
 
@@ -122,7 +143,7 @@ def validate_pair_ids(protein_pairs: pd.DataFrame) -> None:
 
 def drop_pairs_missing_sequences(
         protein_pairs: pd.DataFrame, sequences: dict[str, str],
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Drop rows where either protein is absent from the FASTA sequences.
     """
@@ -131,9 +152,13 @@ def drop_pairs_missing_sequences(
     has_protein_b = protein_pairs["protein_b"].isin(sequence_ids)
     keep_mask = has_protein_a & has_protein_b
     n_dropped = int((~keep_mask).sum())
+    dropped_columns = ["source_row_index", "drop_reason"]
+    if "pair_id" in protein_pairs.columns:
+        dropped_columns.append("pair_id")
 
     if n_dropped == 0:
         filtered_pairs = protein_pairs
+        dropped_pairs = pd.DataFrame(columns=dropped_columns)
     else:
         missing_a = protein_pairs.loc[
             ~has_protein_a, "protein_a"].dropna().unique()
@@ -151,20 +176,31 @@ def drop_pairs_missing_sequences(
         )
         LOGGER.warning(warning_message)
         filtered_pairs = protein_pairs.loc[keep_mask].copy()
+        dropped_pairs = protein_pairs.loc[~keep_mask].copy()
+        dropped_pairs["drop_reason"] = "missing_both_sequences"
+        dropped_pairs.loc[
+            (~has_protein_a) & has_protein_b,
+            "drop_reason",
+        ] = "missing_protein_a_sequence"
+        dropped_pairs.loc[
+            has_protein_a & (~has_protein_b),
+            "drop_reason",
+        ] = "missing_protein_b_sequence"
+        dropped_pairs = dropped_pairs[dropped_columns]
 
     if filtered_pairs.empty:
         raise ValueError(
             "All pairs were dropped because one or both proteins are missing "
             "FASTA sequences.")
 
-    return filtered_pairs
+    return filtered_pairs, dropped_pairs
 
 
 def prepare_input_data(
         protein_pairs: pd.DataFrame, sequences: dict[str, str]
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Validate inputs early and return a label-normalized pairs dataframe.
+    Validate inputs early and return label-normalized pairs and dropped rows.
     """
     # Check for empty files
     if protein_pairs.empty:
@@ -182,13 +218,16 @@ def prepare_input_data(
     validate_pair_ids(prepared_pairs)
     prepared_pairs["label"] = normalize_labels(
         labels=prepared_pairs["label"], context="pairs.csv")
-    prepared_pairs = drop_pairs_missing_sequences(prepared_pairs, sequences)
+    prepared_pairs, dropped_pairs = drop_pairs_missing_sequences(
+        prepared_pairs,
+        sequences,
+    )
     prepared_pairs = prepared_pairs.reset_index(drop=True)
 
     # Check that the final usable data still has both labels
     validate_binary_labeling(
         labels=prepared_pairs["label"], context="pairs.csv")
-    return prepared_pairs
+    return prepared_pairs, dropped_pairs
 
 
 ####################
@@ -749,6 +788,7 @@ def load_or_make_split(
     """
     Load a pre-defined split or create one from the protein pairs.
     """
+    args.n_connected_components = None
     args.n_pruned_pairs = 0
     args.pruned_pair_fraction = 0.0
 

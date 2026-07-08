@@ -1107,10 +1107,14 @@ def plot_train_test_metrics_summary_png(
 
         axis.invert_yaxis()
 
-    for axis in axes:
+    for axis in axes[len(metric_specs):]:
+        axis.axis("off")
+
+    metric_axes = axes[:len(metric_specs)]
+    for axis in metric_axes:
         axis.set_yticks(y_positions)
-    axes[0].set_yticklabels(model_labels, fontsize=7)
-    for axis in axes[1:]:
+    metric_axes[0].set_yticklabels(model_labels, fontsize=7)
+    for axis in metric_axes[1:]:
         axis.tick_params(axis="y", labelleft=False)
 
     legend_handles = [

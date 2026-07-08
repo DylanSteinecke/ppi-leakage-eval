@@ -305,25 +305,6 @@ def get_component_sizes(
     return component_sizes
 
 
-def pair_capacity(component: list[str]) -> int:
-    """
-    Return the number of unique undirected pairs in one component.
-    """
-    n_proteins = len(component)
-    capacity = n_proteins * (n_proteins - 1) // 2
-
-    return capacity
-
-
-def get_total_pair_capacity(components: list[list[str]]) -> int:
-    """
-    Return the total number of within-component pairs that can be sampled.
-    """
-    total_capacity = sum(pair_capacity(component) for component in components)
-
-    return total_capacity
-
-
 def min_connected_pair_count(component_sizes: list[int]) -> int:
     """
     Return the minimum observed pairs needed to connect each component.
@@ -386,12 +367,11 @@ def validate_generation_args(args: argparse.Namespace) -> None:
         n_components=args.n_components,
         component_profile=args.component_profile,
     )
-    components = [
-        [f"P{protein_index:04d}" for protein_index in range(component_size)]
-        for component_size in component_sizes
-    ]
     min_pair_count = min_connected_pair_count(component_sizes)
-    total_capacity = get_total_pair_capacity(components)
+    total_capacity = sum(
+        component_size * (component_size - 1) // 2
+        for component_size in component_sizes
+    )
     if args.n_pairs < min_pair_count:
         raise ValueError(
             f"--n-pairs must be at least {min_pair_count} to keep each "

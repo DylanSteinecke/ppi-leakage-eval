@@ -10,6 +10,7 @@ in focused helper modules so future pipeline variants can reuse them.
 
 import argparse
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,17 @@ from ppi_results import (
     summarize_metrics,
     write_dataframe_threadsafe,
 )
+from ppi_splits import (
+    add_source_row_index,
+    compute_split_metadata,
+    DROPPED_PAIRS_FILENAME,
+    make_split_assignments,
+    SOURCE_ROW_INDEX_COLUMN,
+    SPLIT_ASSIGNMENTS_FILENAME,
+    SPLIT_METADATA_FILENAME,
+    SPLITS_DIRNAME,
+    write_split_artifacts,
+)
 
 FEATURELESS_FEATURE = "none"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -89,11 +101,44 @@ def positive_int(value: str) -> int:
     return parsed_value
 
 
+def finite_float(value: str) -> float:
+    """
+    Parse a finite float argparse value.
+    """
+    parsed_value = float(value)
+    if not math.isfinite(parsed_value):
+        raise argparse.ArgumentTypeError("value must be finite")
+
+    return parsed_value
+
+
+def positive_float(value: str) -> float:
+    """
+    Parse a positive float argparse value.
+    """
+    parsed_value = finite_float(value)
+    if parsed_value <= 0.0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+
+    return parsed_value
+
+
+def unit_interval(value: str) -> float:
+    """
+    Parse a float value between 0 and 1, inclusive.
+    """
+    parsed_value = finite_float(value)
+    if (parsed_value < 0.0) or (parsed_value > 1.0):
+        raise argparse.ArgumentTypeError("value must be between 0 and 1")
+
+    return parsed_value
+
+
 def proportion(value: str) -> float:
     """
     Parse a float proportion between 0 and 1.
     """
-    parsed_value = float(value)
+    parsed_value = finite_float(value)
     if (parsed_value <= 0.0) or (parsed_value >= 1.0):
         raise argparse.ArgumentTypeError("value must be between 0 and 1")
 
@@ -104,7 +149,7 @@ def nonnegative_proportion(value: str) -> float:
     """
     Parse a float proportion between 0 and 1, inclusive of 0 only.
     """
-    parsed_value = float(value)
+    parsed_value = finite_float(value)
     if (parsed_value < 0.0) or (parsed_value >= 1.0):
         raise argparse.ArgumentTypeError("value must be at least 0 and less than 1")
 
@@ -169,9 +214,10 @@ def argument_parser() -> argparse.Namespace:
     feature_group.add_argument(
         "--features", choices=FEATURE_CHOICES, nargs="+", default=["tfidf"],
         help="One or more feature types to concatenate")
-    feature_group.add_argument("--k", type=int, default=3, help="k-mer size")
-    feature_group.add_argument("--bm25-k1", type=float, default=1.5)
-    feature_group.add_argument("--bm25-b", type=float, default=0.75)
+    feature_group.add_argument("--k", type=positive_int, default=3,
+                               help="k-mer size")
+    feature_group.add_argument("--bm25-k1", type=positive_float, default=1.5)
+    feature_group.add_argument("--bm25-b", type=unit_interval, default=0.75)
 
     # Model args
     model_group = parser.add_argument_group("Models")
@@ -182,7 +228,7 @@ def argument_parser() -> argparse.Namespace:
 
     # Training args
     training_group = parser.add_argument_group("Training")
-    training_group.add_argument("--max-iter", type=int, default=1000)
+    training_group.add_argument("--max-iter", type=positive_int, default=1000)
     training_group.add_argument(
         "--train-size", type=proportion, default=0.80,
         help="Fraction of pairs assigned to the training set")
@@ -252,10 +298,14 @@ class OutputPaths:
     """
     run_dir: Path
     plots_dir: Path
+    splits_dir: Path
     predictions_path: Path | None
     train_metrics_path: Path
     val_metrics_path: Path | None
     test_metrics_path: Path | None
+    split_assignments_path: Path
+    dropped_pairs_path: Path
+    split_metadata_path: Path
     train_summary_path: Path
     val_summary_path: Path | None
     test_summary_path: Path | None
@@ -332,6 +382,19 @@ def make_metrics_df(
     )
 
     return metrics_df
+
+
+def reset_output_files(
+        output_paths: list[Path | None], append_results: bool,
+    ) -> None:
+    """
+    Reset all non-empty output paths with one append policy.
+    """
+    for output_path in filter(None, output_paths):
+        reset_output_file(
+            output_path,
+            append_results=append_results,
+        )
 
 
 def train_and_evaluate_model_run(
@@ -433,14 +496,19 @@ def train_and_evaluate_model_run(
         )
 
         # Define the predictions table
-        predictions_df = test_df[["protein_a", "protein_b", "label"]].copy()
+        predictions_df = test_df[[
+            SOURCE_ROW_INDEX_COLUMN,
+            "protein_a",
+            "protein_b",
+            "label",
+        ]].copy()
         predictions_df.insert(0, "execution_id", execution_id)
         predictions_df.insert(1, "model_name", model_name)
         predictions_df.insert(2, "run_number", run_number)
         predictions_df.insert(3, "model_seed", model_seed)
-        predictions_df.insert(4, "features", feature_meta["features"])
-        predictions_df.insert(5, "classifier", classifier_name)
-        predictions_df.insert(6, "k", feature_meta["k"])
+        predictions_df.insert(5, "features", feature_meta["features"])
+        predictions_df.insert(6, "classifier", classifier_name)
+        predictions_df.insert(7, "k", feature_meta["k"])
         predictions_df["pred_score"] = y_test_score
         predictions_df["pred_label"] = y_test_pred
 
@@ -482,13 +550,15 @@ def run_model_reruns(
             )
         )
         # Save performance and prediction results
-        append_dataframe(train_metrics_df, output_paths.train_metrics_path)
-        if val_metrics_df is not None and output_paths.val_metrics_path is not None:
-            append_dataframe(val_metrics_df, output_paths.val_metrics_path)
-        if test_metrics_df is not None and output_paths.test_metrics_path is not None:
-            append_dataframe(test_metrics_df, output_paths.test_metrics_path)
-        if predictions_df is not None and output_paths.predictions_path is not None:
-            append_dataframe(predictions_df, output_paths.predictions_path)
+        output_dfs = (
+            (train_metrics_df, output_paths.train_metrics_path),
+            (val_metrics_df, output_paths.val_metrics_path),
+            (test_metrics_df, output_paths.test_metrics_path),
+            (predictions_df, output_paths.predictions_path),
+        )
+        for output_df, output_path in output_dfs:
+            if output_df is not None and output_path is not None:
+                append_dataframe(output_df, output_path)
         LOGGER.info(
             f"Finished model={model_name} "
             f"run={run_number}/{args.num_reruns}"
@@ -501,13 +571,18 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     """
     run_dir = Path(args.run_dir)
     plots_dir = run_dir / PLOTS_DIRNAME
+    splits_dir = run_dir / SPLITS_DIRNAME
     run_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
+    splits_dir.mkdir(parents=True, exist_ok=True)
 
     all_predictions_path = run_dir / PREDICTIONS_FILENAME
     train_metrics_path = run_dir / TRAIN_METRICS_FILENAME
     all_val_metrics_path = run_dir / VAL_METRICS_FILENAME
     all_test_metrics_path = run_dir / TEST_METRICS_FILENAME
+    split_assignments_path = splits_dir / SPLIT_ASSIGNMENTS_FILENAME
+    dropped_pairs_path = splits_dir / DROPPED_PAIRS_FILENAME
+    split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
     train_summary_path = run_dir / TRAIN_SUMMARY_FILENAME
     all_val_summary_path = run_dir / VAL_SUMMARY_FILENAME
     all_test_summary_path = run_dir / TEST_SUMMARY_FILENAME
@@ -585,51 +660,60 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
             comparison_split_name="test",
         ).values(),
     ]
+    all_split_artifact_paths = [
+        split_assignments_path,
+        dropped_pairs_path,
+        split_metadata_path,
+    ]
+    active_metric_prediction_paths = [
+        train_metrics_path,
+        val_metrics_path,
+        predictions_path,
+        test_metrics_path,
+    ]
+    active_summary_plot_paths = [
+        train_summary_path,
+        val_summary_path,
+        test_summary_path,
+        train_plot_path,
+        val_plot_path,
+        test_plot_path,
+        train_val_plot_path,
+        train_val_png_path,
+        train_val_f1_heatmap_path,
+        train_test_plot_path,
+        train_test_png_path,
+        train_test_f1_heatmap_path,
+    ]
     if not args.append_results:
-        for output_path in (
-                all_metric_prediction_paths
-                + all_summary_plot_paths
-                + legacy_heatmap_paths):
-            reset_output_file(output_path, append_results=False)
-
-    reset_output_file(train_metrics_path, append_results=args.append_results)
-    if val_metrics_path is not None:
-        reset_output_file(val_metrics_path, append_results=args.append_results)
-    if predictions_path is not None:
-        reset_output_file(predictions_path, append_results=args.append_results)
-    if test_metrics_path is not None:
-        reset_output_file(test_metrics_path, append_results=args.append_results)
-    reset_output_file(train_summary_path, append_results=False)
-    if val_summary_path is not None:
-        reset_output_file(val_summary_path, append_results=False)
-    if test_summary_path is not None:
-        reset_output_file(test_summary_path, append_results=False)
-    if train_plot_path is not None:
-        reset_output_file(train_plot_path, append_results=False)
-    if val_plot_path is not None:
-        reset_output_file(val_plot_path, append_results=False)
-    if test_plot_path is not None:
-        reset_output_file(test_plot_path, append_results=False)
-    if train_val_plot_path is not None:
-        reset_output_file(train_val_plot_path, append_results=False)
-    if train_val_png_path is not None:
-        reset_output_file(train_val_png_path, append_results=False)
-    if train_val_f1_heatmap_path is not None:
-        reset_output_file(train_val_f1_heatmap_path, append_results=False)
-    if train_test_plot_path is not None:
-        reset_output_file(train_test_plot_path, append_results=False)
-    if train_test_png_path is not None:
-        reset_output_file(train_test_png_path, append_results=False)
-    if train_test_f1_heatmap_path is not None:
-        reset_output_file(train_test_f1_heatmap_path, append_results=False)
+        reset_output_files(
+            all_metric_prediction_paths
+            + all_summary_plot_paths
+            + all_split_artifact_paths
+            + legacy_heatmap_paths,
+            append_results=False,
+        )
+    else:
+        reset_output_files(
+            active_metric_prediction_paths,
+            append_results=True,
+        )
+        reset_output_files(
+            active_summary_plot_paths,
+            append_results=False,
+        )
 
     output_paths = OutputPaths(
         run_dir=run_dir,
         plots_dir=plots_dir,
+        splits_dir=splits_dir,
         predictions_path=predictions_path,
         train_metrics_path=train_metrics_path,
         val_metrics_path=val_metrics_path,
         test_metrics_path=test_metrics_path,
+        split_assignments_path=split_assignments_path,
+        dropped_pairs_path=dropped_pairs_path,
+        split_metadata_path=split_metadata_path,
         train_summary_path=train_summary_path,
         val_summary_path=val_summary_path,
         test_summary_path=test_summary_path,
@@ -656,8 +740,13 @@ def main() -> None:
 
     # Load and process input data
     protein_pairs = pd.read_csv(args.pairs)
+    protein_pairs = add_source_row_index(protein_pairs)
+    n_input_pairs_before_filtering = len(protein_pairs)
     sequences = read_fasta(args.fasta)
-    protein_pairs = prepare_input_data(protein_pairs, sequences)
+    protein_pairs, dropped_pairs = prepare_input_data(
+        protein_pairs,
+        sequences,
+    )
 
     # Split into train/validation/test sets
     train_df, val_df, test_df = load_or_make_split(protein_pairs, args)
@@ -669,6 +758,32 @@ def main() -> None:
     # Prepare to run the models
     execution_id = args.execution_id or uuid.uuid4().hex
     output_paths = prepare_outputs(args)
+    split_assignments = make_split_assignments(
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+    )
+    split_metadata = compute_split_metadata(
+        args=args,
+        output_paths=output_paths,
+        protein_pairs=protein_pairs,
+        dropped_pairs=dropped_pairs,
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+        execution_id=execution_id,
+        n_input_pairs_before_filtering=n_input_pairs_before_filtering,
+    )
+    try:
+        write_split_artifacts(
+            split_assignments=split_assignments,
+            dropped_pairs=dropped_pairs,
+            split_metadata=split_metadata,
+            output_paths=output_paths,
+            append_results=args.append_results,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
     # Define the model configurations to run
     baseline_classifiers = [
@@ -738,38 +853,28 @@ def main() -> None:
         if output_paths.test_metrics_path is not None
         else None
     )
-    write_dataframe_threadsafe(
-        train_summary_df,
-        output_paths.train_summary_path,
+    summary_outputs = (
+        (train_summary_df, output_paths.train_summary_path),
+        (val_summary_df, output_paths.val_summary_path),
+        (test_summary_df, output_paths.test_summary_path),
     )
-    if val_summary_df is not None and output_paths.val_summary_path is not None:
-        write_dataframe_threadsafe(
-            val_summary_df,
-            output_paths.val_summary_path,
-        )
-    if test_summary_df is not None and output_paths.test_summary_path is not None:
-        write_dataframe_threadsafe(
-            test_summary_df,
-            output_paths.test_summary_path,
-        )
-    if output_paths.train_plot_path is not None:
-        plot_metrics_summary(
-            summary_path=output_paths.train_summary_path,
-            plot_path=output_paths.train_plot_path,
-            split_name="train",
-        )
-    if output_paths.val_plot_path is not None:
-        plot_metrics_summary(
-            summary_path=output_paths.val_summary_path,
-            plot_path=output_paths.val_plot_path,
-            split_name="val",
-        )
-    if output_paths.test_plot_path is not None:
-        plot_metrics_summary(
-            summary_path=output_paths.test_summary_path,
-            plot_path=output_paths.test_plot_path,
-            split_name="test",
-        )
+    for summary_df, summary_path in summary_outputs:
+        if summary_df is not None and summary_path is not None:
+            write_dataframe_threadsafe(summary_df, summary_path)
+
+    summary_plot_outputs = (
+        (output_paths.train_summary_path, output_paths.train_plot_path,
+         "train"),
+        (output_paths.val_summary_path, output_paths.val_plot_path, "val"),
+        (output_paths.test_summary_path, output_paths.test_plot_path, "test"),
+    )
+    for summary_path, plot_path, split_name in summary_plot_outputs:
+        if summary_path is not None and plot_path is not None:
+            plot_metrics_summary(
+                summary_path=summary_path,
+                plot_path=plot_path,
+                split_name=split_name,
+            )
     train_val_f1_heatmap_paths = {}
     if output_paths.train_val_plot_path is not None:
         plot_train_test_metrics_summary(
