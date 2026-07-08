@@ -13,6 +13,7 @@ NUM_RERUNS="${NUM_RERUNS:-5}"
 MAX_ITER="${MAX_ITER:-10000}"
 TRAIN_SIZE="${TRAIN_SIZE:-0.80}"
 EXECUTION_ID="${EXECUTION_ID:-all_models_$(date +%Y%m%d_%H%M%S)}"
+RUN_STAMP="${RUN_STAMP:-$(date +%m-%d-%y__%H:%M:%S)}"
 USER_ARGS=("$@")
 SPLIT_STRATEGIES=(
     random
@@ -25,16 +26,6 @@ FEATURE_SETS=(
     bm25
     count
     binary
-    "tfidf bm25"
-    "tfidf count"
-    "tfidf binary"
-    "bm25 count"
-    "bm25 binary"
-    "count binary"
-    "tfidf bm25 count"
-    "tfidf bm25 binary"
-    "tfidf count binary"
-    "bm25 count binary"
     "tfidf bm25 count binary"
 )
 LEARNED_CLASSIFIERS=(
@@ -49,50 +40,33 @@ BASELINE_CLASSIFIERS=(
 
 mkdir -p "$OUT_DIR"
 
-the_date=$(date +%m-%d-%y__%H:%M:%S)
-
 for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     STRATEGY_EXECUTION_ID="${EXECUTION_ID}__${split_strategy}"
-    RUN_SUFFIX="${split_strategy}_${the_date}"
-
-    PRED_OUT="$OUT_DIR/predictions_all_${RUN_SUFFIX}.csv"
-    TRAIN_METRICS_OUT="$OUT_DIR/train_metrics_runs_${RUN_SUFFIX}.csv"
-    TEST_METRICS_OUT="$OUT_DIR/test_metrics_runs_${RUN_SUFFIX}.csv"
-    TRAIN_SUMMARY_OUT="$OUT_DIR/train_metrics_summary_${RUN_SUFFIX}.csv"
-    TEST_SUMMARY_OUT="$OUT_DIR/test_metrics_summary_${RUN_SUFFIX}.csv"
-    TRAIN_PLOT_OUT="$OUT_DIR/train_metrics_summary_${RUN_SUFFIX}.svg"
-    TEST_PLOT_OUT="$OUT_DIR/test_metrics_summary_${RUN_SUFFIX}.svg"
-
+    RUN_DIR="$OUT_DIR/${split_strategy}_${RUN_STAMP}"
     APPEND_ARGS=()
 
-    # Baseline classifiers
+    # Baselines create a fresh canonical run directory.
     "$PYTHON" scripts/train_test_ppi_pred.py \
         --pairs "$PAIRS" \
         --fasta "$FASTA" \
+        --run-dir "$RUN_DIR" \
         --classifier "${BASELINE_CLASSIFIERS[@]}" \
         --num-reruns "$NUM_RERUNS" \
         --max-iter "$MAX_ITER" \
         --train-size "$TRAIN_SIZE" \
         --split-strategy "$split_strategy" \
         --execution-id "$STRATEGY_EXECUTION_ID" \
-        --pred-out "$PRED_OUT" \
-        --train-metrics-out "$TRAIN_METRICS_OUT" \
-        --test-metrics-out "$TEST_METRICS_OUT" \
-        --train-metrics-summary-out "$TRAIN_SUMMARY_OUT" \
-        --test-metrics-summary-out "$TEST_SUMMARY_OUT" \
-        --train-metrics-plot-out "$TRAIN_PLOT_OUT" \
-        --test-metrics-plot-out "$TEST_PLOT_OUT" \
         "${USER_ARGS[@]}"
-
     APPEND_ARGS=(--append-results)
 
-    # Learned classifiers
+    # Learned classifiers append into the same canonical run directory.
     for feature_set in "${FEATURE_SETS[@]}"; do
         IFS=" " read -r -a FEATURE_ARGS <<< "$feature_set"
 
         "$PYTHON" scripts/train_test_ppi_pred.py \
             --pairs "$PAIRS" \
             --fasta "$FASTA" \
+            --run-dir "$RUN_DIR" \
             --features "${FEATURE_ARGS[@]}" \
             --classifier "${LEARNED_CLASSIFIERS[@]}" \
             --num-reruns "$NUM_RERUNS" \
@@ -100,26 +74,17 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
             --train-size "$TRAIN_SIZE" \
             --split-strategy "$split_strategy" \
             --execution-id "$STRATEGY_EXECUTION_ID" \
-            --pred-out "$PRED_OUT" \
-            --train-metrics-out "$TRAIN_METRICS_OUT" \
-            --test-metrics-out "$TEST_METRICS_OUT" \
-            --train-metrics-summary-out "$TRAIN_SUMMARY_OUT" \
-            --test-metrics-summary-out "$TEST_SUMMARY_OUT" \
-            --train-metrics-plot-out "$TRAIN_PLOT_OUT" \
-            --test-metrics-plot-out "$TEST_PLOT_OUT" \
             "${APPEND_ARGS[@]}" \
             "${USER_ARGS[@]}"
     done
 
     echo "Finished strategy: $split_strategy"
     echo "Execution ID: $STRATEGY_EXECUTION_ID"
-    echo "Train per-run metrics: $TRAIN_METRICS_OUT"
-    echo "Test per-run metrics: $TEST_METRICS_OUT"
-    echo "Train metric summary: $TRAIN_SUMMARY_OUT"
-    echo "Test metric summary: $TEST_SUMMARY_OUT"
-    echo "Train metric plot: $TRAIN_PLOT_OUT"
-    echo "Test metric plot: $TEST_PLOT_OUT"
-    echo "Predictions: $PRED_OUT"
+    echo "Run directory: $RUN_DIR"
+    echo "Metrics: $RUN_DIR/train_metrics.csv"
+    echo "Summaries: $RUN_DIR/*_metrics_summary.csv"
+    echo "Plots: $RUN_DIR/plots/"
+    echo "Predictions, when test is evaluated: $RUN_DIR/predictions.csv"
 done
 
 echo "Finished all runs for all split strategies."

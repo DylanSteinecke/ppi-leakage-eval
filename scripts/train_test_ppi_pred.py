@@ -41,10 +41,6 @@ from ppi_models import (
     make_classifier,
 )
 from ppi_plots import (
-    default_combined_plot_path,
-    default_f1_heatmap_path,
-    default_plot_path,
-    default_png_plot_path,
     legacy_f1_heatmap_output_paths,
     plot_metrics_summary,
     plot_train_test_f1_heatmap,
@@ -53,7 +49,6 @@ from ppi_plots import (
 )
 from ppi_results import (
     append_dataframe,
-    default_summary_path,
     reset_output_file,
     summarize_metrics,
     write_dataframe_threadsafe,
@@ -62,6 +57,23 @@ from ppi_results import (
 FEATURELESS_FEATURE = "none"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LOGGER = logging.getLogger(__name__)
+PLOTS_DIRNAME = "plots"
+PREDICTIONS_FILENAME = "predictions.csv"
+TRAIN_METRICS_FILENAME = "train_metrics.csv"
+VAL_METRICS_FILENAME = "val_metrics.csv"
+TEST_METRICS_FILENAME = "test_metrics.csv"
+TRAIN_SUMMARY_FILENAME = "train_metrics_summary.csv"
+VAL_SUMMARY_FILENAME = "val_metrics_summary.csv"
+TEST_SUMMARY_FILENAME = "test_metrics_summary.csv"
+TRAIN_PLOT_FILENAME = "train_metrics_summary.svg"
+VAL_PLOT_FILENAME = "val_metrics_summary.svg"
+TEST_PLOT_FILENAME = "test_metrics_summary.svg"
+TRAIN_VAL_PLOT_FILENAME = "train_val_metrics_summary.svg"
+TRAIN_VAL_PNG_FILENAME = "train_val_metrics_summary.png"
+TRAIN_VAL_F1_HEATMAP_FILENAME = "train_val_f1_heatmap.png"
+TRAIN_TEST_PLOT_FILENAME = "train_test_metrics_summary.svg"
+TRAIN_TEST_PNG_FILENAME = "train_test_metrics_summary.png"
+TRAIN_TEST_F1_HEATMAP_FILENAME = "train_test_f1_heatmap.png"
 
 
 #######
@@ -131,32 +143,13 @@ def argument_parser() -> argparse.Namespace:
     # Output data args
     output_group = parser.add_argument_group("Outputs")
     output_group.add_argument(
-        "--pred-out", default="predictions.csv",
-        help="CSV file for appended test-set predictions")
-    output_group.add_argument(
-        "--train-metrics-out", default="train_metrics.csv",
-        help="CSV file for appended train-set per-run metrics")
-    output_group.add_argument(
-        "--test-metrics-out", default="test_metrics.csv",
-        help="CSV file for appended test-set per-run metrics")
-    output_group.add_argument(
-        "--val-metrics-out", default="val_metrics.csv",
-        help="CSV file for appended validation-set per-run metrics")
-    output_group.add_argument(
-        "--train-metrics-summary-out", default=None,
-        help="CSV file for train metric means and standard errors. "
-            "Defaults to <train-metrics-out stem>_summary.csv.")
-    output_group.add_argument(
-        "--test-metrics-summary-out", default=None,
-        help="CSV file for test metric means and standard errors. "
-            "Defaults to <test-metrics-out stem>_summary.csv.")
-    output_group.add_argument(
-        "--val-metrics-summary-out", default=None,
-        help="CSV file for validation metric means and standard errors. "
-            "Defaults to <val-metrics-out stem>_summary.csv.")
+        "--run-dir", required=True,
+        help="Directory where canonical metrics, predictions, and plots are "
+            "written.")
     output_group.add_argument(
         "--append-results", action="store_true",
-        help="Append to existing output files instead of starting fresh.")
+        help="Append to existing metric/prediction CSVs in --run-dir instead "
+            "of starting fresh.")
     output_group.add_argument(
         "--execution-id", default=None,
         help="Optional identifier stored with each model run row.")
@@ -167,33 +160,9 @@ def argument_parser() -> argparse.Namespace:
     # Plot args
     plot_group = parser.add_argument_group("Plots")
     plot_group.add_argument(
-        "--train-metrics-plot-out", default=None,
-        help="SVG file for the train metrics plot. Defaults to "
-            "<train-metrics-summary-out stem>.svg.")
-    plot_group.add_argument(
-        "--test-metrics-plot-out", default=None,
-        help="SVG file for the test metrics plot. Defaults to "
-            "<test-metrics-summary-out stem>.svg.")
-    plot_group.add_argument(
-        "--val-metrics-plot-out", default=None,
-        help="SVG file for the validation metrics plot. Defaults to "
-            "<val-metrics-summary-out stem>.svg.")
-    plot_group.add_argument(
-        "--train-test-metrics-plot-out", default=None,
-        help="SVG file for the combined train/test metrics plot. Defaults "
-            "to a train_test_* companion next to the train metrics plot.")
-    plot_group.add_argument(
-        "--train-test-metrics-png-out", default=None,
-        help="PNG file for the combined train/test metrics plot. Defaults "
-            "to a .png companion next to the combined train/test SVG.")
-    plot_group.add_argument(
-        "--train-test-f1-heatmap-out", default=None,
-        help="PNG file for stacked train, test, and test-minus-train F1 "
-            "heatmaps. Defaults to a train_test_f1_heatmap_* companion "
-            "next to the combined plot.")
-    plot_group.add_argument(
         "--no-metrics-plots", action="store_true",
-        help="Do not create metrics summary plots.")
+        help="Do not create canonical metrics summary plots under "
+            "--run-dir/plots.")
 
     # Feature extraction args
     feature_group = parser.add_argument_group("Features")
@@ -281,13 +250,15 @@ class OutputPaths:
     """
     Pipeline output paths grouped by artifact type.
     """
-    predictions_path: Path
+    run_dir: Path
+    plots_dir: Path
+    predictions_path: Path | None
     train_metrics_path: Path
     val_metrics_path: Path | None
-    test_metrics_path: Path
+    test_metrics_path: Path | None
     train_summary_path: Path
     val_summary_path: Path | None
-    test_summary_path: Path
+    test_summary_path: Path | None
     train_plot_path: Path | None
     val_plot_path: Path | None
     test_plot_path: Path | None
@@ -514,9 +485,9 @@ def run_model_reruns(
         append_dataframe(train_metrics_df, output_paths.train_metrics_path)
         if val_metrics_df is not None and output_paths.val_metrics_path is not None:
             append_dataframe(val_metrics_df, output_paths.val_metrics_path)
-        if test_metrics_df is not None:
+        if test_metrics_df is not None and output_paths.test_metrics_path is not None:
             append_dataframe(test_metrics_df, output_paths.test_metrics_path)
-        if predictions_df is not None:
+        if predictions_df is not None and output_paths.predictions_path is not None:
             append_dataframe(predictions_df, output_paths.predictions_path)
         LOGGER.info(
             f"Finished model={model_name} "
@@ -526,29 +497,42 @@ def run_model_reruns(
 
 def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     """
-    Resolve and initialize output paths.
+    Resolve and initialize canonical output paths inside --run-dir.
     """
-    # Define output paths
-    predictions_path = Path(args.pred_out)
-    train_metrics_path = Path(args.train_metrics_out)
-    val_metrics_path = Path(args.val_metrics_out) if args.has_validation_split else None
-    test_metrics_path = Path(args.test_metrics_out)
-    train_summary_path = (
-        Path(args.train_metrics_summary_out)
-        if args.train_metrics_summary_out
-        else default_summary_path(train_metrics_path)
-    )
+    run_dir = Path(args.run_dir)
+    plots_dir = run_dir / PLOTS_DIRNAME
+    run_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    all_predictions_path = run_dir / PREDICTIONS_FILENAME
+    train_metrics_path = run_dir / TRAIN_METRICS_FILENAME
+    all_val_metrics_path = run_dir / VAL_METRICS_FILENAME
+    all_test_metrics_path = run_dir / TEST_METRICS_FILENAME
+    train_summary_path = run_dir / TRAIN_SUMMARY_FILENAME
+    all_val_summary_path = run_dir / VAL_SUMMARY_FILENAME
+    all_test_summary_path = run_dir / TEST_SUMMARY_FILENAME
+    all_train_plot_path = plots_dir / TRAIN_PLOT_FILENAME
+    all_val_plot_path = plots_dir / VAL_PLOT_FILENAME
+    all_test_plot_path = plots_dir / TEST_PLOT_FILENAME
+    all_train_val_plot_path = plots_dir / TRAIN_VAL_PLOT_FILENAME
+    all_train_val_png_path = plots_dir / TRAIN_VAL_PNG_FILENAME
+    all_train_val_f1_heatmap_path = plots_dir / TRAIN_VAL_F1_HEATMAP_FILENAME
+    all_train_test_plot_path = plots_dir / TRAIN_TEST_PLOT_FILENAME
+    all_train_test_png_path = plots_dir / TRAIN_TEST_PNG_FILENAME
+    all_train_test_f1_heatmap_path = (
+        plots_dir / TRAIN_TEST_F1_HEATMAP_FILENAME)
+
+    predictions_path = (
+        all_predictions_path if args.evaluate_test_metrics else None)
+    val_metrics_path = (
+        all_val_metrics_path if args.has_validation_split else None)
+    test_metrics_path = (
+        all_test_metrics_path if args.evaluate_test_metrics else None)
     val_summary_path = (
-        Path(args.val_metrics_summary_out)
-        if args.val_metrics_summary_out
-        else default_summary_path(val_metrics_path)
-    ) if val_metrics_path is not None else None
+        all_val_summary_path if args.has_validation_split else None)
     test_summary_path = (
-        Path(args.test_metrics_summary_out)
-        if args.test_metrics_summary_out
-        else default_summary_path(test_metrics_path)
-    )
-    train_plot_path = None
+        all_test_summary_path if args.evaluate_test_metrics else None)
+    train_plot_path = all_train_plot_path if not args.no_metrics_plots else None
     val_plot_path = None
     test_plot_path = None
     train_val_plot_path = None
@@ -558,59 +542,67 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     train_test_png_path = None
     train_test_f1_heatmap_path = None
     if not args.no_metrics_plots:
-        train_plot_path = (
-            Path(args.train_metrics_plot_out)
-            if args.train_metrics_plot_out
-            else default_plot_path(train_summary_path)
-        )
-        if val_summary_path is not None:
-            val_plot_path = (
-                Path(args.val_metrics_plot_out)
-                if args.val_metrics_plot_out
-                else default_plot_path(val_summary_path)
-            )
-            train_val_plot_path = default_combined_plot_path(
-                train_plot_path,
-                comparison_split_name="val",
-            )
-            train_val_png_path = default_png_plot_path(train_val_plot_path)
-            train_val_f1_heatmap_path = default_f1_heatmap_path(
-                train_val_png_path,
-                comparison_split_name="val",
-            )
+        if args.has_validation_split:
+            val_plot_path = all_val_plot_path
+            train_val_plot_path = all_train_val_plot_path
+            train_val_png_path = all_train_val_png_path
+            train_val_f1_heatmap_path = all_train_val_f1_heatmap_path
         if args.evaluate_test_metrics:
-            test_plot_path = (
-                Path(args.test_metrics_plot_out)
-                if args.test_metrics_plot_out
-                else default_plot_path(test_summary_path)
-            )
-            train_test_plot_path = (
-                Path(args.train_test_metrics_plot_out)
-                if args.train_test_metrics_plot_out
-                else default_combined_plot_path(train_plot_path)
-            )
-            train_test_png_path = (
-                Path(args.train_test_metrics_png_out)
-                if args.train_test_metrics_png_out
-                else default_png_plot_path(train_test_plot_path)
-            )
-            train_test_f1_heatmap_path = (
-                Path(args.train_test_f1_heatmap_out)
-                if args.train_test_f1_heatmap_out
-                else default_f1_heatmap_path(train_test_png_path)
-            )
+            test_plot_path = all_test_plot_path
+            train_test_plot_path = all_train_test_plot_path
+            train_test_png_path = all_train_test_png_path
+            train_test_f1_heatmap_path = all_train_test_f1_heatmap_path
 
-    # Prepare to write to output paths
+    # Clear stale canonical files on fresh runs. In append mode, preserve
+    # metric/prediction CSVs but always regenerate summaries and plots.
+    all_metric_prediction_paths = [
+        all_predictions_path,
+        train_metrics_path,
+        all_val_metrics_path,
+        all_test_metrics_path,
+    ]
+    all_summary_plot_paths = [
+        train_summary_path,
+        all_val_summary_path,
+        all_test_summary_path,
+        all_train_plot_path,
+        all_val_plot_path,
+        all_test_plot_path,
+        all_train_val_plot_path,
+        all_train_val_png_path,
+        all_train_val_f1_heatmap_path,
+        all_train_test_plot_path,
+        all_train_test_png_path,
+        all_train_test_f1_heatmap_path,
+    ]
+    legacy_heatmap_paths = [
+        *legacy_f1_heatmap_output_paths(
+            all_train_val_f1_heatmap_path,
+            comparison_split_name="val",
+        ).values(),
+        *legacy_f1_heatmap_output_paths(
+            all_train_test_f1_heatmap_path,
+            comparison_split_name="test",
+        ).values(),
+    ]
+    if not args.append_results:
+        for output_path in (
+                all_metric_prediction_paths
+                + all_summary_plot_paths
+                + legacy_heatmap_paths):
+            reset_output_file(output_path, append_results=False)
+
     reset_output_file(train_metrics_path, append_results=args.append_results)
     if val_metrics_path is not None:
         reset_output_file(val_metrics_path, append_results=args.append_results)
-    if args.evaluate_test_metrics:
+    if predictions_path is not None:
         reset_output_file(predictions_path, append_results=args.append_results)
+    if test_metrics_path is not None:
         reset_output_file(test_metrics_path, append_results=args.append_results)
     reset_output_file(train_summary_path, append_results=False)
     if val_summary_path is not None:
         reset_output_file(val_summary_path, append_results=False)
-    if args.evaluate_test_metrics:
+    if test_summary_path is not None:
         reset_output_file(test_summary_path, append_results=False)
     if train_plot_path is not None:
         reset_output_file(train_plot_path, append_results=False)
@@ -624,24 +616,16 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         reset_output_file(train_val_png_path, append_results=False)
     if train_val_f1_heatmap_path is not None:
         reset_output_file(train_val_f1_heatmap_path, append_results=False)
-        for heatmap_path in legacy_f1_heatmap_output_paths(
-                train_val_f1_heatmap_path,
-                comparison_split_name="val",
-            ).values():
-            reset_output_file(heatmap_path, append_results=False)
     if train_test_plot_path is not None:
         reset_output_file(train_test_plot_path, append_results=False)
     if train_test_png_path is not None:
         reset_output_file(train_test_png_path, append_results=False)
     if train_test_f1_heatmap_path is not None:
         reset_output_file(train_test_f1_heatmap_path, append_results=False)
-        for heatmap_path in legacy_f1_heatmap_output_paths(
-                train_test_f1_heatmap_path,
-                comparison_split_name="test",
-            ).values():
-            reset_output_file(heatmap_path, append_results=False)
 
     output_paths = OutputPaths(
+        run_dir=run_dir,
+        plots_dir=plots_dir,
         predictions_path=predictions_path,
         train_metrics_path=train_metrics_path,
         val_metrics_path=val_metrics_path,
@@ -751,7 +735,7 @@ def main() -> None:
     )
     test_summary_df = (
         summarize_metrics(output_paths.test_metrics_path)
-        if args.evaluate_test_metrics
+        if output_paths.test_metrics_path is not None
         else None
     )
     write_dataframe_threadsafe(
@@ -763,7 +747,7 @@ def main() -> None:
             val_summary_df,
             output_paths.val_summary_path,
         )
-    if test_summary_df is not None:
+    if test_summary_df is not None and output_paths.test_summary_path is not None:
         write_dataframe_threadsafe(
             test_summary_df,
             output_paths.test_summary_path,
