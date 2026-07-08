@@ -17,7 +17,10 @@ from sklearn.model_selection import train_test_split
 
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
 EXPECTED_LABEL_VALUES = {0, 1}
-EXPECTED_SPLIT_VALUES = {"train", "test"}
+EXPECTED_SPLIT_VALUES = {"train", "val", "test"}
+TRAIN_SPLIT = "train"
+VAL_SPLIT = "val"
+TEST_SPLIT = "test"
 PROVIDED_SPLIT_STRATEGY = "provided_column"
 RANDOM_SPLIT_STRATEGY = "random"
 PROTEIN_COMPONENT_SPLIT_STRATEGY = "protein_disjoint_components"
@@ -260,36 +263,93 @@ def validate_disjoint_proteins(
             f"Examples: {examples}")
 
 
+def validate_disjoint_splits(
+        split_dfs: dict[str, pd.DataFrame | None],
+    ) -> None:
+    """
+    Fail fast if any protein appears in more than one non-empty split.
+    """
+    protein_sets = {
+        split_name: protein_ids_in_pairs(split_df)
+        for split_name, split_df in split_dfs.items()
+        if split_df is not None and not split_df.empty
+    }
+    split_names = list(protein_sets)
+    for left_index, left_name in enumerate(split_names):
+        for right_name in split_names[left_index + 1:]:
+            overlap = protein_sets[left_name] & protein_sets[right_name]
+            if overlap:
+                examples = sorted(overlap)[:10]
+                raise ValueError(
+                    f"{left_name}/{right_name} split has {len(overlap)} "
+                    f"shared proteins. Examples: {examples}")
+
+
+def validate_splits(
+        train_df: pd.DataFrame, val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame,
+    ) -> None:
+    """
+    Validate non-empty split labels before feature construction and training.
+    """
+    split_dfs = {
+        TRAIN_SPLIT: train_df,
+        VAL_SPLIT: val_df,
+        TEST_SPLIT: test_df,
+    }
+    for split_name, split_df in split_dfs.items():
+        if split_df is not None and not split_df.empty:
+            validate_binary_labeling(
+                split_df["label"],
+                context=f"{split_name} split",
+            )
+
+
 def validate_train_test_splits(
         train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
     """
-    Validate split labels before feature construction and training.
+    Backward-compatible train/test split validator.
     """
-    validate_binary_labeling(train_df["label"], context="train split")
-    validate_binary_labeling(test_df["label"], context="test split")
+    validate_splits(train_df=train_df, val_df=None, test_df=test_df)
 
 
 def make_random_pair_split(
         pairs: pd.DataFrame, args: argparse.Namespace,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
     """
     Make a stratified random pair split.
     """
-    train_df, test_df = train_test_split(
-        pairs,
-        train_size=args.train_size,
-        random_state=args.seed,
-        stratify=pairs["label"],
-    )
+    if args.val_size == 0.0:
+        train_df, test_df = train_test_split(
+            pairs,
+            train_size=args.train_size,
+            random_state=args.seed,
+            stratify=pairs["label"],
+        )
+        val_df = None
+    else:
+        train_df, heldout_df = train_test_split(
+            pairs,
+            train_size=args.train_size,
+            random_state=args.seed,
+            stratify=pairs["label"],
+        )
+        relative_val_size = args.val_size / (1.0 - args.train_size)
+        val_df, test_df = train_test_split(
+            heldout_df,
+            train_size=relative_val_size,
+            random_state=args.seed + 1,
+            stratify=heldout_df["label"],
+        )
 
-    return train_df, test_df
+    return train_df, val_df, test_df
 
 
 def load_split_column(
-        pairs: pd.DataFrame, split_col: str,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        pairs: pd.DataFrame, split_col: str, val_size: float,
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
     """
-    Load train/test labels from a provided split column.
+    Load train/validation/test labels from a provided split column.
     """
     if split_col not in pairs.columns:
         raise ValueError(f"split_col '{split_col}' is not in pairs.csv.")
@@ -298,15 +358,22 @@ def load_split_column(
     unexpected_values = sorted(set(split_values) - EXPECTED_SPLIT_VALUES)
     if unexpected_values:
         raise ValueError(
-            f"split_col must contain only 'train' and 'test'. "
+            f"split_col must contain only 'train', 'val', and 'test'. "
             f"Found: {unexpected_values}")
 
-    train_df = pairs[split_values == "train"].copy()
-    test_df = pairs[split_values == "test"].copy()
+    train_df = pairs[split_values == TRAIN_SPLIT].copy()
+    val_df = pairs[split_values == VAL_SPLIT].copy()
+    test_df = pairs[split_values == TEST_SPLIT].copy()
     if len(train_df) == 0 or len(test_df) == 0:
         raise ValueError("split_col must contain 'train' & 'test' rows.")
+    if val_size > 0.0 and len(val_df) == 0:
+        raise ValueError(
+            "split_col must contain 'val' rows when --val-size is greater "
+            "than 0.")
+    if val_df.empty:
+        val_df = None
 
-    return train_df, test_df
+    return train_df, val_df, test_df
 
 
 def get_pair_component_ids(pairs: pd.DataFrame) -> pd.Series:
@@ -353,9 +420,57 @@ def choose_train_components(
     return train_components
 
 
+def choose_components_by_targets(
+        component_sizes: pd.Series, split_targets: dict[str, float],
+        seed: int,
+    ) -> dict[str, set[str]]:
+    """
+    Assign connected components to splits near requested row fractions.
+    """
+    total_rows = component_sizes.sum()
+    target_counts = {
+        split_name: total_rows * split_fraction
+        for split_name, split_fraction in split_targets.items()
+    }
+    component_items = list(component_sizes.items())
+    rng = random.Random(seed)
+    rng.shuffle(component_items)
+    component_items = sorted(
+        component_items,
+        key=lambda component_item: component_item[1],
+        reverse=True,
+    )
+
+    split_components = {
+        split_name: set()
+        for split_name in split_targets
+    }
+    split_counts = {
+        split_name: 0
+        for split_name in split_targets
+    }
+    for component_id, component_n_rows in component_items:
+        best_split = min(
+            split_targets,
+            key=lambda split_name: (
+                abs(
+                    split_counts[split_name]
+                    + component_n_rows
+                    - target_counts[split_name]
+                )
+                - abs(split_counts[split_name] - target_counts[split_name]),
+                split_counts[split_name] / max(target_counts[split_name], 1.0),
+            ),
+        )
+        split_components[best_split].add(component_id)
+        split_counts[best_split] += component_n_rows
+
+    return split_components
+
+
 def make_protein_component_split(
         pairs: pd.DataFrame, args: argparse.Namespace,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
     """
     Make a protein-disjoint split by assigning connected components.
     """
@@ -363,28 +478,52 @@ def make_protein_component_split(
     component_sizes = component_ids.value_counts(sort=False)
     n_components = len(component_sizes)
     args.n_connected_components = n_components
-    if n_components < 2:
+    n_required_splits = 3 if args.val_size > 0.0 else 2
+    if n_components < n_required_splits:
         n_pairs = len(pairs)
         n_proteins = len(protein_ids_in_pairs(pairs))
         largest_component_size = int(component_sizes.max())
         raise ValueError(
-            "protein_disjoint_components split requires at least two "
-            f"connected components. Found {n_components} connected "
-            f"component(s) across {n_pairs} pairs and {n_proteins} "
-            f"proteins. Largest component has {largest_component_size} "
-            "pairs, so assigning whole components would put every pair in "
-            "one split.")
+            "protein_disjoint_components split requires at least "
+            f"{n_required_splits} connected components for the requested "
+            f"splits. Found {n_components} connected component(s) across "
+            f"{n_pairs} pairs and {n_proteins} proteins. Largest component "
+            f"has {largest_component_size} pairs.")
 
-    train_components = choose_train_components(
-        component_sizes=component_sizes,
-        train_size=args.train_size,
-        seed=args.seed,
-    )
-    train_mask = component_ids.isin(train_components)
-    train_df = pairs.loc[train_mask].copy()
-    test_df = pairs.loc[~train_mask].copy()
+    if args.val_size == 0.0:
+        train_components = choose_train_components(
+            component_sizes=component_sizes,
+            train_size=args.train_size,
+            seed=args.seed,
+        )
+        train_mask = component_ids.isin(train_components)
+        train_df = pairs.loc[train_mask].copy()
+        val_df = None
+        test_df = pairs.loc[~train_mask].copy()
+    else:
+        split_targets = {
+            TRAIN_SPLIT: args.train_size,
+            VAL_SPLIT: args.val_size,
+            TEST_SPLIT: 1.0 - args.train_size - args.val_size,
+        }
+        split_components = choose_components_by_targets(
+            component_sizes=component_sizes,
+            split_targets=split_targets,
+            seed=args.seed,
+        )
+        train_df = pairs.loc[
+            component_ids.isin(split_components[TRAIN_SPLIT])].copy()
+        val_df = pairs.loc[
+            component_ids.isin(split_components[VAL_SPLIT])].copy()
+        test_df = pairs.loc[
+            component_ids.isin(split_components[TEST_SPLIT])].copy()
+        if train_df.empty or val_df.empty or test_df.empty:
+            raise ValueError(
+                "protein_disjoint_components split produced an empty train, "
+                "val, or test split. Try a different --seed, a larger "
+                "dataset, or a less extreme --train-size/--val-size.")
 
-    return train_df, test_df
+    return train_df, val_df, test_df
 
 
 ############################
@@ -404,6 +543,25 @@ def estimate_train_protein_fraction(train_size: float) -> float:
     train_protein_fraction = train_weight / (train_weight + test_weight)
 
     return train_protein_fraction
+
+
+def estimate_split_protein_fractions(
+        split_targets: dict[str, float],
+    ) -> dict[str, float]:
+    """
+    Estimate protein fractions for target retained pair fractions.
+    """
+    split_weights = {
+        split_name: split_fraction ** 0.5
+        for split_name, split_fraction in split_targets.items()
+    }
+    total_weight = sum(split_weights.values())
+    protein_fractions = {
+        split_name: split_weight / total_weight
+        for split_name, split_weight in split_weights.items()
+    }
+
+    return protein_fractions
 
 
 def choose_train_proteins(
@@ -429,52 +587,149 @@ def choose_train_proteins(
     return train_proteins
 
 
+def choose_proteins_by_targets(
+        pairs: pd.DataFrame, split_targets: dict[str, float], seed: int,
+    ) -> dict[str, set[str]]:
+    """
+    Assign proteins to train/validation/test groups.
+    """
+    proteins = sorted(protein_ids_in_pairs(pairs))
+    if len(proteins) < len(split_targets):
+        raise ValueError(
+            "protein_disjoint_prune_edges split requires at least one "
+            "protein per requested split.")
+
+    protein_fractions = estimate_split_protein_fractions(split_targets)
+    split_names = list(split_targets)
+    raw_counts = {
+        split_name: len(proteins) * protein_fractions[split_name]
+        for split_name in split_names
+    }
+    split_counts = {
+        split_name: max(1, int(raw_counts[split_name]))
+        for split_name in split_names
+    }
+    remaining_count = len(proteins) - sum(split_counts.values())
+    fractional_order = sorted(
+        split_names,
+        key=lambda split_name: raw_counts[split_name] % 1.0,
+        reverse=True,
+    )
+    order_index = 0
+    while remaining_count > 0:
+        split_counts[fractional_order[order_index % len(fractional_order)]] += 1
+        remaining_count -= 1
+        order_index += 1
+    while remaining_count < 0:
+        reducible_splits = [
+            split_name
+            for split_name in reversed(fractional_order)
+            if split_counts[split_name] > 1
+        ]
+        if not reducible_splits:
+            break
+        split_counts[reducible_splits[0]] -= 1
+        remaining_count += 1
+
+    rng = random.Random(seed)
+    rng.shuffle(proteins)
+    split_proteins = {}
+    start_index = 0
+    for split_name in split_names:
+        stop_index = start_index + split_counts[split_name]
+        split_proteins[split_name] = set(proteins[start_index:stop_index])
+        start_index = stop_index
+
+    return split_proteins
+
+
 def make_protein_prune_split(
         pairs: pd.DataFrame, args: argparse.Namespace,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
     """
     Make a protein-disjoint split by pruning train/test crossing pairs.
     """
-    train_proteins = choose_train_proteins(
-        pairs=pairs,
-        train_size=args.train_size,
-        seed=args.seed,
-    )
-    protein_a_is_train = pairs["protein_a"].isin(train_proteins)
-    protein_b_is_train = pairs["protein_b"].isin(train_proteins)
+    if args.val_size == 0.0:
+        train_proteins = choose_train_proteins(
+            pairs=pairs,
+            train_size=args.train_size,
+            seed=args.seed,
+        )
+        protein_a_is_train = pairs["protein_a"].isin(train_proteins)
+        protein_b_is_train = pairs["protein_b"].isin(train_proteins)
 
-    train_mask = protein_a_is_train & protein_b_is_train
-    test_mask = (~protein_a_is_train) & (~protein_b_is_train)
-    pruned_mask = ~(train_mask | test_mask)
+        train_mask = protein_a_is_train & protein_b_is_train
+        val_mask = pd.Series(False, index=pairs.index)
+        test_mask = (~protein_a_is_train) & (~protein_b_is_train)
+    else:
+        split_targets = {
+            TRAIN_SPLIT: args.train_size,
+            VAL_SPLIT: args.val_size,
+            TEST_SPLIT: 1.0 - args.train_size - args.val_size,
+        }
+        split_proteins = choose_proteins_by_targets(
+            pairs=pairs,
+            split_targets=split_targets,
+            seed=args.seed,
+        )
+        protein_a_split = {}
+        protein_b_split = {}
+        for split_name, split_protein_ids in split_proteins.items():
+            protein_a_split[split_name] = pairs["protein_a"].isin(
+                split_protein_ids)
+            protein_b_split[split_name] = pairs["protein_b"].isin(
+                split_protein_ids)
+
+        train_mask = (
+            protein_a_split[TRAIN_SPLIT] & protein_b_split[TRAIN_SPLIT])
+        val_mask = protein_a_split[VAL_SPLIT] & protein_b_split[VAL_SPLIT]
+        test_mask = protein_a_split[TEST_SPLIT] & protein_b_split[TEST_SPLIT]
+
+    pruned_mask = ~(train_mask | val_mask | test_mask)
     args.n_pruned_pairs = int(pruned_mask.sum())
     args.pruned_pair_fraction = args.n_pruned_pairs / len(pairs)
 
     train_df = pairs.loc[train_mask].copy()
+    val_df = pairs.loc[val_mask].copy() if args.val_size > 0.0 else None
     test_df = pairs.loc[test_mask].copy()
-    if train_df.empty or test_df.empty:
+    if args.val_size > 0.0:
+        has_empty_split = train_df.empty or test_df.empty or (
+            val_df is None or val_df.empty)
+        empty_message = "train, val, or test"
+    else:
+        has_empty_split = train_df.empty or test_df.empty
+        empty_message = "train or test"
+    if has_empty_split:
         raise ValueError(
-            "protein_disjoint_prune_edges split produced an empty train or "
-            "test split after pruning crossing pairs. Try a different "
-            "--seed, a larger dataset, or a less extreme --train-size.")
+            "protein_disjoint_prune_edges split produced an empty "
+            f"{empty_message} split after pruning crossing pairs. Try a "
+            "different --seed, a larger dataset, or a less extreme "
+            "--train-size/--val-size.")
 
-    return train_df, test_df
+    return train_df, val_df, test_df
 
 
 def log_split_summary(
-        train_df: pd.DataFrame, test_df: pd.DataFrame, args: argparse.Namespace,
+        train_df: pd.DataFrame, val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame, args: argparse.Namespace,
     ) -> None:
     """
-    Log target and realized train/test split sizes.
+    Log target and realized split sizes.
     """
-    n_total = len(train_df) + len(test_df)
+    n_val = 0 if val_df is None else len(val_df)
+    n_total = len(train_df) + n_val + len(test_df)
     actual_train_size = len(train_df) / n_total
+    actual_val_size = n_val / n_total
     actual_test_size = len(test_df) / n_total
     message = (
         f"Split strategy={args.effective_split_strategy}; "
         f"target train fraction={args.train_size:.3f}; "
+        f"target val fraction={args.val_size:.3f}; "
         f"actual train fraction={actual_train_size:.3f}; "
+        f"actual val fraction={actual_val_size:.3f}; "
         f"actual test fraction={actual_test_size:.3f}; "
-        f"train pairs={len(train_df)}; test pairs={len(test_df)}"
+        f"train pairs={len(train_df)}; val pairs={n_val}; "
+        f"test pairs={len(test_df)}"
     )
     if args.n_connected_components is not None:
         message = (
@@ -490,30 +745,42 @@ def log_split_summary(
 
 def load_or_make_split(
         pairs: pd.DataFrame, args: argparse.Namespace,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
     """
-    Load a pre-defined train/test split or create one from the protein pairs.
+    Load a pre-defined split or create one from the protein pairs.
     """
     args.n_pruned_pairs = 0
     args.pruned_pair_fraction = 0.0
 
-    # Load train/test split
+    # Load provided split labels
     if args.split_col:
-        train_df, test_df = load_split_column(pairs, args.split_col)
+        train_df, val_df, test_df = load_split_column(
+            pairs=pairs,
+            split_col=args.split_col,
+            val_size=args.val_size,
+        )
 
-    # Create a protein-disjoint train/test split
+    # Create a protein-disjoint split
     elif args.effective_split_strategy == PROTEIN_COMPONENT_SPLIT_STRATEGY:
-        train_df, test_df = make_protein_component_split(pairs, args)
-        validate_disjoint_proteins(train_df, test_df)
+        train_df, val_df, test_df = make_protein_component_split(pairs, args)
+        validate_disjoint_splits({
+            TRAIN_SPLIT: train_df,
+            VAL_SPLIT: val_df,
+            TEST_SPLIT: test_df,
+        })
 
-    # Create a protein-disjoint train/test split by pruning crossing pairs
+    # Create a protein-disjoint split by pruning crossing pairs
     elif args.effective_split_strategy == PROTEIN_PRUNE_SPLIT_STRATEGY:
-        train_df, test_df = make_protein_prune_split(pairs, args)
-        validate_disjoint_proteins(train_df, test_df)
+        train_df, val_df, test_df = make_protein_prune_split(pairs, args)
+        validate_disjoint_splits({
+            TRAIN_SPLIT: train_df,
+            VAL_SPLIT: val_df,
+            TEST_SPLIT: test_df,
+        })
 
-    # Create a random train/test split
+    # Create a random split
     else:
-        train_df, test_df = make_random_pair_split(pairs, args)
+        train_df, val_df, test_df = make_random_pair_split(pairs, args)
 
-    log_split_summary(train_df, test_df, args)
-    return train_df, test_df
+    log_split_summary(train_df, val_df, test_df, args)
+    return train_df, val_df, test_df

@@ -49,7 +49,7 @@ BASELINE_CLASSIFIERS=(
 
 mkdir -p "$OUT_DIR"
 
-the_date=$(date +%m-%d-%y__%H_%M_%S)
+the_date=$(date +%m-%d-%y__%H:%M:%S)
 
 for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     STRATEGY_EXECUTION_ID="${EXECUTION_ID}__${split_strategy}"

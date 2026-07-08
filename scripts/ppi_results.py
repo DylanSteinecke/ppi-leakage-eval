@@ -32,14 +32,18 @@ SUMMARY_GROUP_COLUMNS = (
     "bm25_b",
     "max_iter",
     "split_strategy",
+    "split_name",
     "split_seed",
     "target_train_size",
+    "target_val_size",
     "actual_train_size",
+    "actual_val_size",
     "actual_test_size",
     "n_connected_components",
     "n_pruned_pairs",
     "pruned_pair_fraction",
     "n_train",
+    "n_val",
     "n_test",
 )
 

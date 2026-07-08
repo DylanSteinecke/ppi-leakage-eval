@@ -39,6 +39,31 @@ TRAIN_STROKE = "#155A24"
 TEST_COLOR = "#E68619"
 TEST_STROKE = "#9A4F00"
 COMPARISON_LINE = "#A8A8A8"
+ARROW_HEAD_LENGTH = 8.0
+ARROW_HEAD_HALF_HEIGHT = 4.0
+ARROW_MARKER_GAP = 6.0
+FEATURE_ORDER = ("none", "tfidf", "bm25", "count", "binary")
+CLASSIFIER_ORDER = (
+    "logistic",
+    "linear_svm",
+    "sgd_logistic",
+    "always_positive",
+    "always_negative",
+)
+BASELINE_CLASSIFIERS = ("always_positive", "always_negative")
+CLASSIFIER_LABELS = {
+    "logistic": "Logistic",
+    "linear_svm": "Linear SVM",
+    "sgd_logistic": "SGD Logistic",
+    "always_positive": "Always Positive",
+    "always_negative": "Always Negative",
+}
+SPLIT_STRATEGY_LABELS = {
+    "random": "Random Split",
+    "protein_disjoint_components": "Disjoint Protein Split",
+    "protein_disjoint_prune_edges": "Disjoint Protein Pruned-Edge Split",
+    "provided_column": "Provided Split",
+}
 
 
 ################
@@ -53,16 +78,22 @@ def default_plot_path(summary_path: Path) -> Path:
     return plot_path
 
 
-def default_combined_plot_path(train_plot_path: Path) -> Path:
+def default_combined_plot_path(
+        train_plot_path: Path, comparison_split_name: str = "test",
+    ) -> Path:
     """
-    Build the default train/test comparison plot path.
+    Build the default train/comparison split plot path.
     """
     train_plot_path = Path(train_plot_path)
     if train_plot_path.name.startswith("train_"):
-        plot_name = f"train_test_{train_plot_path.name.removeprefix('train_')}"
+        plot_name = (
+            f"train_{comparison_split_name}_"
+            f"{train_plot_path.name.removeprefix('train_')}"
+        )
     else:
         plot_name = (
-            f"{train_plot_path.stem}_train_test{train_plot_path.suffix}")
+            f"{train_plot_path.stem}_train_{comparison_split_name}"
+            f"{train_plot_path.suffix}")
 
     plot_path = train_plot_path.with_name(plot_name)
 
@@ -76,6 +107,133 @@ def default_png_plot_path(svg_plot_path: Path) -> Path:
     plot_path = Path(svg_plot_path).with_suffix(".png")
 
     return plot_path
+
+
+def default_f1_heatmap_path(
+        train_test_plot_path: Path, comparison_split_name: str = "test",
+    ) -> Path:
+    """
+    Build the default stacked train/comparison F1 heatmap path.
+    """
+    train_test_plot_path = Path(train_test_plot_path)
+    prefix = f"train_{comparison_split_name}_metrics_summary_"
+    replacement = f"train_{comparison_split_name}_f1_heatmap_"
+    if train_test_plot_path.name.startswith(prefix):
+        plot_name = train_test_plot_path.name.replace(
+            prefix,
+            replacement,
+            1,
+        )
+    else:
+        plot_name = (
+            f"{train_test_plot_path.stem}_f1_heatmap"
+            f"{train_test_plot_path.suffix}"
+        )
+
+    plot_path = train_test_plot_path.with_name(plot_name).with_suffix(".png")
+
+    return plot_path
+
+
+def legacy_f1_heatmap_output_paths(
+        base_plot_path: Path, comparison_split_name: str = "test",
+    ) -> dict[str, Path]:
+    """
+    Return old per-panel output paths so stale files can be cleared.
+    """
+    base_plot_path = Path(base_plot_path)
+    output_dir = base_plot_path.parent
+    stem = base_plot_path.with_suffix("").name
+    prefix = f"train_{comparison_split_name}_f1_heatmap_"
+    if stem.startswith(prefix):
+        suffix = stem.removeprefix(prefix)
+        path_names = {
+            "train": f"train_f1_heatmap_{suffix}.png",
+            comparison_split_name: (
+                f"{comparison_split_name}_f1_heatmap_{suffix}.png"),
+            "difference": (
+                f"{comparison_split_name}_minus_train_f1_heatmap_"
+                f"{suffix}.png"),
+        }
+    else:
+        path_names = {
+            "train": f"{stem}_train.png",
+            comparison_split_name: f"{stem}_{comparison_split_name}.png",
+            "difference": f"{stem}_{comparison_split_name}_minus_train.png",
+        }
+
+    output_paths = {
+        variant: output_dir / path_name
+        for variant, path_name in path_names.items()
+    }
+
+    return output_paths
+
+
+def explicit_split_name(summary_df: pd.DataFrame) -> str | None:
+    """
+    Return a user-provided split name from a metrics summary table.
+    """
+    if "split_name" not in summary_df.columns:
+        return None
+
+    split_names = []
+    for split_name in summary_df["split_name"].dropna().unique():
+        clean_name = str(split_name).strip()
+        if clean_name:
+            split_names.append(clean_name)
+
+    if split_names:
+        label = " / ".join(split_names)
+    else:
+        label = None
+
+    return label
+
+
+def split_strategy_label(summary_df: pd.DataFrame) -> str | None:
+    """
+    Return a readable split-strategy label from a metrics summary table.
+    """
+    explicit_label = explicit_split_name(summary_df)
+    if explicit_label:
+        return explicit_label
+
+    if "split_strategy" not in summary_df.columns:
+        return None
+
+    split_flags = [
+        str(split_flag)
+        for split_flag in summary_df["split_strategy"].dropna().unique()
+    ]
+    if not split_flags:
+        return None
+
+    split_labels = [
+        SPLIT_STRATEGY_LABELS.get(
+            split_flag,
+            split_flag.replace("_", " ").title(),
+        )
+        for split_flag in sorted(split_flags)
+    ]
+    label = " / ".join(split_labels)
+
+    return label
+
+
+def title_with_split_strategy(
+        base_title: str, summary_df: pd.DataFrame,
+    ) -> str:
+    """
+    Prefix a plot title with the readable split strategy when available.
+    """
+    split_label = split_strategy_label(summary_df)
+    if split_label:
+        title = f"{split_label}: {base_title}"
+    else:
+        title = base_title
+
+    return title
 
 
 def available_metric_specs(
@@ -98,25 +256,27 @@ def available_metric_specs(
 
 
 def available_combined_metric_specs(
-        combined_df: pd.DataFrame,
+        combined_df: pd.DataFrame, comparison_split_name: str = "test",
     ) -> list[tuple[str, str, str, str, str]]:
     """
-    Return metrics that have train and test estimates in a combined table.
+    Return metrics that have train and comparison estimates in a table.
     """
     metric_specs = []
     for metric_name, metric_label in PLOT_METRICS:
         train_mean_column = f"{metric_name}_mean_train"
         train_se_column = f"{metric_name}_standard_error_train"
-        test_mean_column = f"{metric_name}_mean_test"
-        test_se_column = f"{metric_name}_standard_error_test"
+        comparison_mean_column = (
+            f"{metric_name}_mean_{comparison_split_name}")
+        comparison_se_column = (
+            f"{metric_name}_standard_error_{comparison_split_name}")
         if (
                 train_mean_column in combined_df.columns
-                and test_mean_column in combined_df.columns):
+                and comparison_mean_column in combined_df.columns):
             metric_specs.append((
                 train_mean_column,
                 train_se_column,
-                test_mean_column,
-                test_se_column,
+                comparison_mean_column,
+                comparison_se_column,
                 metric_label,
             ))
 
@@ -146,14 +306,14 @@ def sort_summary_for_plot(
 
 
 def sort_combined_summary_for_plot(
-        combined_df: pd.DataFrame,
+        combined_df: pd.DataFrame, comparison_split_name: str = "test",
     ) -> pd.DataFrame:
     """
-    Sort models so stronger test-set models appear near the top.
+    Sort models so stronger comparison-split models appear near the top.
     """
-    sort_column = "auprc_mean_test"
+    sort_column = f"auprc_mean_{comparison_split_name}"
     if sort_column not in combined_df.columns:
-        sort_column = "accuracy_mean_test"
+        sort_column = f"accuracy_mean_{comparison_split_name}"
     if sort_column not in combined_df.columns:
         sort_column = "auprc_mean_train"
     if sort_column not in combined_df.columns:
@@ -181,6 +341,89 @@ def clean_model_labels(summary_df: pd.DataFrame) -> list[str]:
     )
 
     return model_labels
+
+
+def clean_feature_name(value: object) -> str:
+    """
+    Return a stable feature-set name for plotting.
+    """
+    if pd.isna(value):
+        feature_name = "none"
+    else:
+        feature_name = str(value).strip() or "none"
+
+    return feature_name
+
+
+def feature_sort_key(feature_name: object) -> tuple:
+    """
+    Return a sort key that orders feature sets by complexity.
+    """
+    clean_name = clean_feature_name(feature_name)
+    if clean_name == "none":
+        sort_key = (0, -1, clean_name)
+    else:
+        feature_parts = clean_name.split("+")
+        part_order = tuple(
+            FEATURE_ORDER.index(feature_part)
+            if feature_part in FEATURE_ORDER
+            else len(FEATURE_ORDER)
+            for feature_part in feature_parts
+        )
+        sort_key = (len(feature_parts), part_order, clean_name)
+
+    return sort_key
+
+
+def clean_feature_label(feature_name: object) -> str:
+    """
+    Return a compact multi-line feature-set label.
+    """
+    clean_name = clean_feature_name(feature_name)
+    if clean_name == "none":
+        label = "none"
+    else:
+        label = "\n+".join(clean_name.split("+"))
+
+    return label
+
+
+def clean_classifier_name(value: object) -> str:
+    """
+    Return a stable classifier name for plotting.
+    """
+    if pd.isna(value):
+        classifier_name = "unknown"
+    else:
+        classifier_name = str(value).strip() or "unknown"
+
+    return classifier_name
+
+
+def classifier_sort_key(classifier_name: object) -> tuple:
+    """
+    Return a sort key for classifier rows.
+    """
+    clean_name = clean_classifier_name(classifier_name)
+    if clean_name in CLASSIFIER_ORDER:
+        sort_key = (CLASSIFIER_ORDER.index(clean_name), clean_name)
+    else:
+        sort_key = (len(CLASSIFIER_ORDER), clean_name)
+
+    return sort_key
+
+
+def clean_classifier_label(classifier_name: object) -> str:
+    """
+    Return a readable classifier label.
+    """
+    clean_name = clean_classifier_name(classifier_name)
+    label = CLASSIFIER_LABELS.get(
+        clean_name,
+        clean_name.replace("_", " ").title(),
+    )
+
+    return label
 
 
 def finite_or_none(value: object) -> float | None:
@@ -252,6 +495,33 @@ def svg_circle(
     return circle_element
 
 
+def svg_horizontal_arrow(
+        x1: float, y: float, x2: float, stroke: str, width: float = 1.8,
+    ) -> str:
+    """
+    Create a horizontal SVG arrow from x1 to x2.
+    """
+    delta = x2 - x1
+    if abs(delta) < ARROW_MARKER_GAP * 2.0 + ARROW_HEAD_LENGTH:
+        arrow = ""
+    else:
+        direction = 1.0 if delta > 0 else -1.0
+        start_x = x1 + direction * ARROW_MARKER_GAP
+        tip_x = x2 - direction * ARROW_MARKER_GAP
+        base_x = tip_x - direction * ARROW_HEAD_LENGTH
+        points = (
+            f"{tip_x:.1f},{y:.1f} "
+            f"{base_x:.1f},{y - ARROW_HEAD_HALF_HEIGHT:.1f} "
+            f"{base_x:.1f},{y + ARROW_HEAD_HALF_HEIGHT:.1f}"
+        )
+        arrow = "\n".join((
+            svg_line(start_x, y, base_x, y, stroke, width=width),
+            f'<polygon points="{points}" fill="{stroke}" />',
+        ))
+
+    return arrow
+
+
 def combined_summary_key_columns(
         train_summary_df: pd.DataFrame, test_summary_df: pd.DataFrame,
     ) -> list[str]:
@@ -267,6 +537,7 @@ def combined_summary_key_columns(
         "bm25_b",
         "max_iter",
         "split_strategy",
+        "split_name",
         "split_seed",
         "target_train_size",
         "actual_train_size",
@@ -293,9 +564,10 @@ def combined_summary_key_columns(
 
 def merge_train_test_summaries(
         train_summary_df: pd.DataFrame, test_summary_df: pd.DataFrame,
+        comparison_split_name: str = "test",
     ) -> pd.DataFrame:
     """
-    Align train and test summary rows by model configuration.
+    Align train and comparison summary rows by model configuration.
     """
     key_columns = combined_summary_key_columns(
         train_summary_df=train_summary_df,
@@ -307,10 +579,12 @@ def merge_train_test_summaries(
         test_plot_df,
         on=key_columns,
         how="outer",
-        suffixes=("_train", "_test"),
+        suffixes=("_train", f"_{comparison_split_name}"),
     )
     if combined_df.empty:
-        raise ValueError("No train/test summary rows could be aligned.")
+        raise ValueError(
+            f"No train/{comparison_split_name} summary rows could be "
+            "aligned.")
 
     return combined_df
 
@@ -361,6 +635,10 @@ def plot_metrics_summary(
     if summary_df.empty:
         raise ValueError(f"Metrics summary is empty: {summary_path}")
 
+    title = title_with_split_strategy(
+        base_title=f"Model performance on the {split_name} split",
+        summary_df=summary_df,
+    )
     metric_specs = available_metric_specs(summary_df)
     plot_df = sort_summary_for_plot(summary_df)
     model_labels = clean_model_labels(plot_df)
@@ -395,7 +673,7 @@ def plot_metrics_summary(
         svg_text(
             LEFT_MARGIN,
             34,
-            f"Model performance on the {split_name} split",
+            title,
             size=22,
             weight="700",
         ),
@@ -498,10 +776,10 @@ def plot_metrics_summary(
 
 def plot_train_test_metrics_summary(
         train_summary_path: str | Path, test_summary_path: str | Path,
-        plot_path: str | Path,
+        plot_path: str | Path, comparison_split_name: str = "test",
     ) -> None:
     """
-    Plot train and test metric estimates on the same model rows.
+    Plot train and comparison metric estimates on the same model rows.
     """
     train_summary_path = Path(train_summary_path)
     test_summary_path = Path(test_summary_path)
@@ -519,9 +797,21 @@ def plot_train_test_metrics_summary(
     combined_df = merge_train_test_summaries(
         train_summary_df=train_summary_df,
         test_summary_df=test_summary_df,
+        comparison_split_name=comparison_split_name,
     )
-    metric_specs = available_combined_metric_specs(combined_df)
-    plot_df = sort_combined_summary_for_plot(combined_df)
+    comparison_label = comparison_split_name.title()
+    title = title_with_split_strategy(
+        base_title=f"Train/{comparison_split_name} model performance",
+        summary_df=combined_df,
+    )
+    metric_specs = available_combined_metric_specs(
+        combined_df,
+        comparison_split_name=comparison_split_name,
+    )
+    plot_df = sort_combined_summary_for_plot(
+        combined_df,
+        comparison_split_name=comparison_split_name,
+    )
     model_labels = clean_model_labels(plot_df)
 
     n_models = len(plot_df)
@@ -554,21 +844,24 @@ def plot_train_test_metrics_summary(
         svg_text(
             LEFT_MARGIN,
             34,
-            "Train/test model performance",
+            title,
             size=22,
             weight="700",
         ),
         svg_text(
             LEFT_MARGIN,
             58,
-            "Green=train, orange=test; connectors show the train-test gap.",
+            (
+                f"Green=train, orange={comparison_split_name}; arrows point "
+                f"from train to {comparison_split_name}."
+            ),
             size=13,
             fill="#555555",
         ),
         svg_circle(legend_x, 32, 5.0, TRAIN_COLOR, TRAIN_STROKE),
         svg_text(legend_x + 12, 36, "Train", 12, fill="#444444"),
         svg_circle(legend_x + 72, 32, 5.0, TEST_COLOR, TEST_STROKE),
-        svg_text(legend_x + 84, 36, "Test", 12, fill="#444444"),
+        svg_text(legend_x + 84, 36, comparison_label, 12, fill="#444444"),
     ]
 
     for metric_idx, (
@@ -649,8 +942,14 @@ def plot_train_test_metrics_summary(
             if train_mean is not None and test_mean is not None:
                 train_x = estimate_to_x(train_mean, plot_x)
                 test_x = estimate_to_x(test_mean, plot_x)
-                svg_parts.append(svg_line(train_x, row_y, test_x, row_y,
-                                          COMPARISON_LINE, width=2.0))
+                svg_parts.append(
+                    svg_horizontal_arrow(
+                        train_x,
+                        row_y,
+                        test_x,
+                        COMPARISON_LINE,
+                    )
+                )
 
             add_estimate_marker(
                 svg_parts=svg_parts,
@@ -681,10 +980,10 @@ def plot_train_test_metrics_summary(
 
 def plot_train_test_metrics_summary_png(
         train_summary_path: str | Path, test_summary_path: str | Path,
-        plot_path: str | Path,
+        plot_path: str | Path, comparison_split_name: str = "test",
     ) -> None:
     """
-    Plot train and test metric estimates as a raster PNG image.
+    Plot train and comparison metric estimates as a raster PNG image.
     """
     import matplotlib
 
@@ -707,9 +1006,21 @@ def plot_train_test_metrics_summary_png(
     combined_df = merge_train_test_summaries(
         train_summary_df=train_summary_df,
         test_summary_df=test_summary_df,
+        comparison_split_name=comparison_split_name,
     )
-    metric_specs = available_combined_metric_specs(combined_df)
-    plot_df = sort_combined_summary_for_plot(combined_df)
+    comparison_label = comparison_split_name.title()
+    title = title_with_split_strategy(
+        base_title=f"Train/{comparison_split_name} model performance",
+        summary_df=combined_df,
+    )
+    metric_specs = available_combined_metric_specs(
+        combined_df,
+        comparison_split_name=comparison_split_name,
+    )
+    plot_df = sort_combined_summary_for_plot(
+        combined_df,
+        comparison_split_name=comparison_split_name,
+    )
     model_labels = clean_model_labels(plot_df)
 
     n_models = len(plot_df)
@@ -752,11 +1063,18 @@ def plot_train_test_metrics_summary_png(
             )
 
             if train_mean is not None and test_mean is not None:
-                axis.plot(
-                    [train_mean, test_mean],
-                    [y_position, y_position],
-                    color=COMPARISON_LINE,
-                    linewidth=1.6,
+                axis.annotate(
+                    "",
+                    xy=(test_mean, y_position),
+                    xytext=(train_mean, y_position),
+                    arrowprops={
+                        "arrowstyle": "->",
+                        "color": COMPARISON_LINE,
+                        "lw": 1.6,
+                        "shrinkA": 6.0,
+                        "shrinkB": 6.0,
+                        "mutation_scale": 9.5,
+                    },
                     zorder=1,
                 )
 
@@ -801,7 +1119,7 @@ def plot_train_test_metrics_summary_png(
             label="Train"),
         plt.Line2D(
             [0], [0], marker="o", linestyle="", color=TEST_COLOR,
-            label="Test"),
+            label=comparison_label),
     ]
     figure.legend(
         handles=legend_handles,
@@ -809,7 +1127,7 @@ def plot_train_test_metrics_summary_png(
         bbox_to_anchor=(0.985, 0.985),
     )
     figure.suptitle(
-        "Train/test model performance",
+        title,
         fontsize=18,
         fontweight="bold",
         x=0.02,
@@ -819,7 +1137,10 @@ def plot_train_test_metrics_summary_png(
     figure.text(
         0.02,
         0.966,
-        "Green=train, orange=test; connectors show the train-test gap.",
+        (
+            f"Green=train, orange={comparison_split_name}; arrows point "
+            f"from train to {comparison_split_name}."
+        ),
         fontsize=10,
         color="#555555",
     )
@@ -827,3 +1148,425 @@ def plot_train_test_metrics_summary_png(
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(plot_path, dpi=180)
     plt.close(figure)
+
+
+def plot_train_test_f1_heatmap(
+        train_summary_path: str | Path, test_summary_path: str | Path,
+        plot_path: str | Path, comparison_split_name: str = "test",
+    ) -> dict[str, Path]:
+    """
+    Plot train, comparison, and comparison-minus-train F1 heatmaps in one PNG.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+
+    train_summary_path = Path(train_summary_path)
+    test_summary_path = Path(test_summary_path)
+    plot_path = Path(plot_path)
+    if plot_path.suffix.lower() != ".png":
+        raise ValueError("F1 heatmap output path must end with '.png'.")
+
+    comparison_label = comparison_split_name.title()
+    train_summary_df = pd.read_csv(train_summary_path)
+    test_summary_df = pd.read_csv(test_summary_path)
+    if train_summary_df.empty:
+        raise ValueError(f"Train metrics summary is empty: {train_summary_path}")
+    if test_summary_df.empty:
+        raise ValueError(
+            f"{comparison_label} metrics summary is empty: "
+            f"{test_summary_path}")
+
+    combined_df = merge_train_test_summaries(
+        train_summary_df=train_summary_df,
+        test_summary_df=test_summary_df,
+        comparison_split_name=comparison_split_name,
+    )
+    required_columns = {
+        "classifier",
+        "features",
+        "f1_mean_train",
+        f"f1_mean_{comparison_split_name}",
+    }
+    missing_columns = required_columns - set(combined_df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Cannot plot F1 heatmaps; missing columns: {missing_columns}")
+
+    plot_df = combined_df.copy()
+    plot_df["classifier_plot"] = plot_df["classifier"].map(
+        clean_classifier_name)
+    plot_df["features_plot"] = plot_df["features"].map(clean_feature_name)
+
+    learned_classifiers = sorted(
+        {
+            row["classifier_plot"]
+            for _, row in plot_df.iterrows()
+            if (
+                row["features_plot"] != "none"
+                and row["classifier_plot"] not in BASELINE_CLASSIFIERS
+            )
+        },
+        key=classifier_sort_key,
+    )
+    learned_features = sorted(
+        {
+            row["features_plot"]
+            for _, row in plot_df.iterrows()
+            if row["features_plot"] != "none"
+        },
+        key=feature_sort_key,
+    )
+    baseline_classifiers = sorted(
+        {
+            row["classifier_plot"]
+            for _, row in plot_df.iterrows()
+            if (
+                row["features_plot"] == "none"
+                and row["classifier_plot"] in BASELINE_CLASSIFIERS
+            )
+        },
+        key=classifier_sort_key,
+    )
+    if not learned_classifiers and not baseline_classifiers:
+        raise ValueError("Cannot plot F1 heatmaps without classifiers.")
+
+    value_lookup = {
+        "train": {},
+        comparison_split_name: {},
+        "difference": {},
+    }
+    for _, row in plot_df.iterrows():
+        classifier_name = row["classifier_plot"]
+        feature_name = row["features_plot"]
+        value_key = (classifier_name, feature_name)
+        train_f1 = finite_or_none(row["f1_mean_train"])
+        comparison_f1 = finite_or_none(
+            row[f"f1_mean_{comparison_split_name}"])
+        if train_f1 is not None:
+            value_lookup["train"][value_key] = train_f1
+        if comparison_f1 is not None:
+            value_lookup[comparison_split_name][value_key] = comparison_f1
+        if train_f1 is not None and comparison_f1 is not None:
+            value_lookup["difference"][value_key] = comparison_f1 - train_f1
+
+    red_color_map = LinearSegmentedColormap.from_list(
+        "f1_reds",
+        ("#FFF5F0", "#FB6A4A", "#67000D"),
+    )
+    red_color_map.set_bad("#F2F2F2")
+    difference_color_map = LinearSegmentedColormap.from_list(
+        "f1_difference_reds",
+        ("#FFFFFF", "#FB6A4A", "#67000D"),
+    )
+    difference_color_map.set_bad("#F2F2F2")
+
+    finite_differences = [
+        value
+        for value in value_lookup["difference"].values()
+        if math.isfinite(value)
+    ]
+    difference_limit = max(
+        [abs(value) for value in finite_differences] + [0.05])
+
+    variant_specs = {
+        "train": {
+            "row_title": "Train F1",
+            "color_bar_label": "Training F1",
+            "color_map": red_color_map,
+            "vmin": 0.0,
+            "vmax": 1.0,
+            "norm": None,
+        },
+        comparison_split_name: {
+            "row_title": f"{comparison_label} F1",
+            "color_bar_label": f"{comparison_label} F1",
+            "color_map": red_color_map,
+            "vmin": 0.0,
+            "vmax": 1.0,
+            "norm": None,
+        },
+        "difference": {
+            "row_title": f"{comparison_label}-train F1",
+            "color_bar_label": f"|{comparison_label} F1 - Train F1|",
+            "color_map": difference_color_map,
+            "vmin": 0.0,
+            "vmax": difference_limit,
+            "norm": None,
+        },
+    }
+
+    baseline_features = ["none"] if baseline_classifiers else []
+    max_panel_rows = max(len(learned_classifiers), len(baseline_classifiers))
+    figure_width = max(
+        9.5,
+        0.72 * max(len(learned_features), 1)
+        + (3.2 if baseline_classifiers else 0.0)
+        + 4.2,
+    )
+    row_height = max(2.8, 0.62 * max_panel_rows + 1.45)
+    figure_height = max(8.5, row_height * 3 + 1.4)
+
+    def panel_values(
+            variant_name: str, row_names: list[str], column_names: list[str],
+        ) -> list[list[float]]:
+        """
+        Return a dense heatmap matrix for one panel.
+        """
+        values = [
+            [
+                value_lookup[variant_name].get(
+                    (row_name, column_name),
+                    float("nan"),
+                )
+                for column_name in column_names
+            ]
+            for row_name in row_names
+        ]
+
+        return values
+
+    def panel_color_values(
+            variant_name: str, values: list[list[float]],
+        ) -> list[list[float]]:
+        """
+        Return values used for cell color intensity.
+        """
+        if variant_name == "difference":
+            color_values = [
+                [
+                    abs(value) if math.isfinite(value) else float("nan")
+                    for value in row
+                ]
+                for row in values
+            ]
+        else:
+            color_values = values
+
+        return color_values
+
+    def add_heatmap_panel(
+            axis, variant_name: str, variant_spec: dict,
+            row_names: list[str], column_names: list[str], panel_title: str,
+            show_y_label: bool, y_tick_side: str = "left",
+            compact_row_labels: bool = False,
+        ):
+        """
+        Add one heatmap panel and return the image used for the color bar.
+        """
+        values = panel_values(variant_name, row_names, column_names)
+        color_values = panel_color_values(variant_name, values)
+        image = axis.imshow(
+            color_values,
+            cmap=variant_spec["color_map"],
+            vmin=variant_spec["vmin"],
+            vmax=variant_spec["vmax"],
+            norm=variant_spec["norm"],
+            aspect="equal",
+        )
+        axis.set_xlim(-0.5, len(column_names) - 0.5)
+        axis.set_ylim(len(row_names) - 0.5, -0.5)
+        axis.set_anchor("NW")
+
+        axis.set_title(panel_title, fontsize=11, fontweight="bold", pad=10)
+        axis.set_xticks(range(len(column_names)))
+        axis.set_xticklabels(
+            [clean_feature_label(feature_name) for feature_name in column_names],
+            fontsize=8,
+        )
+        axis.set_yticks(range(len(row_names)))
+        row_labels = [
+            clean_classifier_label(classifier_name)
+            for classifier_name in row_names
+        ]
+        if compact_row_labels:
+            row_labels = [
+                row_label.removeprefix("Always ")
+                for row_label in row_labels
+            ]
+        axis.set_yticklabels(
+            row_labels,
+            fontsize=10,
+            fontweight="bold",
+        )
+        axis.set_xlabel("Feature set", labelpad=12)
+        axis.set_ylabel("Classifier" if show_y_label else "", labelpad=12)
+        if y_tick_side == "right":
+            axis.yaxis.tick_right()
+            axis.tick_params(
+                axis="y",
+                labelleft=False,
+                labelright=True,
+                pad=6,
+            )
+        if len(column_names) > 1:
+            axis.set_xticks(
+                [
+                    column_index - 0.5
+                    for column_index in range(1, len(column_names))
+                ],
+                minor=True,
+            )
+        if len(row_names) > 1:
+            axis.set_yticks(
+                [
+                    row_index - 0.5
+                    for row_index in range(1, len(row_names))
+                ],
+                minor=True,
+            )
+        axis.grid(which="minor", color="#FFFFFF", linewidth=1.4)
+        axis.tick_params(which="minor", bottom=False, left=False)
+        axis.tick_params(axis="x", length=0)
+        axis.tick_params(axis="y", length=0)
+
+        for row_index in range(len(row_names)):
+            for column_index in range(len(column_names)):
+                cell_value = finite_or_none(values[row_index][column_index])
+                if cell_value is None:
+                    axis.text(
+                        column_index,
+                        row_index,
+                        "NA",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="#777777",
+                    )
+                    continue
+
+                if variant_name == "difference":
+                    text_color = (
+                        "#FFFFFF"
+                        if abs(cell_value) >= difference_limit * 0.55
+                        else "#222222"
+                    )
+                    display_value = (
+                        0.0 if abs(cell_value) < 0.005 else cell_value
+                    )
+                    cell_text = f"{display_value:+.2f}"
+                else:
+                    text_color = "#FFFFFF" if cell_value >= 0.62 else "#4A1111"
+                    cell_text = f"{cell_value:.2f}"
+
+                axis.text(
+                    column_index,
+                    row_index,
+                    cell_text,
+                    ha="center",
+                    va="center",
+                    fontsize=10,
+                    fontweight="bold",
+                    color=text_color,
+                )
+
+        return image
+
+    width_ratios = []
+    if learned_classifiers and learned_features:
+        width_ratios.append(len(learned_features))
+    if baseline_classifiers:
+        width_ratios.append(len(baseline_features))
+        width_ratios.append(0.70)
+    width_ratios.append(0.35)
+
+    figure = plt.figure(figsize=(figure_width, figure_height))
+    grid = figure.add_gridspec(
+        3,
+        len(width_ratios),
+        width_ratios=width_ratios,
+        height_ratios=[1, 1, 1],
+        wspace=0.22,
+        hspace=0.70,
+    )
+
+    for row_index, (variant_name, variant_spec) in enumerate(
+            variant_specs.items()):
+        grid_column = 0
+        panel_images = []
+        if learned_classifiers and learned_features:
+            axis = figure.add_subplot(grid[row_index, grid_column])
+            panel_images.append(
+                add_heatmap_panel(
+                    axis=axis,
+                    variant_name=variant_name,
+                    variant_spec=variant_spec,
+                    row_names=learned_classifiers,
+                    column_names=learned_features,
+                    panel_title=(
+                        f"{variant_spec['row_title']}\nFeature Models"),
+                    show_y_label=True,
+                    y_tick_side="left",
+                    compact_row_labels=False,
+                )
+            )
+            grid_column += 1
+
+        if baseline_classifiers:
+            axis = figure.add_subplot(grid[row_index, grid_column])
+            panel_images.append(
+                add_heatmap_panel(
+                    axis=axis,
+                    variant_name=variant_name,
+                    variant_spec=variant_spec,
+                    row_names=baseline_classifiers,
+                    column_names=baseline_features,
+                    panel_title=f"{variant_spec['row_title']}\nBaselines",
+                    show_y_label=not learned_classifiers,
+                    y_tick_side="right",
+                    compact_row_labels=True,
+                )
+            )
+            grid_column += 1
+            spacer_axis = figure.add_subplot(grid[row_index, grid_column])
+            spacer_axis.axis("off")
+            grid_column += 1
+
+        color_bar_axis = figure.add_subplot(grid[row_index, grid_column])
+        color_bar = figure.colorbar(panel_images[0], cax=color_bar_axis)
+        color_bar.set_label(
+            variant_spec["color_bar_label"],
+            rotation=270,
+            labelpad=14,
+        )
+
+    title = title_with_split_strategy(
+        base_title=(
+            f"Train/{comparison_split_name} F1 heatmaps by feature set and "
+            "classifier"),
+        summary_df=combined_df,
+    )
+    figure.suptitle(
+        title,
+        fontsize=17,
+        fontweight="bold",
+        x=0.02,
+        y=0.985,
+        ha="left",
+    )
+    figure.text(
+        0.02,
+        0.955,
+        (
+            f"Rows show train, {comparison_split_name}, and "
+            f"{comparison_split_name}-train F1; difference color uses "
+            "absolute gap."
+        ),
+        fontsize=10,
+        color="#555555",
+    )
+    figure.subplots_adjust(
+        left=0.12,
+        right=0.94,
+        top=0.90,
+        bottom=0.06,
+        wspace=0.24,
+        hspace=0.72,
+    )
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+
+    return {"stacked": plot_path}

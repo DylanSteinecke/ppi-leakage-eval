@@ -31,7 +31,7 @@ from ppi_inputs import (
     read_fasta,
     RANDOM_SPLIT_STRATEGY,
     SPLIT_STRATEGY_CHOICES,
-    validate_train_test_splits,
+    validate_splits,
 )
 from ppi_models import (
     BASELINE_CLASSIFIER_CHOICES,
@@ -42,9 +42,12 @@ from ppi_models import (
 )
 from ppi_plots import (
     default_combined_plot_path,
+    default_f1_heatmap_path,
     default_plot_path,
     default_png_plot_path,
+    legacy_f1_heatmap_output_paths,
     plot_metrics_summary,
+    plot_train_test_f1_heatmap,
     plot_train_test_metrics_summary,
     plot_train_test_metrics_summary_png,
 )
@@ -85,6 +88,28 @@ def proportion(value: str) -> float:
     return parsed_value
 
 
+def nonnegative_proportion(value: str) -> float:
+    """
+    Parse a float proportion between 0 and 1, inclusive of 0 only.
+    """
+    parsed_value = float(value)
+    if (parsed_value < 0.0) or (parsed_value >= 1.0):
+        raise argparse.ArgumentTypeError("value must be at least 0 and less than 1")
+
+    return parsed_value
+
+
+def non_empty_string(value: str) -> str:
+    """
+    Parse a non-empty argparse string after trimming whitespace.
+    """
+    parsed_value = value.strip()
+    if not parsed_value:
+        raise argparse.ArgumentTypeError("value must not be empty")
+
+    return parsed_value
+
+
 def argument_parser() -> argparse.Namespace:
     """
     Argument parser for protein-protein interaction prediction.
@@ -115,6 +140,9 @@ def argument_parser() -> argparse.Namespace:
         "--test-metrics-out", default="test_metrics.csv",
         help="CSV file for appended test-set per-run metrics")
     output_group.add_argument(
+        "--val-metrics-out", default="val_metrics.csv",
+        help="CSV file for appended validation-set per-run metrics")
+    output_group.add_argument(
         "--train-metrics-summary-out", default=None,
         help="CSV file for train metric means and standard errors. "
             "Defaults to <train-metrics-out stem>_summary.csv.")
@@ -122,6 +150,10 @@ def argument_parser() -> argparse.Namespace:
         "--test-metrics-summary-out", default=None,
         help="CSV file for test metric means and standard errors. "
             "Defaults to <test-metrics-out stem>_summary.csv.")
+    output_group.add_argument(
+        "--val-metrics-summary-out", default=None,
+        help="CSV file for validation metric means and standard errors. "
+            "Defaults to <val-metrics-out stem>_summary.csv.")
     output_group.add_argument(
         "--append-results", action="store_true",
         help="Append to existing output files instead of starting fresh.")
@@ -143,6 +175,10 @@ def argument_parser() -> argparse.Namespace:
         help="SVG file for the test metrics plot. Defaults to "
             "<test-metrics-summary-out stem>.svg.")
     plot_group.add_argument(
+        "--val-metrics-plot-out", default=None,
+        help="SVG file for the validation metrics plot. Defaults to "
+            "<val-metrics-summary-out stem>.svg.")
+    plot_group.add_argument(
         "--train-test-metrics-plot-out", default=None,
         help="SVG file for the combined train/test metrics plot. Defaults "
             "to a train_test_* companion next to the train metrics plot.")
@@ -151,8 +187,13 @@ def argument_parser() -> argparse.Namespace:
         help="PNG file for the combined train/test metrics plot. Defaults "
             "to a .png companion next to the combined train/test SVG.")
     plot_group.add_argument(
+        "--train-test-f1-heatmap-out", default=None,
+        help="PNG file for stacked train, test, and test-minus-train F1 "
+            "heatmaps. Defaults to a train_test_f1_heatmap_* companion "
+            "next to the combined plot.")
+    plot_group.add_argument(
         "--no-metrics-plots", action="store_true",
-        help="Do not create train/test metrics summary plots.")
+        help="Do not create metrics summary plots.")
 
     # Feature extraction args
     feature_group = parser.add_argument_group("Features")
@@ -176,13 +217,23 @@ def argument_parser() -> argparse.Namespace:
     training_group.add_argument(
         "--train-size", type=proportion, default=0.80,
         help="Fraction of pairs assigned to the training set")
+    training_group.add_argument(
+        "--val-size", type=nonnegative_proportion, default=0.0,
+        help="Fraction of pairs assigned to the validation set")
+    training_group.add_argument(
+        "--eval-test-set", action="store_true",
+        help="Evaluate on the test split. In validation runs, omit this to "
+            "keep test held out.")
     training_group.add_argument("--seed", type=int, default=0)
     training_group.add_argument(
         "--split-col", default=None,
-        help="Optional column with train/test labels")
+        help="Optional column with train, validation, and test labels")
+    training_group.add_argument(
+        "--split-name", type=non_empty_string, default=None,
+        help="Optional display name for a provided --split-col split")
     training_group.add_argument(
         "--split-strategy", choices=SPLIT_STRATEGY_CHOICES, default=None,
-        help="Optional strategy for creating train/test splits")
+        help="Optional strategy for creating train/validation/test splits")
     training_group.add_argument(
         "--num-reruns", type=positive_int, default=1,
         help="Number of times to rerun each classifier with consecutive seeds")
@@ -190,6 +241,10 @@ def argument_parser() -> argparse.Namespace:
     args = parser.parse_args()
     if args.split_col and args.split_strategy:
         parser.error("--split-col and --split-strategy cannot both be set.")
+    if args.split_name and not args.split_col:
+        parser.error("--split-name can only be used with --split-col.")
+    if args.train_size + args.val_size >= 1.0:
+        parser.error("--train-size + --val-size must be less than 1.")
 
     if args.split_col:
         args.effective_split_strategy = PROVIDED_SPLIT_STRATEGY
@@ -228,13 +283,20 @@ class OutputPaths:
     """
     predictions_path: Path
     train_metrics_path: Path
+    val_metrics_path: Path | None
     test_metrics_path: Path
     train_summary_path: Path
+    val_summary_path: Path | None
     test_summary_path: Path
     train_plot_path: Path | None
+    val_plot_path: Path | None
     test_plot_path: Path | None
+    train_val_plot_path: Path | None
+    train_val_png_path: Path | None
+    train_val_f1_heatmap_path: Path | None
     train_test_plot_path: Path | None
     train_test_png_path: Path | None
+    train_test_f1_heatmap_path: Path | None
 
 
 def make_model_name(feature_name: str, classifier_name: str) -> str:
@@ -302,10 +364,13 @@ def make_metrics_df(
 
 
 def train_and_evaluate_model_run(
-        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any,
-        x_test: Any, feature_name: str, classifier_name: str, run_number: int,
+        train_df: pd.DataFrame, val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
+        x_test: Any | None, feature_name: str, classifier_name: str,
+        run_number: int,
         execution_id: str, args: argparse.Namespace
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None,
+               pd.DataFrame | None, pd.DataFrame | None]:
     """
     Train and evaluate one model configuration for one run number.
     """
@@ -317,9 +382,8 @@ def train_and_evaluate_model_run(
     max_iter = np.nan if is_baseline else args.max_iter
     feature_meta = feature_metadata(feature_name, args)
 
-    # Define training and test labels
+    # Define training labels
     y_train = train_df["label"].to_numpy()
-    y_test = test_df["label"].to_numpy()
 
     # Define model
     model = make_classifier(
@@ -330,25 +394,11 @@ def train_and_evaluate_model_run(
     # Fit the model to the training data
     model.fit(x_train, y_train)
 
-    # Evaluate on the training data
-    y_train_score, y_train_pred = get_scores_and_predictions(model, x_train)
-    train_metrics = get_metrics(
-        y_true=y_train,
-        y_score=y_train_score,
-        y_pred=y_train_pred,
-    )
-
-    # Evaluate on the test data
-    y_test_score, y_test_pred = get_scores_and_predictions(model, x_test)
-    test_metrics = get_metrics(
-        y_true=y_test,
-        y_score=y_test_score,
-        y_pred=y_test_pred,
-    )
-
     # Define the evaluate metrics tables
-    n_total = len(train_df) + len(test_df)
+    n_val = 0 if val_df is None else len(val_df)
+    n_total = len(train_df) + n_val + len(test_df)
     actual_train_size = len(train_df) / n_total
+    actual_val_size = n_val / n_total
     actual_test_size = len(test_df) / n_total
     metrics_metadata = {
         "execution_id": execution_id,
@@ -357,47 +407,79 @@ def train_and_evaluate_model_run(
         "model_seed": model_seed,
         "split_seed": args.seed,
         "n_train": len(train_df),
+        "n_val": n_val,
         "n_test": len(test_df),
         **feature_meta,
         "classifier": classifier_name,
         "max_iter": max_iter,
         "split_strategy": args.effective_split_strategy,
+        "split_name": args.split_name,
         "target_train_size": args.train_size,
+        "target_val_size": args.val_size,
         "actual_train_size": actual_train_size,
+        "actual_val_size": actual_val_size,
         "actual_test_size": actual_test_size,
         "n_connected_components": args.n_connected_components,
         "n_pruned_pairs": args.n_pruned_pairs,
         "pruned_pair_fraction": args.pruned_pair_fraction,
     }
-    train_metrics_df = make_metrics_df(
-        metadata=metrics_metadata,
-        metrics=train_metrics,
-        split_name="train",
-    )
-    test_metrics_df = make_metrics_df(
-        metadata=metrics_metadata,
-        metrics=test_metrics,
-        split_name="test",
-    )
 
-    # Define the predictions table
-    predictions_df = test_df[["protein_a", "protein_b", "label"]].copy()
-    predictions_df.insert(0, "execution_id", execution_id)
-    predictions_df.insert(1, "model_name", model_name)
-    predictions_df.insert(2, "run_number", run_number)
-    predictions_df.insert(3, "model_seed", model_seed)
-    predictions_df.insert(4, "features", feature_meta["features"])
-    predictions_df.insert(5, "classifier", classifier_name)
-    predictions_df.insert(6, "k", feature_meta["k"])
-    predictions_df["pred_score"] = y_test_score
-    predictions_df["pred_label"] = y_test_pred
+    def evaluate_split(
+            split_df: pd.DataFrame, x_split: Any, split_name: str,
+        ) -> tuple[pd.DataFrame, Any, Any]:
+        """
+        Evaluate one split and return metrics plus raw predictions.
+        """
+        y_true = split_df["label"].to_numpy()
+        y_score, y_pred = get_scores_and_predictions(model, x_split)
+        metrics = get_metrics(
+            y_true=y_true,
+            y_score=y_score,
+            y_pred=y_pred,
+        )
+        metrics_df = make_metrics_df(
+            metadata=metrics_metadata,
+            metrics=metrics,
+            split_name=split_name,
+        )
 
-    return train_metrics_df, test_metrics_df, predictions_df
+        return metrics_df, y_score, y_pred
+
+    train_metrics_df, _, _ = evaluate_split(train_df, x_train, "train")
+    val_metrics_df = None
+    if val_df is not None and x_val is not None:
+        val_metrics_df, _, _ = evaluate_split(val_df, x_val, "val")
+
+    test_metrics_df = None
+    predictions_df = None
+    if args.evaluate_test_metrics:
+        if x_test is None:
+            raise ValueError("Test evaluation requested without test features.")
+        test_metrics_df, y_test_score, y_test_pred = evaluate_split(
+            test_df,
+            x_test,
+            "test",
+        )
+
+        # Define the predictions table
+        predictions_df = test_df[["protein_a", "protein_b", "label"]].copy()
+        predictions_df.insert(0, "execution_id", execution_id)
+        predictions_df.insert(1, "model_name", model_name)
+        predictions_df.insert(2, "run_number", run_number)
+        predictions_df.insert(3, "model_seed", model_seed)
+        predictions_df.insert(4, "features", feature_meta["features"])
+        predictions_df.insert(5, "classifier", classifier_name)
+        predictions_df.insert(6, "k", feature_meta["k"])
+        predictions_df["pred_score"] = y_test_score
+        predictions_df["pred_label"] = y_test_pred
+
+    return train_metrics_df, val_metrics_df, test_metrics_df, predictions_df
 
 
 def run_model_reruns(
-        train_df: pd.DataFrame, test_df: pd.DataFrame, x_train: Any,
-        x_test: Any, feature_name: str, classifier_name: str,
+        train_df: pd.DataFrame, val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
+        x_test: Any | None, feature_name: str, classifier_name: str,
         execution_id: str, args: argparse.Namespace,
         output_paths: OutputPaths,
     ) -> None:
@@ -408,11 +490,18 @@ def run_model_reruns(
 
     # Re-run the model
     for run_number in range(1, args.num_reruns + 1):
-        train_metrics_df, test_metrics_df, predictions_df = (
+        (
+            train_metrics_df,
+            val_metrics_df,
+            test_metrics_df,
+            predictions_df,
+        ) = (
             train_and_evaluate_model_run(
                 train_df=train_df,
+                val_df=val_df,
                 test_df=test_df,
                 x_train=x_train,
+                x_val=x_val,
                 x_test=x_test,
                 feature_name=feature_name,
                 classifier_name=classifier_name,
@@ -423,8 +512,12 @@ def run_model_reruns(
         )
         # Save performance and prediction results
         append_dataframe(train_metrics_df, output_paths.train_metrics_path)
-        append_dataframe(test_metrics_df, output_paths.test_metrics_path)
-        append_dataframe(predictions_df, output_paths.predictions_path)
+        if val_metrics_df is not None and output_paths.val_metrics_path is not None:
+            append_dataframe(val_metrics_df, output_paths.val_metrics_path)
+        if test_metrics_df is not None:
+            append_dataframe(test_metrics_df, output_paths.test_metrics_path)
+        if predictions_df is not None:
+            append_dataframe(predictions_df, output_paths.predictions_path)
         LOGGER.info(
             f"Finished model={model_name} "
             f"run={run_number}/{args.num_reruns}"
@@ -438,68 +531,133 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     # Define output paths
     predictions_path = Path(args.pred_out)
     train_metrics_path = Path(args.train_metrics_out)
+    val_metrics_path = Path(args.val_metrics_out) if args.has_validation_split else None
     test_metrics_path = Path(args.test_metrics_out)
     train_summary_path = (
         Path(args.train_metrics_summary_out)
         if args.train_metrics_summary_out
         else default_summary_path(train_metrics_path)
     )
+    val_summary_path = (
+        Path(args.val_metrics_summary_out)
+        if args.val_metrics_summary_out
+        else default_summary_path(val_metrics_path)
+    ) if val_metrics_path is not None else None
     test_summary_path = (
         Path(args.test_metrics_summary_out)
         if args.test_metrics_summary_out
         else default_summary_path(test_metrics_path)
     )
     train_plot_path = None
+    val_plot_path = None
     test_plot_path = None
+    train_val_plot_path = None
+    train_val_png_path = None
+    train_val_f1_heatmap_path = None
     train_test_plot_path = None
     train_test_png_path = None
+    train_test_f1_heatmap_path = None
     if not args.no_metrics_plots:
         train_plot_path = (
             Path(args.train_metrics_plot_out)
             if args.train_metrics_plot_out
             else default_plot_path(train_summary_path)
         )
-        test_plot_path = (
-            Path(args.test_metrics_plot_out)
-            if args.test_metrics_plot_out
-            else default_plot_path(test_summary_path)
-        )
-        train_test_plot_path = (
-            Path(args.train_test_metrics_plot_out)
-            if args.train_test_metrics_plot_out
-            else default_combined_plot_path(train_plot_path)
-        )
-        train_test_png_path = (
-            Path(args.train_test_metrics_png_out)
-            if args.train_test_metrics_png_out
-            else default_png_plot_path(train_test_plot_path)
-        )
+        if val_summary_path is not None:
+            val_plot_path = (
+                Path(args.val_metrics_plot_out)
+                if args.val_metrics_plot_out
+                else default_plot_path(val_summary_path)
+            )
+            train_val_plot_path = default_combined_plot_path(
+                train_plot_path,
+                comparison_split_name="val",
+            )
+            train_val_png_path = default_png_plot_path(train_val_plot_path)
+            train_val_f1_heatmap_path = default_f1_heatmap_path(
+                train_val_png_path,
+                comparison_split_name="val",
+            )
+        if args.evaluate_test_metrics:
+            test_plot_path = (
+                Path(args.test_metrics_plot_out)
+                if args.test_metrics_plot_out
+                else default_plot_path(test_summary_path)
+            )
+            train_test_plot_path = (
+                Path(args.train_test_metrics_plot_out)
+                if args.train_test_metrics_plot_out
+                else default_combined_plot_path(train_plot_path)
+            )
+            train_test_png_path = (
+                Path(args.train_test_metrics_png_out)
+                if args.train_test_metrics_png_out
+                else default_png_plot_path(train_test_plot_path)
+            )
+            train_test_f1_heatmap_path = (
+                Path(args.train_test_f1_heatmap_out)
+                if args.train_test_f1_heatmap_out
+                else default_f1_heatmap_path(train_test_png_path)
+            )
 
     # Prepare to write to output paths
-    reset_output_file(predictions_path, append_results=args.append_results)
     reset_output_file(train_metrics_path, append_results=args.append_results)
-    reset_output_file(test_metrics_path, append_results=args.append_results)
+    if val_metrics_path is not None:
+        reset_output_file(val_metrics_path, append_results=args.append_results)
+    if args.evaluate_test_metrics:
+        reset_output_file(predictions_path, append_results=args.append_results)
+        reset_output_file(test_metrics_path, append_results=args.append_results)
     reset_output_file(train_summary_path, append_results=False)
-    reset_output_file(test_summary_path, append_results=False)
+    if val_summary_path is not None:
+        reset_output_file(val_summary_path, append_results=False)
+    if args.evaluate_test_metrics:
+        reset_output_file(test_summary_path, append_results=False)
     if train_plot_path is not None:
         reset_output_file(train_plot_path, append_results=False)
+    if val_plot_path is not None:
+        reset_output_file(val_plot_path, append_results=False)
     if test_plot_path is not None:
         reset_output_file(test_plot_path, append_results=False)
+    if train_val_plot_path is not None:
+        reset_output_file(train_val_plot_path, append_results=False)
+    if train_val_png_path is not None:
+        reset_output_file(train_val_png_path, append_results=False)
+    if train_val_f1_heatmap_path is not None:
+        reset_output_file(train_val_f1_heatmap_path, append_results=False)
+        for heatmap_path in legacy_f1_heatmap_output_paths(
+                train_val_f1_heatmap_path,
+                comparison_split_name="val",
+            ).values():
+            reset_output_file(heatmap_path, append_results=False)
     if train_test_plot_path is not None:
         reset_output_file(train_test_plot_path, append_results=False)
     if train_test_png_path is not None:
         reset_output_file(train_test_png_path, append_results=False)
+    if train_test_f1_heatmap_path is not None:
+        reset_output_file(train_test_f1_heatmap_path, append_results=False)
+        for heatmap_path in legacy_f1_heatmap_output_paths(
+                train_test_f1_heatmap_path,
+                comparison_split_name="test",
+            ).values():
+            reset_output_file(heatmap_path, append_results=False)
 
     output_paths = OutputPaths(
         predictions_path=predictions_path,
         train_metrics_path=train_metrics_path,
+        val_metrics_path=val_metrics_path,
         test_metrics_path=test_metrics_path,
         train_summary_path=train_summary_path,
+        val_summary_path=val_summary_path,
         test_summary_path=test_summary_path,
         train_plot_path=train_plot_path,
+        val_plot_path=val_plot_path,
         test_plot_path=test_plot_path,
+        train_val_plot_path=train_val_plot_path,
+        train_val_png_path=train_val_png_path,
+        train_val_f1_heatmap_path=train_val_f1_heatmap_path,
         train_test_plot_path=train_test_plot_path,
         train_test_png_path=train_test_png_path,
+        train_test_f1_heatmap_path=train_test_f1_heatmap_path,
     )
 
     return output_paths
@@ -517,9 +675,12 @@ def main() -> None:
     sequences = read_fasta(args.fasta)
     protein_pairs = prepare_input_data(protein_pairs, sequences)
 
-    # Split into train/test sets
-    train_df, test_df = load_or_make_split(protein_pairs, args)
-    validate_train_test_splits(train_df, test_df)
+    # Split into train/validation/test sets
+    train_df, val_df, test_df = load_or_make_split(protein_pairs, args)
+    args.has_validation_split = val_df is not None and not val_df.empty
+    args.evaluate_test_metrics = (
+        args.eval_test_set or not args.has_validation_split)
+    validate_splits(train_df=train_df, val_df=val_df, test_df=test_df)
 
     # Prepare to run the models
     execution_id = args.execution_id or uuid.uuid4().hex
@@ -541,9 +702,11 @@ def main() -> None:
     for classifier_name in baseline_classifiers:
         run_model_reruns(
             train_df=train_df,
+            val_df=val_df,
             test_df=test_df,
             x_train=train_df,
-            x_test=test_df,
+            x_val=val_df,
+            x_test=test_df if args.evaluate_test_metrics else None,
             feature_name=FEATURELESS_FEATURE,
             classifier_name=classifier_name,
             execution_id=execution_id,
@@ -554,9 +717,10 @@ def main() -> None:
     # Extract the combined feature set
     if learned_classifiers:
         feature_name = make_feature_name(args.features)
-        x_train, x_test = build_feature_matrices(
+        x_train, x_val, x_test = build_feature_matrices(
             train_df=train_df,
-            test_df=test_df,
+            val_df=val_df,
+            test_df=test_df if args.evaluate_test_metrics else None,
             sequences=sequences,
             feature_types=args.features,
             args=args,
@@ -566,8 +730,10 @@ def main() -> None:
     for classifier_name in learned_classifiers:
         run_model_reruns(
             train_df=train_df,
+            val_df=val_df,
             test_df=test_df,
             x_train=x_train,
+            x_val=x_val,
             x_test=x_test,
             feature_name=feature_name,
             classifier_name=classifier_name,
@@ -578,20 +744,41 @@ def main() -> None:
 
     # Summarize model performance
     train_summary_df = summarize_metrics(output_paths.train_metrics_path)
-    test_summary_df = summarize_metrics(output_paths.test_metrics_path)
+    val_summary_df = (
+        summarize_metrics(output_paths.val_metrics_path)
+        if output_paths.val_metrics_path is not None
+        else None
+    )
+    test_summary_df = (
+        summarize_metrics(output_paths.test_metrics_path)
+        if args.evaluate_test_metrics
+        else None
+    )
     write_dataframe_threadsafe(
         train_summary_df,
         output_paths.train_summary_path,
     )
-    write_dataframe_threadsafe(
-        test_summary_df,
-        output_paths.test_summary_path,
-    )
+    if val_summary_df is not None and output_paths.val_summary_path is not None:
+        write_dataframe_threadsafe(
+            val_summary_df,
+            output_paths.val_summary_path,
+        )
+    if test_summary_df is not None:
+        write_dataframe_threadsafe(
+            test_summary_df,
+            output_paths.test_summary_path,
+        )
     if output_paths.train_plot_path is not None:
         plot_metrics_summary(
             summary_path=output_paths.train_summary_path,
             plot_path=output_paths.train_plot_path,
             split_name="train",
+        )
+    if output_paths.val_plot_path is not None:
+        plot_metrics_summary(
+            summary_path=output_paths.val_summary_path,
+            plot_path=output_paths.val_plot_path,
+            split_name="val",
         )
     if output_paths.test_plot_path is not None:
         plot_metrics_summary(
@@ -599,39 +786,106 @@ def main() -> None:
             plot_path=output_paths.test_plot_path,
             split_name="test",
         )
+    train_val_f1_heatmap_paths = {}
+    if output_paths.train_val_plot_path is not None:
+        plot_train_test_metrics_summary(
+            train_summary_path=output_paths.train_summary_path,
+            test_summary_path=output_paths.val_summary_path,
+            plot_path=output_paths.train_val_plot_path,
+            comparison_split_name="val",
+        )
+    if output_paths.train_val_png_path is not None:
+        plot_train_test_metrics_summary_png(
+            train_summary_path=output_paths.train_summary_path,
+            test_summary_path=output_paths.val_summary_path,
+            plot_path=output_paths.train_val_png_path,
+            comparison_split_name="val",
+        )
+    if output_paths.train_val_f1_heatmap_path is not None:
+        train_val_f1_heatmap_paths = plot_train_test_f1_heatmap(
+            train_summary_path=output_paths.train_summary_path,
+            test_summary_path=output_paths.val_summary_path,
+            plot_path=output_paths.train_val_f1_heatmap_path,
+            comparison_split_name="val",
+        )
     if output_paths.train_test_plot_path is not None:
         plot_train_test_metrics_summary(
             train_summary_path=output_paths.train_summary_path,
             test_summary_path=output_paths.test_summary_path,
             plot_path=output_paths.train_test_plot_path,
+            comparison_split_name="test",
         )
     if output_paths.train_test_png_path is not None:
         plot_train_test_metrics_summary_png(
             train_summary_path=output_paths.train_summary_path,
             test_summary_path=output_paths.test_summary_path,
             plot_path=output_paths.train_test_png_path,
+            comparison_split_name="test",
+        )
+    train_test_f1_heatmap_paths = {}
+    if output_paths.train_test_f1_heatmap_path is not None:
+        train_test_f1_heatmap_paths = plot_train_test_f1_heatmap(
+            train_summary_path=output_paths.train_summary_path,
+            test_summary_path=output_paths.test_summary_path,
+            plot_path=output_paths.train_test_f1_heatmap_path,
+            comparison_split_name="test",
         )
 
     log_message = (
         f"\nTrain metric summary\n{train_summary_df.to_string(index=False)}"
-        f"\n\nTest metric summary\n{test_summary_df.to_string(index=False)}"
-        f"\nSaved predictions to: {output_paths.predictions_path}"
         f"\nSaved train per-run metrics to: "
         f"{output_paths.train_metrics_path}"
-        f"\nSaved test per-run metrics to: {output_paths.test_metrics_path}"
         f"\nSaved train metric summary to: "
         f"{output_paths.train_summary_path}"
-        f"\nSaved test metric summary to: {output_paths.test_summary_path}"
     )
+    if val_summary_df is not None:
+        log_message = (
+            f"{log_message}\n\nValidation metric summary\n"
+            f"{val_summary_df.to_string(index=False)}"
+            f"\nSaved validation per-run metrics to: "
+            f"{output_paths.val_metrics_path}"
+            f"\nSaved validation metric summary to: "
+            f"{output_paths.val_summary_path}"
+        )
+    if test_summary_df is not None:
+        log_message = (
+            f"{log_message}\n\nTest metric summary\n"
+            f"{test_summary_df.to_string(index=False)}"
+            f"\nSaved predictions to: {output_paths.predictions_path}"
+            f"\nSaved test per-run metrics to: {output_paths.test_metrics_path}"
+            f"\nSaved test metric summary to: {output_paths.test_summary_path}"
+        )
     if output_paths.train_plot_path is not None:
         log_message = (
             f"{log_message}\nSaved train metric plot to: "
             f"{output_paths.train_plot_path}"
         )
+    if output_paths.val_plot_path is not None:
+        log_message = (
+            f"{log_message}\nSaved validation metric plot to: "
+            f"{output_paths.val_plot_path}"
+        )
     if output_paths.test_plot_path is not None:
         log_message = (
             f"{log_message}\nSaved test metric plot to: "
             f"{output_paths.test_plot_path}"
+        )
+    if output_paths.train_val_plot_path is not None:
+        log_message = (
+            f"{log_message}\nSaved train/validation metric plot to: "
+            f"{output_paths.train_val_plot_path}"
+        )
+    if output_paths.train_val_png_path is not None:
+        log_message = (
+            f"{log_message}\nSaved train/validation metric PNG to: "
+            f"{output_paths.train_val_png_path}"
+        )
+    if train_val_f1_heatmap_paths:
+        heatmap_paths = ", ".join(
+            str(path) for path in train_val_f1_heatmap_paths.values())
+        log_message = (
+            f"{log_message}\nSaved train/validation F1 heatmap stack to: "
+            f"{heatmap_paths}"
         )
     if output_paths.train_test_plot_path is not None:
         log_message = (
@@ -642,6 +896,13 @@ def main() -> None:
         log_message = (
             f"{log_message}\nSaved train/test metric PNG to: "
             f"{output_paths.train_test_png_path}"
+        )
+    if train_test_f1_heatmap_paths:
+        heatmap_paths = ", ".join(
+            str(path) for path in train_test_f1_heatmap_paths.values())
+        log_message = (
+            f"{log_message}\nSaved train/test F1 heatmap stack to: "
+            f"{heatmap_paths}"
         )
 
     LOGGER.info(log_message)

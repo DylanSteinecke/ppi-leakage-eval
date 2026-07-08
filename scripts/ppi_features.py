@@ -195,10 +195,11 @@ def make_pair_features(
 
 
 def build_feature_matrices(
-        train_df: pd.DataFrame, test_df: pd.DataFrame,
+        train_df: pd.DataFrame, val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame | None,
         sequences: dict[str, str], feature_types: tuple[str, ...],
         args: argparse.Namespace,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[Any, Any | None, Any | None]:
     """
     Fit feature extractors on train proteins and concatenate pair features.
     """
@@ -208,8 +209,9 @@ def build_feature_matrices(
         set(train_df["protein_a"]) | set(train_df["protein_b"]))
     train_sequences = [sequences[protein] for protein in train_proteins]
 
-    # Make train and test features for each requested feature type
+    # Make train and optional validation/test features for each feature type.
     train_feature_blocks = []
+    val_feature_blocks = []
     test_feature_blocks = []
     for feature_type in feature_types:
         vectorizer = make_vectorizer(feature_type, args)
@@ -219,20 +221,40 @@ def build_feature_matrices(
             sequences,
             vectorizer,
         )
-        test_feature_block = make_pair_features(
-            test_df,
-            sequences,
-            vectorizer,
-        )
         train_feature_blocks.append(train_feature_block)
-        test_feature_blocks.append(test_feature_block)
+        if val_df is not None and not val_df.empty:
+            val_feature_blocks.append(
+                make_pair_features(
+                    val_df,
+                    sequences,
+                    vectorizer,
+                )
+            )
+        if test_df is not None and not test_df.empty:
+            test_feature_blocks.append(
+                make_pair_features(
+                    test_df,
+                    sequences,
+                    vectorizer,
+                )
+            )
 
     # Preserve feature blocks as separate sparse columns
     if len(train_feature_blocks) == 1:
         x_train = train_feature_blocks[0]
-        x_test = test_feature_blocks[0]
+        x_val = val_feature_blocks[0] if val_feature_blocks else None
+        x_test = test_feature_blocks[0] if test_feature_blocks else None
     else:
         x_train = hstack(train_feature_blocks, format="csr")
-        x_test = hstack(test_feature_blocks, format="csr")
+        x_val = (
+            hstack(val_feature_blocks, format="csr")
+            if val_feature_blocks
+            else None
+        )
+        x_test = (
+            hstack(test_feature_blocks, format="csr")
+            if test_feature_blocks
+            else None
+        )
 
-    return x_train, x_test
+    return x_train, x_val, x_test
