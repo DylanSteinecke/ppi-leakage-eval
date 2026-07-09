@@ -112,6 +112,7 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
         run_dir / "val_metrics_summary.csv",
         run_dir / "plots" / "val_metrics_summary.svg",
         run_dir / "plots" / "train_val_metrics_summary.svg",
+        run_dir / "splits" / "split_diagnostics.json",
     )
 
     predictions = pd.read_csv(run_dir / "predictions.csv", nrows=0)
@@ -152,6 +153,8 @@ def test_validation_without_eval_test_set_writes_only_train_val_outputs(
             encoding="utf-8"))
     assert metadata["n_val"] > 0
     assert metadata["actual_val_size"] > 0.0
+    assert metadata["diagnostics"]["n_val"] > 0
+    assert metadata["diagnostics"]["actual_val_size"] > 0.0
     assert "val_metrics_path" in metadata
     assert "test_metrics_path" not in metadata
     assert "predictions_path" not in metadata
@@ -183,6 +186,7 @@ def test_validation_with_eval_test_set_writes_train_val_test_outputs(
         (run_dir / "splits" / "split_metadata.json").read_text(
             encoding="utf-8"))
     assert metadata["n_val"] > 0
+    assert metadata["diagnostics"]["n_val"] > 0
     assert "val_metrics_path" in metadata
     assert "test_metrics_path" in metadata
     assert "predictions_path" in metadata
@@ -367,7 +371,8 @@ def test_protein_disjoint_component_metadata_reports_zero_shared_proteins(
     metadata = json.loads(
         (run_dir / "splits" / "split_metadata.json").read_text(
             encoding="utf-8"))
+    diagnostics = metadata["diagnostics"]
 
-    assert metadata["n_shared_proteins_train_val"] == 0
-    assert metadata["n_shared_proteins_train_test"] == 0
-    assert metadata["n_shared_proteins_val_test"] == 0
+    assert diagnostics["n_shared_proteins_train_val"] == 0
+    assert diagnostics["n_shared_proteins_train_test"] == 0
+    assert diagnostics["n_shared_proteins_val_test"] == 0

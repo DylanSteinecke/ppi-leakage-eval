@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 
 from ppi_inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
+from split_diagnostics import compute_ppi_split_diagnostics
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"
@@ -212,6 +213,13 @@ def compute_split_metadata(
     val_proteins = split_protein_ids(val_df)
     test_proteins = split_protein_ids(test_df)
     working_directory = Path.cwd()
+    diagnostics = compute_ppi_split_diagnostics(
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+        args=args,
+        protein_pairs=protein_pairs,
+    )
 
     metadata = {
         "execution_id": execution_id,
@@ -259,6 +267,7 @@ def compute_split_metadata(
         "n_connected_components": args.n_connected_components,
         "n_pruned_pairs": args.n_pruned_pairs,
         "pruned_pair_fraction": args.pruned_pair_fraction,
+        "diagnostics": diagnostics,
         "train_metrics_path": path_string(output_paths.train_metrics_path),
         "split_assignments_path": path_string(
             output_paths.split_assignments_path),

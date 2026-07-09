@@ -181,6 +181,7 @@ def test_metadata_contains_required_audit_fields(tmp_path):
         "n_shared_proteins_train_val",
         "n_shared_proteins_train_test",
         "n_shared_proteins_val_test",
+        "diagnostics",
         "pairs_file_sha256",
         "fasta_file_sha256",
     }
@@ -188,6 +189,9 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     assert metadata["execution_id"] == "test-execution"
     assert metadata["n_val"] == 0
     assert metadata["actual_val_size"] == 0.0
+    assert metadata["diagnostics"]["n_val"] == 0
+    assert metadata["diagnostics"]["actual_val_size"] == 0.0
+    assert metadata["diagnostics"]["n_shared_ordered_pairs_train_test"] == 0
 
 
 def test_append_rejects_different_split_assignments(tmp_path):
