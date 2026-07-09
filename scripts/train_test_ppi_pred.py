@@ -56,8 +56,11 @@ from ppi_results import (
 )
 from ppi_splits import (
     add_source_row_index,
+    append_invocation_log,
     compute_split_metadata,
     DROPPED_PAIRS_FILENAME,
+    invocation_log_entry,
+    INVOCATIONS_FILENAME,
     make_split_assignments,
     SOURCE_ROW_INDEX_COLUMN,
     SPLIT_ASSIGNMENTS_FILENAME,
@@ -306,6 +309,7 @@ class OutputPaths:
     split_assignments_path: Path
     dropped_pairs_path: Path
     split_metadata_path: Path
+    invocations_path: Path
     train_summary_path: Path
     val_summary_path: Path | None
     test_summary_path: Path | None
@@ -583,6 +587,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     split_assignments_path = splits_dir / SPLIT_ASSIGNMENTS_FILENAME
     dropped_pairs_path = splits_dir / DROPPED_PAIRS_FILENAME
     split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
+    invocations_path = run_dir / INVOCATIONS_FILENAME
     train_summary_path = run_dir / TRAIN_SUMMARY_FILENAME
     all_val_summary_path = run_dir / VAL_SUMMARY_FILENAME
     all_test_summary_path = run_dir / TEST_SUMMARY_FILENAME
@@ -664,6 +669,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         split_assignments_path,
         dropped_pairs_path,
         split_metadata_path,
+        invocations_path,
     ]
     active_metric_prediction_paths = [
         train_metrics_path,
@@ -714,6 +720,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         split_assignments_path=split_assignments_path,
         dropped_pairs_path=dropped_pairs_path,
         split_metadata_path=split_metadata_path,
+        invocations_path=invocations_path,
         train_summary_path=train_summary_path,
         val_summary_path=val_summary_path,
         test_summary_path=test_summary_path,
@@ -781,6 +788,14 @@ def main() -> None:
             split_metadata=split_metadata,
             output_paths=output_paths,
             append_results=args.append_results,
+        )
+        append_invocation_log(
+            invocation_log_entry(
+                args=args,
+                output_paths=output_paths,
+                execution_id=execution_id,
+            ),
+            output_paths.invocations_path,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None

@@ -106,6 +106,7 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
         run_dir / "splits" / "split_assignments.csv",
         run_dir / "splits" / "dropped_pairs.csv",
         run_dir / "splits" / "split_metadata.json",
+        run_dir / "invocations.jsonl",
     )
     assert_not_written(
         run_dir / "val_metrics.csv",
@@ -240,6 +241,11 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
 
     train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
     train_summary = pd.read_csv(run_dir / "train_metrics_summary.csv")
+    invocations = [
+        json.loads(line)
+        for line in (run_dir / "invocations.jsonl").read_text(
+            encoding="utf-8").splitlines()
+    ]
 
     assert len(train_metrics) == 2
     assert set(train_metrics["classifier"]) == {
@@ -250,6 +256,15 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         "always_positive",
         "always_negative",
     }
+    assert len(invocations) == 2
+    assert invocations[0]["append_results"] is False
+    assert invocations[1]["append_results"] is True
+    assert invocations[0]["resolved_args"]["classifiers"] == [
+        "always_positive",
+    ]
+    assert invocations[1]["resolved_args"]["classifiers"] == [
+        "always_negative",
+    ]
 
 
 def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
@@ -273,6 +288,13 @@ def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
 
     assert_exists(run_dir / "train_metrics.csv", run_dir / "val_metrics.csv")
     assert_not_written(run_dir / "test_metrics.csv", run_dir / "predictions.csv")
+    invocations = [
+        json.loads(line)
+        for line in (run_dir / "invocations.jsonl").read_text(
+            encoding="utf-8").splitlines()
+    ]
+    assert len(invocations) == 1
+    assert invocations[0]["resolved_args"]["evaluate_test_metrics"] is False
 
 
 def test_no_metrics_plots_writes_metrics_without_plot_artifacts(

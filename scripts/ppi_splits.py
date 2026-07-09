@@ -17,7 +17,7 @@ from typing import Any
 import pandas as pd
 
 from ppi_inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
-from split_diagnostics import compute_ppi_split_diagnostics
+from split_diagnostics import compute_ppi_split_diagnostics, native_value
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"
@@ -27,6 +27,7 @@ SPLITS_DIRNAME = "splits"
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 DROPPED_PAIRS_FILENAME = "dropped_pairs.csv"
 SPLIT_METADATA_FILENAME = "split_metadata.json"
+INVOCATIONS_FILENAME = "invocations.jsonl"
 
 
 #######################
@@ -149,6 +150,53 @@ def get_git_metadata(working_directory: str | Path) -> dict[str, Any]:
     return git_metadata
 
 
+#######################
+# Invocation metadata #
+#######################
+def resolved_args_dict(args: Any) -> dict[str, Any]:
+    """
+    Return the post-parse CLI namespace as JSON-friendly resolved settings.
+    """
+    resolved_args = {
+        str(arg_name): native_value(arg_value)
+        for arg_name, arg_value in sorted(vars(args).items())
+    }
+
+    return resolved_args
+
+
+def invocation_log_entry(
+        args: Any, output_paths: Any, execution_id: str,
+    ) -> dict[str, Any]:
+    """
+    Return one JSONL record describing this CLI invocation.
+    """
+    working_directory = Path.cwd()
+    entry = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "execution_id": execution_id,
+        "run_dir": str(output_paths.run_dir),
+        "append_results": bool(args.append_results),
+        "command": shlex.join([sys.executable, *sys.argv]),
+        "argv": list(sys.argv),
+        "python_executable": sys.executable,
+        "working_directory": str(working_directory),
+        **get_git_metadata(working_directory),
+        "resolved_args": resolved_args_dict(args),
+    }
+
+    return native_value(entry)
+
+
+def append_invocation_log(entry: dict[str, Any], output_path: Path) -> None:
+    """
+    Append one invocation record to a run-level JSONL log.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("a", encoding="utf-8") as fout:
+        fout.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
 ##################
 # Split metadata #
 ##################
@@ -227,6 +275,7 @@ def compute_split_metadata(
         "run_dir": str(output_paths.run_dir),
         "command": shlex.join([sys.executable, *sys.argv]),
         "argv": sys.argv,
+        "resolved_args": resolved_args_dict(args),
         "python_executable": sys.executable,
         "working_directory": str(working_directory),
         **get_git_metadata(working_directory),
@@ -273,6 +322,7 @@ def compute_split_metadata(
             output_paths.split_assignments_path),
         "dropped_pairs_path": path_string(output_paths.dropped_pairs_path),
         "split_metadata_path": path_string(output_paths.split_metadata_path),
+        "invocations_path": path_string(output_paths.invocations_path),
     }
     if output_paths.val_metrics_path is not None:
         metadata["val_metrics_path"] = path_string(

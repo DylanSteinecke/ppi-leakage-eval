@@ -119,16 +119,32 @@ def test_metadata_contains_required_audit_fields(tmp_path):
         split_assignments_path=split_dir / "split_assignments.csv",
         dropped_pairs_path=split_dir / "dropped_pairs.csv",
         split_metadata_path=split_dir / "split_metadata.json",
+        invocations_path=tmp_path / "run" / "invocations.jsonl",
     )
     args = argparse.Namespace(
         pairs=str(pairs_path),
         fasta=str(fasta_path),
+        run_dir=str(tmp_path / "run"),
+        append_results=False,
+        execution_id=None,
+        log_level="INFO",
+        no_metrics_plots=False,
+        features=("tfidf",),
+        classifiers=["always_positive"],
+        k=3,
+        bm25_k1=1.5,
+        bm25_b=0.75,
+        max_iter=1000,
         train_size=0.5,
         val_size=0.0,
+        eval_test_set=False,
         effective_split_strategy="random",
+        split_strategy=None,
         split_name=None,
         split_col=None,
+        num_reruns=1,
         seed=7,
+        has_validation_split=False,
         evaluate_test_metrics=True,
         n_connected_components=None,
         n_pruned_pairs=0,
@@ -182,6 +198,8 @@ def test_metadata_contains_required_audit_fields(tmp_path):
         "n_shared_proteins_train_test",
         "n_shared_proteins_val_test",
         "diagnostics",
+        "resolved_args",
+        "invocations_path",
         "pairs_file_sha256",
         "fasta_file_sha256",
     }
@@ -191,7 +209,13 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     assert metadata["actual_val_size"] == 0.0
     assert metadata["diagnostics"]["n_val"] == 0
     assert metadata["diagnostics"]["actual_val_size"] == 0.0
-    assert metadata["diagnostics"]["n_shared_ordered_pairs_train_test"] == 0
+    assert (
+        metadata["diagnostics"]["n_exact_ordered_pair_overlaps_train_test"]
+        == 0
+    )
+    assert metadata["resolved_args"]["features"] == ["tfidf"]
+    assert metadata["resolved_args"]["evaluate_test_metrics"] is True
+    assert metadata["invocations_path"].endswith("invocations.jsonl")
 
 
 def test_append_rejects_different_split_assignments(tmp_path):

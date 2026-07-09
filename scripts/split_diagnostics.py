@@ -108,6 +108,7 @@ def set_overlap_diagnostics(
         count_prefix: str,
         example_prefix: str | None = None,
         max_examples: int = MAX_EXAMPLES,
+        example_key_style: str = "suffix",
     ) -> dict[str, Any]:
     """
     Return pairwise intersection counts and capped examples for split sets.
@@ -118,9 +119,14 @@ def set_overlap_diagnostics(
         overlap = split_to_sets[left_name] & split_to_sets[right_name]
         diagnostics[f"n_{count_prefix}_{left_name}_{right_name}"] = int(
             len(overlap))
-        diagnostics[
-            f"{example_prefix}_{left_name}_{right_name}_examples"
-        ] = capped_examples(overlap, max_examples=max_examples)
+        if example_key_style == "before_splits":
+            example_key = f"{example_prefix}_examples_{left_name}_{right_name}"
+        else:
+            example_key = f"{example_prefix}_{left_name}_{right_name}_examples"
+        diagnostics[example_key] = capped_examples(
+            overlap,
+            max_examples=max_examples,
+        )
 
     return diagnostics
 
@@ -326,14 +332,16 @@ def compute_ppi_split_diagnostics(
     diagnostics.update(
         set_overlap_diagnostics(
             split_to_sets=split_to_ordered_pair_sets,
-            count_prefix="shared_ordered_pairs",
-            example_prefix="shared_ordered_pairs",
+            count_prefix="exact_ordered_pair_overlaps",
+            example_prefix="exact_ordered_pair_overlap",
+            example_key_style="before_splits",
         ))
     diagnostics.update(
         set_overlap_diagnostics(
             split_to_sets=split_to_unordered_pair_sets,
-            count_prefix="shared_unordered_pairs",
-            example_prefix="shared_unordered_pairs",
+            count_prefix="unordered_pair_overlaps",
+            example_prefix="unordered_pair_overlap",
+            example_key_style="before_splits",
         ))
     diagnostics.update(
         duplicate_value_diagnostics(

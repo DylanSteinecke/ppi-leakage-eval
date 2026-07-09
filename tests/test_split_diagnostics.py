@@ -147,8 +147,8 @@ def test_exact_ordered_pair_overlap():
         test_df=test_df,
     )
 
-    assert diagnostics["n_shared_ordered_pairs_train_val"] == 1
-    assert diagnostics["shared_ordered_pairs_train_val_examples"] == [
+    assert diagnostics["n_exact_ordered_pair_overlaps_train_val"] == 1
+    assert diagnostics["exact_ordered_pair_overlap_examples_train_val"] == [
         ["A", "B"],
     ]
 
@@ -170,9 +170,9 @@ def test_reversed_pair_counts_only_as_unordered_overlap():
         test_df=test_df,
     )
 
-    assert diagnostics["n_shared_ordered_pairs_train_val"] == 0
-    assert diagnostics["n_shared_unordered_pairs_train_val"] == 1
-    assert diagnostics["shared_unordered_pairs_train_val_examples"] == [
+    assert diagnostics["n_exact_ordered_pair_overlaps_train_val"] == 0
+    assert diagnostics["n_unordered_pair_overlaps_train_val"] == 1
+    assert diagnostics["unordered_pair_overlap_examples_train_val"] == [
         ["A", "B"],
     ]
 
