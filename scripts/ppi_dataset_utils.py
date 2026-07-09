@@ -1,0 +1,574 @@
+"""
+Shared helpers for preparing PPI datasets.
+
+Dataset loaders convert raw sources into pair tables with ``protein_a``,
+``protein_b``, and ``label`` columns. This module owns the common
+canonicalization, FASTA filtering, metadata, and output writing steps.
+"""
+
+import hashlib
+import json
+import math
+import random
+import shlex
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from itertools import combinations
+from pathlib import Path
+from typing import Any, Iterable
+
+import pandas as pd
+
+
+PAIRS_FILENAME = "pairs.csv"
+FASTA_FILENAME = "proteins.fasta"
+METADATA_FILENAME = "dataset_metadata.json"
+CANONICAL_PAIR_COLUMNS = ["pair_id", "protein_a", "protein_b", "label"]
+REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
+SUPPORTED_TABLE_SUFFIXES = {
+    ".csv": ",",
+    ".tsv": "\t",
+    ".txt": "\t",
+}
+
+
+@dataclass(frozen=True)
+class PairProcessingResult:
+    """
+    Processed pairs plus JSON-friendly count metadata.
+    """
+    pairs: pd.DataFrame
+    metadata: dict[str, int]
+
+
+def read_fasta(fasta_path: str | Path) -> dict[str, str]:
+    """
+    Read a FASTA file into a sequence dictionary.
+    """
+    sequences = {}
+    current_id = None
+    chunks = []
+
+    def save_current_record() -> None:
+        """
+        Save the current FASTA record if one is active.
+        """
+        if current_id is None:
+            return
+        if not chunks:
+            raise ValueError(f"FASTA record '{current_id}' has no sequence.")
+
+        sequences[current_id] = "".join(chunks)
+
+    with Path(fasta_path).open("r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith(">"):
+                save_current_record()
+                header_parts = line[1:].split()
+                if not header_parts:
+                    raise ValueError(
+                        "FASTA record header is missing a sequence ID.")
+
+                current_id = header_parts[0]
+                if current_id in sequences:
+                    raise ValueError(
+                        f"Duplicate FASTA sequence ID: {current_id}")
+                chunks = []
+            else:
+                if current_id is None:
+                    raise ValueError(
+                        "FASTA sequence line found before any header.")
+                chunks.append(line)
+
+    save_current_record()
+
+    return sequences
+
+
+def write_fasta(
+        sequences: dict[str, str], protein_ids: Iterable[str],
+        fasta_path: str | Path,
+    ) -> None:
+    """
+    Write selected FASTA records in deterministic protein-ID order.
+    """
+    fasta_path = Path(fasta_path)
+    fasta_path.parent.mkdir(parents=True, exist_ok=True)
+    selected_ids = sorted(set(protein_ids))
+    missing_ids = [protein_id for protein_id in selected_ids
+                   if protein_id not in sequences]
+    if missing_ids:
+        examples = missing_ids[:10]
+        raise ValueError(
+            f"Cannot write FASTA: {len(missing_ids)} protein IDs are missing "
+            f"from sequences. Examples: {examples}")
+
+    with fasta_path.open("w", encoding="utf-8") as fout:
+        for protein_id in selected_ids:
+            fout.write(f">{protein_id}\n{sequences[protein_id]}\n")
+
+
+def file_sha256(input_path: str | Path) -> str:
+    """
+    Return the SHA256 digest for a file.
+    """
+    digest = hashlib.sha256()
+    with Path(input_path).open("rb") as fin:
+        for chunk in iter(lambda: fin.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def file_size_bytes(input_path: str | Path) -> int:
+    """
+    Return a file size in bytes.
+    """
+    return int(Path(input_path).stat().st_size)
+
+
+def write_json(data: dict[str, Any], output_path: str | Path) -> None:
+    """
+    Write stable, human-readable JSON.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def infer_separator(table_path: str | Path) -> str:
+    """
+    Infer a table separator from a supported file extension.
+    """
+    suffix = Path(table_path).suffix.lower()
+    if suffix not in SUPPORTED_TABLE_SUFFIXES:
+        supported = ", ".join(sorted(SUPPORTED_TABLE_SUFFIXES))
+        raise ValueError(
+            f"Cannot infer separator for '{table_path}'. Supported table "
+            f"extensions are: {supported}.")
+
+    return SUPPORTED_TABLE_SUFFIXES[suffix]
+
+
+def read_table(table_path: str | Path) -> pd.DataFrame:
+    """
+    Read a CSV/TSV/TXT table using extension-based separator inference.
+    """
+    sep = infer_separator(table_path)
+    table = pd.read_csv(table_path, sep=sep)
+
+    return table
+
+
+def validate_negative_ratio(negative_ratio: float) -> float:
+    """
+    Validate a finite positive negative-sampling ratio.
+    """
+    negative_ratio = float(negative_ratio)
+    if not math.isfinite(negative_ratio) or negative_ratio <= 0.0:
+        raise ValueError("negative_ratio must be finite and greater than 0.")
+
+    return negative_ratio
+
+
+def target_negative_count(n_positive: int, negative_ratio: float) -> int:
+    """
+    Return the requested number of sampled negatives.
+    """
+    negative_ratio = validate_negative_ratio(negative_ratio)
+    if n_positive <= 0:
+        raise ValueError("Cannot sample negatives without positive pairs.")
+
+    target_n_negatives = round(negative_ratio * n_positive)
+    target_n_negatives = max(1, target_n_negatives)
+
+    return int(target_n_negatives)
+
+
+def unordered_pair_key(protein_a: str, protein_b: str) -> tuple[str, str]:
+    """
+    Return the canonical unordered key for one protein pair.
+    """
+    return tuple(sorted((protein_a, protein_b)))
+
+
+def validate_pair_columns(pairs: pd.DataFrame) -> None:
+    """
+    Raise if required canonical pair columns are absent.
+    """
+    missing_columns = sorted(REQUIRED_PAIR_COLUMNS - set(pairs.columns))
+    if missing_columns:
+        raise ValueError(
+            "Pair table is missing required columns: "
+            f"{missing_columns}")
+
+
+def normalize_labels(labels: pd.Series) -> pd.Series:
+    """
+    Return labels as integer 0/1 values.
+    """
+    if labels.isna().any():
+        raise ValueError("Pair table label column contains missing values.")
+
+    try:
+        numeric_labels = pd.to_numeric(labels, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Pair table label column must contain only 0/1 values.") from exc
+
+    unexpected_values = sorted(
+        value for value in pd.unique(numeric_labels) if value not in {0, 1})
+    if unexpected_values:
+        raise ValueError(
+            "Pair table label column must contain only 0/1 values. "
+            f"Found: {unexpected_values}")
+
+    return numeric_labels.astype(int)
+
+
+def prepare_pair_columns(pairs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return normalized protein and label columns before pair canonicalization.
+    """
+    validate_pair_columns(pairs)
+    work = pairs[["protein_a", "protein_b", "label"]].copy()
+    missing_id_mask = (
+        work["protein_a"].isna()
+        | work["protein_b"].isna()
+    )
+    work["protein_a"] = work["protein_a"].astype(str).str.strip()
+    work["protein_b"] = work["protein_b"].astype(str).str.strip()
+    missing_id_mask = (
+        missing_id_mask
+        | work["protein_a"].eq("")
+        | work["protein_b"].eq("")
+    )
+    if missing_id_mask.any():
+        raise ValueError(
+            f"Pair table contains {int(missing_id_mask.sum())} rows with "
+            "missing protein IDs.")
+
+    work["label"] = normalize_labels(work["label"])
+
+    return work
+
+
+def contradiction_examples(
+        deduped_pairs: pd.DataFrame,
+    ) -> list[dict[str, Any]]:
+    """
+    Return contradictory unordered pair examples after same-label deduplication.
+    """
+    examples = []
+    for (protein_a, protein_b), group in deduped_pairs.groupby(
+            ["protein_a", "protein_b"], sort=True):
+        labels = sorted(group["label"].unique().tolist())
+        if len(labels) > 1:
+            examples.append({
+                "protein_a": protein_a,
+                "protein_b": protein_b,
+                "labels": labels,
+            })
+    return examples
+
+
+def canonicalize_pairs(pairs: pd.DataFrame) -> PairProcessingResult:
+    """
+    Canonicalize unordered protein pairs and count removed rows.
+    """
+    work = prepare_pair_columns(pairs)
+    self_pair_mask = work["protein_a"] == work["protein_b"]
+    n_self_pairs_removed = int(self_pair_mask.sum())
+    work = work.loc[~self_pair_mask].copy()
+
+    ordered_pairs = work.apply(
+        lambda row: unordered_pair_key(row["protein_a"], row["protein_b"]),
+        axis=1,
+        result_type="expand",
+    )
+    if not ordered_pairs.empty:
+        work["protein_a"] = ordered_pairs[0]
+        work["protein_b"] = ordered_pairs[1]
+
+    n_before_deduplication = len(work)
+    deduped = work.drop_duplicates(
+        subset=["protein_a", "protein_b", "label"],
+    ).copy()
+    n_duplicate_pairs_removed = int(n_before_deduplication - len(deduped))
+
+    contradictions = contradiction_examples(deduped)
+    if contradictions:
+        examples = contradictions[:10]
+        raise ValueError(
+            f"Found {len(contradictions)} unordered protein pairs with "
+            f"contradictory labels. Examples: {examples}")
+
+    canonical_pairs = deduped.sort_values(
+        ["label", "protein_a", "protein_b"],
+    ).reset_index(drop=True)
+    metadata = {
+        "n_self_pairs_removed": n_self_pairs_removed,
+        "n_duplicate_pairs_removed": n_duplicate_pairs_removed,
+        "n_contradictory_pairs": 0,
+        "n_pairs_after_canonicalization": int(len(canonical_pairs)),
+    }
+
+    return PairProcessingResult(pairs=canonical_pairs, metadata=metadata)
+
+
+def filter_pairs_missing_sequences(
+        pairs: pd.DataFrame, sequences: dict[str, str],
+    ) -> PairProcessingResult:
+    """
+    Drop pairs where either protein is absent from the FASTA sequences.
+    """
+    has_sequence_mask = (
+        pairs["protein_a"].isin(sequences)
+        & pairs["protein_b"].isin(sequences)
+    )
+    filtered_pairs = pairs.loc[has_sequence_mask].copy().reset_index(drop=True)
+    metadata = {
+        "n_pairs_dropped_missing_sequence": int(
+            len(pairs) - len(filtered_pairs)),
+    }
+
+    return PairProcessingResult(pairs=filtered_pairs, metadata=metadata)
+
+
+def assign_canonical_pair_ids(pairs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sort final pairs deterministically and assign fresh canonical pair IDs.
+    """
+    final_pairs = pairs.sort_values(
+        ["label", "protein_a", "protein_b"],
+    ).reset_index(drop=True)
+    final_pairs.insert(
+        0,
+        "pair_id",
+        [f"pair_{index}" for index in range(len(final_pairs))],
+    )
+    final_pairs = final_pairs[CANONICAL_PAIR_COLUMNS]
+
+    return final_pairs
+
+
+def final_pair_counts(pairs: pd.DataFrame) -> dict[str, int]:
+    """
+    Return final output counts for canonical pairs.
+    """
+    proteins = set(pairs["protein_a"]) | set(pairs["protein_b"])
+    counts = {
+        "n_positive_output": int((pairs["label"] == 1).sum()),
+        "n_negative_output": int((pairs["label"] == 0).sum()),
+        "n_pairs_output": int(len(pairs)),
+        "n_unique_proteins_output": int(len(proteins)),
+    }
+
+    return counts
+
+
+def input_protein_count(pairs: pd.DataFrame) -> int:
+    """
+    Return the number of unique proteins in a raw pair table.
+    """
+    if pairs.empty:
+        return 0
+
+    prepared = prepare_pair_columns(pairs)
+    proteins = set(prepared["protein_a"]) | set(prepared["protein_b"])
+
+    return int(len(proteins))
+
+
+def observed_pair_keys(pairs: pd.DataFrame) -> set[tuple[str, str]]:
+    """
+    Return non-self unordered pair keys from a pair table.
+    """
+    prepared = prepare_pair_columns(pairs)
+    keys = {
+        unordered_pair_key(protein_a, protein_b)
+        for protein_a, protein_b in zip(
+            prepared["protein_a"],
+            prepared["protein_b"],
+        )
+        if protein_a != protein_b
+    }
+
+    return keys
+
+
+def sample_negative_pairs(
+        positive_pairs: pd.DataFrame, negative_ratio: float,
+        seed: int,
+    ) -> tuple[pd.DataFrame, dict[str, int | float]]:
+    """
+    Sample unordered negative pairs from proteins present in positives.
+    """
+    prepared = prepare_pair_columns(positive_pairs)
+    prepared = prepared.loc[prepared["protein_a"] != prepared["protein_b"]]
+    if prepared.empty:
+        raise ValueError("Cannot sample negatives without positive pairs.")
+
+    protein_ids = sorted(set(prepared["protein_a"]) | set(prepared["protein_b"]))
+    positive_keys = observed_pair_keys(prepared)
+    target_n_negatives = target_negative_count(
+        len(positive_keys),
+        negative_ratio,
+    )
+    all_pair_keys = set(combinations(protein_ids, 2))
+    candidate_keys = sorted(all_pair_keys - positive_keys)
+    if len(candidate_keys) < target_n_negatives:
+        raise ValueError(
+            "Not enough possible negative pairs to satisfy "
+            f"negative_ratio={negative_ratio}. Requested "
+            f"{target_n_negatives}, available {len(candidate_keys)}.")
+
+    rng = random.Random(seed)
+    sampled_keys = rng.sample(candidate_keys, target_n_negatives)
+    sampled_pairs = pd.DataFrame(
+        [
+            {
+                "protein_a": protein_a,
+                "protein_b": protein_b,
+                "label": 0,
+            }
+            for protein_a, protein_b in sampled_keys
+        ],
+    )
+    metadata = {
+        "target_n_negatives": int(target_n_negatives),
+        "n_sampled_negatives": int(len(sampled_pairs)),
+    }
+
+    return sampled_pairs, metadata
+
+
+def prepare_output_dir(
+        out_dir: str | Path, dataset_name: str, overwrite: bool,
+    ) -> Path:
+    """
+    Create or validate a dataset output directory.
+    """
+    dataset_dir = Path(out_dir) / dataset_name
+    if dataset_dir.exists() and not overwrite:
+        raise ValueError(
+            f"Output directory already exists: {dataset_dir}. Pass "
+            "--overwrite to replace canonical outputs.")
+
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    return dataset_dir
+
+
+def input_path_metadata(input_paths: dict[str, str | Path | None]) -> tuple[
+        dict[str, str], dict[str, str], dict[str, int]]:
+    """
+    Return paths, SHA256 hashes, and sizes keyed by input role.
+    """
+    paths = {}
+    sha256 = {}
+    sizes = {}
+    for input_name, input_path in input_paths.items():
+        if input_path is None:
+            continue
+        input_path = Path(input_path)
+        paths[input_name] = str(input_path)
+        sha256[input_name] = file_sha256(input_path)
+        sizes[input_name] = file_size_bytes(input_path)
+
+    return paths, sha256, sizes
+
+
+def final_output_metadata(
+        dataset_dir: Path,
+    ) -> tuple[Path, Path, Path, dict[str, str]]:
+    """
+    Return canonical output paths plus path metadata.
+    """
+    pairs_path = dataset_dir / PAIRS_FILENAME
+    fasta_path = dataset_dir / FASTA_FILENAME
+    metadata_path = dataset_dir / METADATA_FILENAME
+    path_metadata = {
+        "output_pairs_path": str(pairs_path),
+        "output_fasta_path": str(fasta_path),
+        "output_metadata_path": str(metadata_path),
+    }
+
+    return pairs_path, fasta_path, metadata_path, path_metadata
+
+
+def canonicalize_filter_and_assign(
+        raw_pairs: pd.DataFrame, sequences: dict[str, str],
+    ) -> PairProcessingResult:
+    """
+    Run pair canonicalization, FASTA filtering, and final pair ID assignment.
+    """
+    canonicalized = canonicalize_pairs(raw_pairs)
+    filtered = filter_pairs_missing_sequences(canonicalized.pairs, sequences)
+    if filtered.pairs.empty:
+        raise ValueError("No pairs remain after missing-sequence filtering.")
+
+    final_pairs = assign_canonical_pair_ids(filtered.pairs)
+    metadata = {
+        **canonicalized.metadata,
+        **filtered.metadata,
+        **final_pair_counts(final_pairs),
+    }
+
+    return PairProcessingResult(pairs=final_pairs, metadata=metadata)
+
+
+def write_prepared_dataset(
+        args: Any, loader_name: str, raw_pairs: pd.DataFrame,
+        sequences: dict[str, str], input_paths: dict[str, str | Path | None],
+        loader_metadata: dict[str, Any],
+        loader_specific_options: dict[str, Any],
+    ) -> dict[str, Any]:
+    """
+    Write canonical dataset outputs and return dataset metadata.
+    """
+    dataset_dir = prepare_output_dir(
+        out_dir=args.out_dir,
+        dataset_name=args.dataset_name,
+        overwrite=args.overwrite,
+    )
+    pairs_path, fasta_path, metadata_path, output_path_metadata = (
+        final_output_metadata(dataset_dir))
+    processed = canonicalize_filter_and_assign(raw_pairs, sequences)
+    proteins = (
+        set(processed.pairs["protein_a"])
+        | set(processed.pairs["protein_b"])
+    )
+
+    processed.pairs.to_csv(pairs_path, index=False)
+    write_fasta(sequences, proteins, fasta_path)
+    input_paths_json, input_sha256, input_sizes = input_path_metadata(
+        input_paths)
+    metadata = {
+        "dataset_name": args.dataset_name,
+        "loader_name": loader_name,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "command": shlex.join([sys.executable, *sys.argv]),
+        "argv": list(sys.argv),
+        "python_executable": sys.executable,
+        "working_directory": str(Path.cwd()),
+        "input_paths": input_paths_json,
+        "input_file_sha256": input_sha256,
+        "input_file_size_bytes": input_sizes,
+        **output_path_metadata,
+        "seed": int(args.seed),
+        **loader_metadata,
+        **processed.metadata,
+        "loader_specific_options": loader_specific_options,
+    }
+    write_json(metadata, metadata_path)
+
+    return metadata

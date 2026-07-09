@@ -230,6 +230,6 @@ def test_runner_script_has_valid_syntax_and_benchmark_knobs():
 
     runner_text = runner_path.read_text(encoding="utf-8")
     assert 'VAL_SIZE="${VAL_SIZE:-0.0}"' in runner_text
-    assert "date -u +%Y%m%dT%H%M%SZ" in runner_text
+    assert "date -u +%Y-%m-%d_%H-%M-%S" in runner_text
     assert '--val-size "$VAL_SIZE"' in runner_text
     assert "scripts/aggregate_benchmark_results.py" in runner_text
