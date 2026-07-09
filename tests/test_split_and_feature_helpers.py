@@ -6,6 +6,7 @@ import pytest
 from ppi_features import build_feature_matrices
 from ppi_inputs import (
     load_split_column,
+    make_protein_component_split,
     make_protein_prune_split,
     make_random_pair_split,
     protein_ids_in_pairs,
@@ -44,6 +45,31 @@ def complete_graph_pairs(n_proteins=8):
                 "protein_b": protein_b,
                 "label": (left_index + right_index) % 2,
             })
+
+    return pd.DataFrame(rows)
+
+
+def multi_component_pairs(n_components=5):
+    """
+    Return disconnected pair components with both labels in each component.
+    """
+    rows = []
+    for component_index in range(n_components):
+        protein_a = f"C{component_index}_A"
+        protein_b = f"C{component_index}_B"
+        protein_c = f"C{component_index}_C"
+        rows.extend([
+            {
+                "protein_a": protein_a,
+                "protein_b": protein_b,
+                "label": 0,
+            },
+            {
+                "protein_a": protein_b,
+                "protein_b": protein_c,
+                "label": 1,
+            },
+        ])
 
     return pd.DataFrame(rows)
 
@@ -119,6 +145,21 @@ def test_protein_prune_split_is_disjoint_with_validation():
     train_df, val_df, test_df = make_protein_prune_split(
         pairs,
         split_args(train_size=0.5, val_size=0.25, seed=4),
+    )
+
+    validate_disjoint_splits({
+        TRAIN_SPLIT: train_df,
+        VAL_SPLIT: val_df,
+        TEST_SPLIT: test_df,
+    })
+
+
+def test_protein_component_split_is_disjoint_with_validation():
+    pairs = multi_component_pairs()
+
+    train_df, val_df, test_df = make_protein_component_split(
+        pairs,
+        split_args(train_size=0.6, val_size=0.2, seed=5),
     )
 
     validate_disjoint_splits({

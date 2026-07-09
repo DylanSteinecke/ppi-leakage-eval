@@ -1,6 +1,24 @@
 import json
 
 import pandas as pd
+import pytest
+
+
+REMOVED_OUTPUT_FLAGS = [
+    "--pred-out",
+    "--train-metrics-out",
+    "--test-metrics-out",
+    "--val-metrics-out",
+    "--train-metrics-summary-out",
+    "--test-metrics-summary-out",
+    "--val-metrics-summary-out",
+    "--train-metrics-plot-out",
+    "--test-metrics-plot-out",
+    "--val-metrics-plot-out",
+    "--train-test-metrics-plot-out",
+    "--train-test-metrics-png-out",
+    "--train-test-f1-heatmap-out",
+]
 
 
 def assert_exists(*paths):
@@ -49,6 +67,24 @@ def test_cli_without_run_dir_fails_clearly(ppi_test_data, run_cli):
 
     assert completed_process.returncode != 0
     assert "--run-dir" in completed_process.stderr
+
+
+@pytest.mark.parametrize("removed_flag", REMOVED_OUTPUT_FLAGS)
+def test_removed_output_flags_are_not_accepted(
+        tmp_path, ppi_test_data, run_cli, removed_flag):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "run"
+
+    completed_process = run_cli(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        removed_flag,
+        tmp_path / "old_output.csv",
+        "--no-metrics-plots",
+        check=False,
+    )
+
+    assert completed_process.returncode != 0
+    assert "unrecognized arguments" in completed_process.stderr
 
 
 def test_cli_with_run_dir_writes_no_validation_outputs(
@@ -174,3 +210,164 @@ def test_append_results_requires_identical_split(
 
     assert completed_process.returncode != 0
     assert "different split" in completed_process.stderr
+
+
+def test_append_results_adds_model_rows_and_regenerates_summary(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "append_success"
+    common_args = [
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--num-reruns", "1",
+        "--max-iter", "100",
+        "--train-size", "0.50",
+        "--seed", "11",
+        "--no-metrics-plots",
+    ]
+
+    run_cli(*common_args, "--classifier", "always_positive")
+    run_cli(
+        *common_args,
+        "--classifier", "always_negative",
+        "--append-results",
+    )
+
+    train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
+    train_summary = pd.read_csv(run_dir / "train_metrics_summary.csv")
+
+    assert len(train_metrics) == 2
+    assert set(train_metrics["classifier"]) == {
+        "always_positive",
+        "always_negative",
+    }
+    assert set(train_summary["classifier"]) == {
+        "always_positive",
+        "always_negative",
+    }
+
+
+def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "fresh_cleanup"
+
+    run_cli(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--val-size", "0.25",
+        "--eval-test-set",
+        "--no-metrics-plots",
+    )
+    assert_exists(run_dir / "test_metrics.csv", run_dir / "predictions.csv")
+
+    run_cli(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--val-size", "0.25",
+        "--no-metrics-plots",
+    )
+
+    assert_exists(run_dir / "train_metrics.csv", run_dir / "val_metrics.csv")
+    assert_not_written(run_dir / "test_metrics.csv", run_dir / "predictions.csv")
+
+
+def test_no_metrics_plots_writes_metrics_without_plot_artifacts(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "no_plots"
+
+    run_cli(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--no-metrics-plots",
+    )
+
+    assert_exists(
+        run_dir / "train_metrics.csv",
+        run_dir / "test_metrics.csv",
+        run_dir / "train_metrics_summary.csv",
+        run_dir / "test_metrics_summary.csv",
+    )
+    plots_dir = run_dir / "plots"
+    assert (not plots_dir.exists()) or not any(plots_dir.iterdir())
+
+
+def test_dropped_pairs_and_metadata_are_written_for_missing_fasta_proteins(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    pairs = pd.read_csv(pairs_path)
+    missing_pairs = pd.DataFrame({
+        "pair_id": ["missing_a", "missing_b", "missing_both"],
+        "protein_a": ["MISSING_A", pairs.loc[0, "protein_a"], "MISSING_A"],
+        "protein_b": [pairs.loc[0, "protein_b"], "MISSING_B", "MISSING_B"],
+        "label": [1, 0, 1],
+    })
+    pairs_with_missing = pd.concat(
+        [pairs, missing_pairs],
+        ignore_index=True,
+    )
+    pairs_with_missing_path = tmp_path / "pairs_with_missing.csv"
+    pairs_with_missing.to_csv(pairs_with_missing_path, index=False)
+    run_dir = tmp_path / "dropped_pairs"
+
+    run_cli(
+        *base_cli_args(pairs_with_missing_path, fasta_path, run_dir),
+        "--no-metrics-plots",
+    )
+
+    dropped_pairs = pd.read_csv(run_dir / "splits" / "dropped_pairs.csv")
+    metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"))
+
+    assert len(dropped_pairs) == 3
+    assert metadata["n_dropped_pairs"] == 3
+    assert set(dropped_pairs["drop_reason"]) == {
+        "missing_protein_a_sequence",
+        "missing_protein_b_sequence",
+        "missing_both_sequences",
+    }
+
+
+def test_protein_disjoint_component_metadata_reports_zero_shared_proteins(
+        tmp_path, run_cli):
+    run_dir = tmp_path / "component_metadata"
+    pair_rows = ["pair_id,protein_a,protein_b,label"]
+    fasta_records = []
+    for component_index in range(5):
+        protein_a = f"C{component_index}_A"
+        protein_b = f"C{component_index}_B"
+        protein_c = f"C{component_index}_C"
+        pair_rows.extend([
+            f"pair_{component_index}_0,{protein_a},{protein_b},0",
+            f"pair_{component_index}_1,{protein_b},{protein_c},1",
+        ])
+        fasta_records.extend([
+            f">{protein_a}\nACDEFGHIKLA\n",
+            f">{protein_b}\nACDEFGHIKLB\n",
+            f">{protein_c}\nACDEFGHIKLC\n",
+        ])
+    pairs_path = tmp_path / "component_pairs.csv"
+    fasta_path = tmp_path / "component_proteins.fasta"
+    pairs_path.write_text("\n".join(pair_rows) + "\n", encoding="utf-8")
+    fasta_path.write_text("".join(fasta_records), encoding="utf-8")
+
+    run_cli(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--classifier", "always_positive",
+        "--num-reruns", "1",
+        "--train-size", "0.6",
+        "--val-size", "0.2",
+        "--seed", "11",
+        "--split-strategy", "protein_disjoint_components",
+        "--no-metrics-plots",
+    )
+
+    metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"))
+
+    assert metadata["n_shared_proteins_train_val"] == 0
+    assert metadata["n_shared_proteins_train_test"] == 0
+    assert metadata["n_shared_proteins_val_test"] == 0
