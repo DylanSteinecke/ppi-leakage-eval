@@ -12,8 +12,10 @@ OUT_DIR="${OUT_DIR:-results/toy_all_models}"
 NUM_RERUNS="${NUM_RERUNS:-5}"
 MAX_ITER="${MAX_ITER:-10000}"
 TRAIN_SIZE="${TRAIN_SIZE:-0.80}"
-EXECUTION_ID="${EXECUTION_ID:-all_models_$(date +%Y%m%d_%H%M%S)}"
-RUN_STAMP="${RUN_STAMP:-$(date +%m-%d-%y__%H:%M:%S)}"
+VAL_SIZE="${VAL_SIZE:-0.0}"
+EXECUTION_ID="${EXECUTION_ID:-all_models_$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
 USER_ARGS=("$@")
 SPLIT_STRATEGIES=(
     random
@@ -54,6 +56,7 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
         --num-reruns "$NUM_RERUNS" \
         --max-iter "$MAX_ITER" \
         --train-size "$TRAIN_SIZE" \
+        --val-size "$VAL_SIZE" \
         --split-strategy "$split_strategy" \
         --execution-id "$STRATEGY_EXECUTION_ID" \
         "${USER_ARGS[@]}"
@@ -72,6 +75,7 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
             --num-reruns "$NUM_RERUNS" \
             --max-iter "$MAX_ITER" \
             --train-size "$TRAIN_SIZE" \
+            --val-size "$VAL_SIZE" \
             --split-strategy "$split_strategy" \
             --execution-id "$STRATEGY_EXECUTION_ID" \
             "${APPEND_ARGS[@]}" \
@@ -86,5 +90,12 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     echo "Plots: $RUN_DIR/plots/"
     echo "Predictions, when test is evaluated: $RUN_DIR/predictions.csv"
 done
+
+if [[ "$AGGREGATE_RESULTS" == "1" ]]; then
+    "$PYTHON" scripts/aggregate_benchmark_results.py \
+        --benchmark-dir "$OUT_DIR"
+    echo "Benchmark manifest: $OUT_DIR/benchmark_manifest.csv"
+    echo "Benchmark summary: $OUT_DIR/benchmark_summary.csv"
+fi
 
 echo "Finished all runs for all split strategies."
