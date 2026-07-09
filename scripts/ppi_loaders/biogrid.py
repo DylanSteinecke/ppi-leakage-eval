@@ -8,6 +8,8 @@ from typing import Any
 import pandas as pd
 
 from ppi_dataset_utils import (
+    apply_id_mapping_to_pairs,
+    file_sha256,
     input_protein_count,
     read_fasta,
     read_table,
@@ -43,13 +45,16 @@ def register_subcommand(subparsers: Any) -> None:
         LOADER_NAME,
         help=(
             "Prepare a BioGRID-like PPI table. Selected interactor columns "
-            "must already match FASTA IDs."
+            "must already match FASTA IDs or be mapped with --id-map."
         ),
     )
     add_common_args(parser)
     parser.add_argument("--interactions", required=True)
     parser.add_argument("--protein-a-col", default=None)
     parser.add_argument("--protein-b-col", default=None)
+    parser.add_argument("--id-map", default=None)
+    parser.add_argument("--map-from-col", default=None)
+    parser.add_argument("--map-to-col", default=None)
     parser.add_argument("--organism-a-col", default=None)
     parser.add_argument("--organism-b-col", default=None)
     parser.add_argument("--organism-id", default=None)
@@ -108,6 +113,21 @@ def require_columns(table: pd.DataFrame, columns: list[str]) -> None:
     if missing_columns:
         raise ValueError(
             f"BioGRID table is missing required columns: {missing_columns}")
+
+
+def validate_id_mapping_args(args: Any) -> None:
+    """
+    Validate optional explicit ID-mapping arguments.
+    """
+    if args.id_map is None:
+        if args.map_from_col is not None or args.map_to_col is not None:
+            raise ValueError(
+                "--map-from-col and --map-to-col can only be used with "
+                "--id-map.")
+        return
+
+    if args.map_from_col is None or args.map_to_col is None:
+        raise ValueError("--id-map requires --map-from-col and --map-to-col.")
 
 
 def reject_ambiguous_interactor_values(
@@ -203,7 +223,10 @@ def make_loader_specific_options(
         "negative_ratio": float(args.negative_ratio),
         "n_positive_after_loader_filters": int(
             n_positive_after_loader_filters),
-        "id_mapping_implemented": False,
+        "id_mapping_used": args.id_map is not None,
+        "id_map": None if args.id_map is None else str(args.id_map),
+        "map_from_col": args.map_from_col,
+        "map_to_col": args.map_to_col,
     }
 
     return options
@@ -213,6 +236,7 @@ def run(args: Any) -> None:
     """
     Prepare a BioGRID PPI dataset.
     """
+    validate_id_mapping_args(args)
     validate_negative_ratio(args.negative_ratio)
     if not args.sample_negatives:
         raise ValueError(
@@ -242,6 +266,27 @@ def run(args: Any) -> None:
         protein_a_col=protein_a_col,
         protein_b_col=protein_b_col,
     )
+    n_positive_after_loader_filters = int(len(positive_pairs))
+    id_mapping_metadata = {
+        "id_mapping_used": args.id_map is not None,
+        "id_map_path": None if args.id_map is None else str(args.id_map),
+        "id_map_sha256": (
+            None if args.id_map is None else file_sha256(args.id_map)
+        ),
+        "map_from_col": args.map_from_col,
+        "map_to_col": args.map_to_col,
+    }
+    if args.id_map is not None:
+        id_map_table = read_table(args.id_map)
+        mapped_positive_pairs = apply_id_mapping_to_pairs(
+            pairs=positive_pairs,
+            mapping_table=id_map_table,
+            map_from_col=args.map_from_col,
+            map_to_col=args.map_to_col,
+        )
+        positive_pairs = mapped_positive_pairs.pairs
+        id_mapping_metadata.update(mapped_positive_pairs.metadata)
+
     negative_pairs, sampling_metadata = sample_negative_pairs(
         positive_pairs=positive_pairs,
         negative_ratio=args.negative_ratio,
@@ -255,11 +300,13 @@ def run(args: Any) -> None:
         "n_positive_input": n_positive_input,
         "n_negative_input": 0,
         "n_unique_proteins_input": input_protein_count(raw_pairs),
+        "n_positive_after_id_mapping": int(len(positive_pairs)),
         "n_pairs_after_loader_filters": int(len(raw_pairs)),
         "sampled_negatives": True,
         "negative_ratio": float(args.negative_ratio),
         "target_n_negatives": int(sampling_metadata["target_n_negatives"]),
         "n_sampled_negatives": int(sampling_metadata["n_sampled_negatives"]),
+        **id_mapping_metadata,
     }
     write_prepared_dataset(
         args=args,
@@ -269,12 +316,13 @@ def run(args: Any) -> None:
         input_paths={
             "fasta": args.fasta,
             "interactions": Path(args.interactions),
+            "id_map": args.id_map,
         },
         loader_metadata=loader_metadata,
         loader_specific_options=make_loader_specific_options(
             args=args,
             protein_a_col=protein_a_col,
             protein_b_col=protein_b_col,
-            n_positive_after_loader_filters=len(positive_pairs),
+            n_positive_after_loader_filters=n_positive_after_loader_filters,
         ),
     )

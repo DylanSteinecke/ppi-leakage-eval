@@ -28,6 +28,7 @@ CANONICAL_PAIR_COLUMNS = ["pair_id", "protein_a", "protein_b", "label"]
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
 SUPPORTED_TABLE_SUFFIXES = {
     ".csv": ",",
+    ".tab": "\t",
     ".tsv": "\t",
     ".txt": "\t",
 }
@@ -39,7 +40,7 @@ class PairProcessingResult:
     Processed pairs plus JSON-friendly count metadata.
     """
     pairs: pd.DataFrame
-    metadata: dict[str, int]
+    metadata: dict[str, Any]
 
 
 def read_fasta(fasta_path: str | Path) -> dict[str, str]:
@@ -259,6 +260,152 @@ def prepare_pair_columns(pairs: pd.DataFrame) -> pd.DataFrame:
     work["label"] = normalize_labels(work["label"])
 
     return work
+
+
+def require_mapping_columns(
+        mapping_table: pd.DataFrame, map_from_col: str, map_to_col: str,
+    ) -> None:
+    """
+    Raise if a user-provided ID mapping table lacks requested columns.
+    """
+    missing_columns = [
+        column
+        for column in (map_from_col, map_to_col)
+        if column not in mapping_table.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "ID mapping table is missing required columns: "
+            f"{missing_columns}")
+
+
+def normalize_mapping_table(
+        mapping_table: pd.DataFrame, map_from_col: str, map_to_col: str,
+    ) -> pd.DataFrame:
+    """
+    Return non-empty raw-to-canonical ID rows as trimmed strings.
+    """
+    require_mapping_columns(mapping_table, map_from_col, map_to_col)
+    work = mapping_table[[map_from_col, map_to_col]].copy()
+    missing_mask = (
+        work[map_from_col].isna()
+        | work[map_to_col].isna()
+    )
+    work[map_from_col] = work[map_from_col].astype(str).str.strip()
+    work[map_to_col] = work[map_to_col].astype(str).str.strip()
+    missing_mask = (
+        missing_mask
+        | work[map_from_col].eq("")
+        | work[map_to_col].eq("")
+    )
+    work = work.loc[~missing_mask].drop_duplicates().reset_index(drop=True)
+
+    return work
+
+
+def build_id_mapping(
+        mapping_table: pd.DataFrame, map_from_col: str, map_to_col: str,
+    ) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """
+    Build raw-to-canonical mappings and record one-to-many ambiguities.
+
+    Many raw IDs may point to the same canonical ID. A single raw ID that
+    points to multiple canonical IDs is treated as ambiguous and is excluded
+    from the usable mapping.
+    """
+    work = normalize_mapping_table(
+        mapping_table=mapping_table,
+        map_from_col=map_from_col,
+        map_to_col=map_to_col,
+    )
+    mapping: dict[str, str] = {}
+    ambiguous: dict[str, list[str]] = {}
+    for raw_id, group in work.groupby(map_from_col, sort=True):
+        canonical_ids = sorted(set(group[map_to_col].tolist()))
+        if len(canonical_ids) == 1:
+            mapping[str(raw_id)] = canonical_ids[0]
+        else:
+            ambiguous[str(raw_id)] = canonical_ids
+
+    return mapping, ambiguous
+
+
+def apply_id_mapping_to_pairs(
+        pairs: pd.DataFrame, mapping_table: pd.DataFrame,
+        map_from_col: str, map_to_col: str,
+    ) -> PairProcessingResult:
+    """
+    Map pair protein IDs to canonical IDs before pair deduplication.
+
+    This helper is deliberately dataset-agnostic: loaders pass a pair table
+    and an explicit user-supplied mapping table. It does not perform online
+    lookup, synonym expansion, or biological guessing.
+    """
+    work = prepare_pair_columns(pairs)
+    mapping, ambiguous_mapping = build_id_mapping(
+        mapping_table=mapping_table,
+        map_from_col=map_from_col,
+        map_to_col=map_to_col,
+    )
+    observed_interactors = sorted(
+        set(work["protein_a"]) | set(work["protein_b"]))
+    ambiguous_ids = [
+        interactor for interactor in observed_interactors
+        if interactor in ambiguous_mapping
+    ]
+    unmapped_ids = [
+        interactor for interactor in observed_interactors
+        if interactor not in mapping and interactor not in ambiguous_mapping
+    ]
+    mapped_interactors = [
+        interactor for interactor in observed_interactors
+        if interactor in mapping
+    ]
+
+    ambiguous_set = set(ambiguous_ids)
+    unmapped_set = set(unmapped_ids)
+    ambiguous_pair_mask = (
+        work["protein_a"].isin(ambiguous_set)
+        | work["protein_b"].isin(ambiguous_set)
+    )
+    unmapped_pair_mask = (
+        ~ambiguous_pair_mask
+        & (
+            work["protein_a"].isin(unmapped_set)
+            | work["protein_b"].isin(unmapped_set)
+        )
+    )
+    keep_mask = ~(ambiguous_pair_mask | unmapped_pair_mask)
+    mapped_pairs = work.loc[keep_mask].copy().reset_index(drop=True)
+    if not mapped_pairs.empty:
+        mapped_pairs["protein_a"] = mapped_pairs["protein_a"].map(mapping)
+        mapped_pairs["protein_b"] = mapped_pairs["protein_b"].map(mapping)
+
+    n_pairs_before = int(len(work))
+    n_pairs_dropped_ambiguous = int(ambiguous_pair_mask.sum())
+    n_pairs_dropped_unmapped = int(unmapped_pair_mask.sum())
+    n_pairs_after = int(len(mapped_pairs))
+    metadata = {
+        "n_pairs_before_id_mapping": n_pairs_before,
+        "n_pairs_after_id_mapping": n_pairs_after,
+        "n_pairs_dropped_id_mapping": int(n_pairs_before - n_pairs_after),
+        "n_pairs_dropped_unmapped_id": n_pairs_dropped_unmapped,
+        "n_pairs_dropped_ambiguous_id": n_pairs_dropped_ambiguous,
+        "n_interactors_total": int(len(observed_interactors)),
+        "n_interactors_mapped": int(len(mapped_interactors)),
+        "n_interactors_unmapped": int(len(unmapped_ids)),
+        "n_interactors_ambiguous": int(len(ambiguous_ids)),
+        "unmapped_id_examples": unmapped_ids[:10],
+        "ambiguous_id_examples": [
+            {
+                "raw_id": raw_id,
+                "canonical_ids": ambiguous_mapping[raw_id],
+            }
+            for raw_id in ambiguous_ids[:10]
+        ],
+    }
+
+    return PairProcessingResult(pairs=mapped_pairs, metadata=metadata)
 
 
 def contradiction_examples(

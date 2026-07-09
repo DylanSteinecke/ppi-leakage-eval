@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from ppi_dataset_utils import (
+    apply_id_mapping_to_pairs,
     canonicalize_filter_and_assign,
     canonicalize_pairs,
     infer_separator,
@@ -96,6 +97,7 @@ def test_duplicate_fasta_ids_fail(tmp_path):
 
 def test_extension_separator_inference(tmp_path):
     assert infer_separator(tmp_path / "pairs.csv") == ","
+    assert infer_separator(tmp_path / "pairs.tab") == "\t"
     assert infer_separator(tmp_path / "pairs.tsv") == "\t"
     assert infer_separator(tmp_path / "pairs.txt") == "\t"
 
@@ -220,6 +222,83 @@ def test_canonical_pair_ids_are_generated_after_deduplication():
         ["C", "D", 0],
         ["A", "B", 1],
     ]
+
+
+def test_id_mapping_happens_before_pair_deduplication():
+    pairs = pair_frame([
+        ("A_alias", "B_alias", 1),
+        ("A", "B", 1),
+        ("C", "D", 1),
+    ])
+    mapping_table = pd.DataFrame({
+        "raw_id": ["A_alias", "A", "B_alias", "B", "C", "D"],
+        "canonical_id": ["UPA", "UPA", "UPB", "UPB", "UPC", "UPD"],
+    })
+
+    mapped = apply_id_mapping_to_pairs(
+        pairs=pairs,
+        mapping_table=mapping_table,
+        map_from_col="raw_id",
+        map_to_col="canonical_id",
+    )
+    canonicalized = canonicalize_pairs(mapped.pairs)
+
+    assert mapped.metadata["n_pairs_before_id_mapping"] == 3
+    assert mapped.metadata["n_pairs_after_id_mapping"] == 3
+    assert canonicalized.metadata["n_duplicate_pairs_removed"] == 1
+    assert canonicalized.pairs[["protein_a", "protein_b", "label"]].values.tolist() == [
+        ["UPA", "UPB", 1],
+        ["UPC", "UPD", 1],
+    ]
+
+
+def test_id_mapping_drops_unmapped_and_ambiguous_pairs():
+    pairs = pair_frame([
+        ("A", "B", 1),
+        ("X", "C", 1),
+        ("AMB", "D", 1),
+    ])
+    mapping_table = pd.DataFrame({
+        "raw_id": ["A", "B", "C", "D", "AMB", "AMB"],
+        "canonical_id": ["UPA", "UPB", "UPC", "UPD", "UP1", "UP2"],
+    })
+
+    result = apply_id_mapping_to_pairs(
+        pairs=pairs,
+        mapping_table=mapping_table,
+        map_from_col="raw_id",
+        map_to_col="canonical_id",
+    )
+
+    assert result.pairs[["protein_a", "protein_b", "label"]].values.tolist() == [
+        ["UPA", "UPB", 1],
+    ]
+    assert result.metadata["n_pairs_before_id_mapping"] == 3
+    assert result.metadata["n_pairs_after_id_mapping"] == 1
+    assert result.metadata["n_pairs_dropped_unmapped_id"] == 1
+    assert result.metadata["n_pairs_dropped_ambiguous_id"] == 1
+    assert result.metadata["n_interactors_unmapped"] == 1
+    assert result.metadata["n_interactors_ambiguous"] == 1
+    assert result.metadata["unmapped_id_examples"] == ["X"]
+    assert result.metadata["ambiguous_id_examples"] == [
+        {"raw_id": "AMB", "canonical_ids": ["UP1", "UP2"]},
+    ]
+
+
+def test_id_mapping_table_requires_requested_columns():
+    pairs = pair_frame([("A", "B", 1)])
+    mapping_table = pd.DataFrame({
+        "wrong_raw_col": ["A", "B"],
+        "canonical_id": ["UPA", "UPB"],
+    })
+
+    with pytest.raises(ValueError, match="ID mapping table is missing"):
+        apply_id_mapping_to_pairs(
+            pairs=pairs,
+            mapping_table=mapping_table,
+            map_from_col="raw_id",
+            map_to_col="canonical_id",
+        )
 
 
 def test_generic_edges_positive_negative_cli_writes_canonical_outputs(tmp_path):
@@ -368,6 +447,177 @@ def test_biogrid_cli_filters_model_organism_and_writes_metadata(tmp_path):
             "n_positive_after_loader_filters"
         ]
         == 3
+    )
+    assert metadata["id_mapping_used"] is False
+
+
+def test_biogrid_id_map_maps_before_deduplication(tmp_path):
+    fasta_path = tmp_path / "canonical.fasta"
+    interactions_path = tmp_path / "biogrid.tsv"
+    id_map_path = tmp_path / "id_map.tsv"
+    out_dir = tmp_path / "processed"
+    write_test_fasta(fasta_path, ["UPA", "UPB", "UPC", "UPD"])
+    write_text(
+        interactions_path,
+        "Interactor A\tInteractor B\n"
+        "rawA1\trawB1\n"
+        "rawA2\trawB2\n"
+        "rawC\trawD\n",
+    )
+    write_text(
+        id_map_path,
+        "raw_id\tcanonical_id\n"
+        "rawA1\tUPA\n"
+        "rawA2\tUPA\n"
+        "rawB1\tUPB\n"
+        "rawB2\tUPB\n"
+        "rawC\tUPC\n"
+        "rawD\tUPD\n",
+    )
+
+    run_prep_cli(
+        "biogrid",
+        "--dataset-name", "biogrid_mapped",
+        "--interactions", interactions_path,
+        "--fasta", fasta_path,
+        "--out-dir", out_dir,
+        "--protein-a-col", "Interactor A",
+        "--protein-b-col", "Interactor B",
+        "--id-map", id_map_path,
+        "--map-from-col", "raw_id",
+        "--map-to-col", "canonical_id",
+        "--sample-negatives",
+        "--negative-ratio", "1.0",
+        "--seed", "7",
+    )
+
+    dataset_dir = out_dir / "biogrid_mapped"
+    pairs = pd.read_csv(dataset_dir / "pairs.csv")
+    metadata = json.loads(
+        (dataset_dir / "dataset_metadata.json").read_text(encoding="utf-8"))
+    positive_keys = {
+        tuple(row)
+        for row in pairs.loc[
+            pairs["label"] == 1, ["protein_a", "protein_b"]
+        ].itertuples(index=False, name=None)
+    }
+
+    assert positive_keys == {("UPA", "UPB"), ("UPC", "UPD")}
+    assert not set(pairs["protein_a"]).union(pairs["protein_b"]) & {
+        "rawA1", "rawA2", "rawB1", "rawB2", "rawC", "rawD",
+    }
+    assert metadata["id_mapping_used"] is True
+    assert metadata["id_map_path"] == str(id_map_path)
+    assert metadata["map_from_col"] == "raw_id"
+    assert metadata["map_to_col"] == "canonical_id"
+    assert metadata["n_pairs_before_id_mapping"] == 3
+    assert metadata["n_pairs_after_id_mapping"] == 3
+    assert metadata["n_duplicate_pairs_removed"] == 1
+    assert metadata["n_positive_after_id_mapping"] == 3
+
+
+def test_biogrid_id_map_drops_and_counts_unmapped_and_ambiguous_ids(tmp_path):
+    fasta_path = tmp_path / "canonical.fasta"
+    interactions_path = tmp_path / "biogrid.tsv"
+    id_map_path = tmp_path / "id_map.tsv"
+    out_dir = tmp_path / "processed"
+    write_test_fasta(fasta_path, ["UPA", "UPB", "UPP", "UPQ"])
+    write_text(
+        interactions_path,
+        "Interactor A\tInteractor B\n"
+        "rawA\trawB\n"
+        "rawP\trawQ\n"
+        "missing\trawB\n"
+        "ambiguous\trawQ\n",
+    )
+    write_text(
+        id_map_path,
+        "raw_id\tcanonical_id\n"
+        "rawA\tUPA\n"
+        "rawB\tUPB\n"
+        "rawP\tUPP\n"
+        "rawQ\tUPQ\n"
+        "ambiguous\tUPX\n"
+        "ambiguous\tUPY\n",
+    )
+
+    run_prep_cli(
+        "biogrid",
+        "--dataset-name", "biogrid_mapped_drops",
+        "--interactions", interactions_path,
+        "--fasta", fasta_path,
+        "--out-dir", out_dir,
+        "--protein-a-col", "Interactor A",
+        "--protein-b-col", "Interactor B",
+        "--id-map", id_map_path,
+        "--map-from-col", "raw_id",
+        "--map-to-col", "canonical_id",
+        "--sample-negatives",
+        "--negative-ratio", "1.0",
+        "--seed", "11",
+    )
+
+    metadata = json.loads(
+        (
+            out_dir / "biogrid_mapped_drops" / "dataset_metadata.json"
+        ).read_text(encoding="utf-8"))
+
+    assert metadata["n_pairs_before_id_mapping"] == 4
+    assert metadata["n_pairs_after_id_mapping"] == 2
+    assert metadata["n_pairs_dropped_id_mapping"] == 2
+    assert metadata["n_pairs_dropped_unmapped_id"] == 1
+    assert metadata["n_pairs_dropped_ambiguous_id"] == 1
+    assert metadata["n_interactors_unmapped"] == 1
+    assert metadata["n_interactors_ambiguous"] == 1
+    assert metadata["unmapped_id_examples"] == ["missing"]
+    assert metadata["ambiguous_id_examples"] == [
+        {"raw_id": "ambiguous", "canonical_ids": ["UPX", "UPY"]},
+    ]
+
+
+def test_biogrid_id_map_args_fail_clearly(tmp_path):
+    fasta_path = tmp_path / "model_organism.fasta"
+    interactions_path = tmp_path / "biogrid.tsv"
+    id_map_path = tmp_path / "id_map.tsv"
+    out_dir = tmp_path / "processed"
+    write_test_fasta(fasta_path, ["A", "B", "C", "D"])
+    write_text(interactions_path, "Interactor A\tInteractor B\nA\tB\nC\tD\n")
+    write_text(id_map_path, "raw_id\tcanonical_id\nA\tA\nB\tB\n")
+
+    missing_map_col_process = run_prep_cli(
+        "biogrid",
+        "--dataset-name", "missing_mapping_args",
+        "--interactions", interactions_path,
+        "--fasta", fasta_path,
+        "--out-dir", out_dir,
+        "--protein-a-col", "Interactor A",
+        "--protein-b-col", "Interactor B",
+        "--id-map", id_map_path,
+        "--sample-negatives",
+        check=False,
+    )
+    stray_map_col_process = run_prep_cli(
+        "biogrid",
+        "--dataset-name", "stray_mapping_args",
+        "--interactions", interactions_path,
+        "--fasta", fasta_path,
+        "--out-dir", out_dir,
+        "--protein-a-col", "Interactor A",
+        "--protein-b-col", "Interactor B",
+        "--map-from-col", "raw_id",
+        "--sample-negatives",
+        check=False,
+    )
+
+    assert missing_map_col_process.returncode != 0
+    assert (
+        "--id-map requires --map-from-col and --map-to-col"
+        in missing_map_col_process.stderr
+    )
+    assert stray_map_col_process.returncode != 0
+    assert (
+        "--map-from-col and --map-to-col can only be used with --id-map"
+        in stray_map_col_process.stderr
     )
 
 
