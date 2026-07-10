@@ -60,8 +60,9 @@ CLASSIFIER_LABELS = {
 }
 SPLIT_STRATEGY_LABELS = {
     "random": "Random Split",
-    "protein_disjoint_components": "Disjoint Protein Split",
-    "protein_disjoint_prune_edges": "Disjoint Protein Pruned-Edge Split",
+    "c1": "C1 Edge-Disjoint Split",
+    "c2": "C2 One-Novel-Partner Split",
+    "c3": "C3 Protein-Disjoint Split",
     "provided_column": "Provided Split",
 }
 
@@ -542,9 +543,8 @@ def combined_summary_key_columns(
         "target_train_size",
         "actual_train_size",
         "actual_test_size",
-        "n_connected_components",
-        "n_pruned_pairs",
-        "pruned_pair_fraction",
+        "n_discarded_edges",
+        "discarded_edge_fraction",
         "n_train",
         "n_test",
         "n_runs",

@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from ppi_inputs import prepare_input_data
-from ppi_splits import (
+from ppi_benchmark.inputs import prepare_input_data
+from ppi_benchmark.splits import (
     add_source_row_index,
     compute_split_metadata,
     make_split_assignments,
@@ -146,9 +146,10 @@ def test_metadata_contains_required_audit_fields(tmp_path):
         seed=7,
         has_validation_split=False,
         evaluate_test_metrics=True,
-        n_connected_components=None,
-        n_pruned_pairs=0,
-        pruned_pair_fraction=0.0,
+        n_split_trials=100,
+        n_discarded_edges=0,
+        discarded_edge_fraction=0.0,
+        split_audit=None,
     )
     pairs = pd.DataFrame({
         "source_row_index": [0, 1],

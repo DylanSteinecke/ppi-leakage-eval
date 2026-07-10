@@ -10,8 +10,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 TRAIN_SCRIPT = SCRIPTS_DIR / "train_test_ppi_pred.py"
 
-sys.path.insert(0, str(SCRIPTS_DIR))
-
 
 @pytest.fixture
 def ppi_test_data(tmp_path):

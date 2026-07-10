@@ -1,6 +1,24 @@
 # PPI Leakage
 Testing how robust models and datasets for protein-protein interactions are to leakage.
 
+## Installation
+
+Activate the project environment and install the package in editable mode:
+
+```bash
+conda activate ppi
+python -m pip install -e .
+```
+
+This provides `ppi-train`, `ppi-prepare`, `ppi-aggregate`, and
+`ppi-make-toy-data`. Existing commands such as
+`python scripts/train_test_ppi_pred.py` remain supported as compatibility
+entry points.
+
+The installable implementation lives under `src/ppi_benchmark/`. Command-line
+orchestration is in `cli/`, dataset preparation and source-specific loaders are
+in `datasets/`, and reusable benchmark modules are at the package root.
+
 ## Tests
 Run the lightweight regression suite with:
 
@@ -11,30 +29,41 @@ python -m pytest
 For connected-change checklists, see
 [`docs/change_checklists.md`](docs/change_checklists.md).
 
-## Prepare the yeast BioGRID data
+## Run the yeast BioGRID example
 
 The local UniProt FASTA uses headers such as `sp|P04387|GAL80_YEAST`, while
-BioGRID stores the matching accession as `P04387`. Prepare the current local
-files with:
+BioGRID stores the matching accession as `P04387`. The example runner prepares
+the current local files, samples negatives within the yeast taxon, and runs a
+small sparse benchmark:
 
 ```bash
-python scripts/prepare_ppi_dataset.py biogrid \
-  --dataset-name biogrid_yeast_physical \
-  --interactions input/BIOGRID-ORGANISM-LATEST.tab3.zip \
-  --archive-member BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-5.0.259.tab3.txt \
-  --fasta input/UP000002311_559292.fasta \
-  --fasta-id-format uniprot_accession \
-  --protein-a-col "SWISS-PROT Accessions Interactor A" \
-  --protein-b-col "SWISS-PROT Accessions Interactor B" \
-  --experimental-system-type-col "Experimental System Type" \
-  --allowed-system-types physical \
-  --ambiguous-id-policy drop \
-  --sample-negatives \
-  --negative-ratio 1.0 \
-  --out-dir processed
+conda activate ppi
+YEAST_EXAMPLE=1 bash scripts/run_all_train_test_ppi_pred.sh --no-metrics-plots
 ```
 
+Prepared data are written under `processed/biogrid_yeast_physical/` as
+`pairs.csv`, `proteins.fasta`, `protein_metadata.csv`, and
+`dataset_metadata.json`. The protein sidecar stores one NCBI `taxon_id` per
+protein without repeating species data on every interaction row. The benchmark
+also accepts it directly with `--protein-metadata`; a sidecar beside canonical
+`pairs.csv` is discovered automatically.
+
 The loader reads the large archive in chunks. Sampled negatives are unobserved
-protein pairs, not experimentally confirmed non-interactions. The archive
-member includes a BioGRID release number and must be updated when the `LATEST`
-download changes.
+protein pairs from taxonomy-pair strata represented by positives, not
+experimentally confirmed non-interactions. The archive member includes a
+BioGRID release number and must be updated when the `LATEST` download changes.
+
+## Leakage-aware splits
+
+Use `--split-strategy c1`, `c2`, or `c3` to select a standard PPI
+generalization regime:
+
+- `c1` holds out edges while keeping every test protein represented in train.
+- `c2` gives each test edge one train group and one held-out group.
+- `c3` separates train and test protein groups completely.
+
+C2 and C3 discard edges that do not match the selected regime. The runner
+evaluates 100 deterministic candidate group assignments by default; adjust
+this with `--n-split-trials`. These modes currently require `--val-size 0`.
+Detailed retention, class-balance, degree, overlap, and invariant diagnostics
+are written under `split_audit` in `split_metadata.json`.

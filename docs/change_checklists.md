@@ -15,7 +15,7 @@ when they are useful for auditability, grouping, or cross-run comparison.
 
 ## When Adding or Changing a CLI Flag
 
-- Update `argument_parser()` in `scripts/train_test_ppi_pred.py`.
+- Update `argument_parser()` in `src/ppi_benchmark/cli/train.py`.
 - Decide whether the flag should also be exposed through
   `scripts/run_all_train_test_ppi_pred.sh` as an environment variable.
 - Confirm the flag appears correctly in `resolved_args` inside
@@ -23,10 +23,10 @@ when they are useful for auditability, grouping, or cross-run comparison.
 - Add or update top-level `split_metadata.json` fields only if the flag is
   important for auditability or benchmark comparison.
 - Confirm `invocations.jsonl` captures the invocation correctly.
-- Update `scripts/aggregate_benchmark_results.py` if the flag should appear in
+- Update `src/ppi_benchmark/cli/aggregate.py` if the flag should appear in
   `benchmark_manifest.csv` or `benchmark_summary.csv`.
-- Update `ppi_results.SUMMARY_GROUP_COLUMNS` only if metrics summaries should
-  be grouped by the new flag.
+- Update `ppi_benchmark.results.SUMMARY_GROUP_COLUMNS` only if metrics
+  summaries should be grouped by the new flag.
 - Add or update pytest coverage for the flag's behavior.
 - Update README or runner examples if users need to know about the flag.
 
@@ -49,7 +49,9 @@ Current runner env vars include:
 
 - `PAIRS`
 - `FASTA`
+- `PROTEIN_METADATA`
 - `OUT_DIR`
+- `K`
 - `TRAIN_SIZE`
 - `VAL_SIZE`
 - `NUM_RERUNS`
@@ -57,10 +59,17 @@ Current runner env vars include:
 - `EXECUTION_ID`
 - `RUN_STAMP`
 - `AGGREGATE_RESULTS`
+- `YEAST_EXAMPLE`
+- `YEAST_DATASET_NAME`
+- `PREPARE_YEAST_DATA`
+- `BIOGRID_ARCHIVE`
+- `BIOGRID_ARCHIVE_MEMBER`
+- `YEAST_FASTA`
+- `NEGATIVE_RATIO`
 
 ## When Adding a Split Strategy
 
-- Add the strategy constant and choice in `scripts/ppi_inputs.py`.
+- Add the strategy constant and choice in `src/ppi_benchmark/inputs.py`.
 - Implement split creation logic in or near `load_or_make_split()`.
 - Ensure train/val/test behavior is correct.
 - Ensure provided split behavior remains unchanged.
@@ -73,13 +82,13 @@ Current runner env vars include:
 
 ## When Adding a Split Diagnostic
 
-- Update `scripts/split_diagnostics.py`.
+- Update `src/ppi_benchmark/diagnostics.py`.
 - Store the diagnostic under `split_metadata["diagnostics"]`.
 - Do not create a separate diagnostics artifact unless there is a strong
   reason.
 - Ensure all diagnostic values are JSON-serializable native Python types.
 - Add capped examples when useful for debugging.
-- Update `aggregate_benchmark_results.DIAGNOSTIC_COLUMNS` if the diagnostic
+- Update `ppi_benchmark.cli.aggregate.DIAGNOSTIC_COLUMNS` if the diagnostic
   should appear in benchmark-level CSVs.
 - Add tests in `tests/test_split_diagnostics.py`.
 - Update plots or tables only if they display the diagnostic.
@@ -101,7 +110,7 @@ should not fail runs unless a future explicit validation mode is added.
 
 ## When Adding a New Output Artifact
 
-- Add the path to `OutputPaths` in `scripts/train_test_ppi_pred.py`.
+- Add the path to `OutputPaths` in `src/ppi_benchmark/cli/train.py`.
 - Define the canonical filename near the other output filename constants.
 - Update `prepare_outputs()`.
 - Decide whether the artifact exists always, only with validation, only with
@@ -116,7 +125,7 @@ should not fail runs unless a future explicit validation mode is added.
 
 ## When Adding a Model or Classifier
 
-- Update model choices in `scripts/ppi_models.py`.
+- Update model choices in `src/ppi_benchmark/models.py`.
 - Update CLI choices if needed.
 - Add fast unit tests or CLI smoke tests.
 - Ensure model metadata appears in metrics rows.
@@ -125,7 +134,7 @@ should not fail runs unless a future explicit validation mode is added.
 
 ## When Adding a Feature Type
 
-- Update `scripts/ppi_features.py`.
+- Update `src/ppi_benchmark/features.py`.
 - Update `FEATURE_CHOICES`.
 - Ensure feature extractors fit only on train data and only transform val/test.
 - Add or update leakage tests for train-only feature fitting.
@@ -135,7 +144,7 @@ should not fail runs unless a future explicit validation mode is added.
 
 ## When Changing Split Metadata
 
-- Update `scripts/ppi_splits.py`.
+- Update `src/ppi_benchmark/splits.py`.
 - Keep `split_assignments.csv` minimal.
 - Keep `dropped_pairs.csv` minimal.
 - Keep `split_metadata.json` as the main audit artifact.
@@ -148,7 +157,7 @@ should not fail runs unless a future explicit validation mode is added.
 
 ## When Changing Benchmark Aggregation
 
-- Update `scripts/aggregate_benchmark_results.py`.
+- Update `src/ppi_benchmark/cli/aggregate.py`.
 - Decide whether the new field belongs in:
   - `MANIFEST_COLUMNS`
   - `SUMMARY_CONTEXT_COLUMNS`

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from aggregate_benchmark_results import aggregate_benchmark_results
+from ppi_benchmark.cli.aggregate import aggregate_benchmark_results
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,9 +65,8 @@ def metadata(run_dir, split_strategy="random"):
         "n_pairs_after_filtering": 10,
         "n_dropped_pairs": 0,
         "eval_test_set": False,
-        "n_connected_components": None,
-        "n_pruned_pairs": 0,
-        "pruned_pair_fraction": 0.0,
+        "n_discarded_edges": 0,
+        "discarded_edge_fraction": 0.0,
         "resolved_args": {
             "features": ["tfidf"],
             "classifiers": ["always_positive"],
@@ -111,8 +110,7 @@ def summary_row(split_name, features="tfidf", classifier="logistic"):
 def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     benchmark_dir = tmp_path / "benchmark"
     run_dir = benchmark_dir / "random_20260709T000000Z"
-    second_run_dir = benchmark_dir / (
-        "protein_disjoint_components_20260709T000000Z")
+    second_run_dir = benchmark_dir / "c3_20260709T000000Z"
 
     write_json(
         run_dir / "splits" / "split_metadata.json",
@@ -150,7 +148,7 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         second_run_dir / "splits" / "split_metadata.json",
         metadata(
             second_run_dir,
-            split_strategy="protein_disjoint_components",
+            split_strategy="c3",
         ),
     )
     pd.DataFrame([summary_row("train", classifier="always_positive")]).to_csv(
@@ -190,7 +188,7 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     assert "diagnostics_n_unordered_pair_overlaps_train_val" in summary_df
     assert set(summary_df["execution_id"]) == {
         "random_execution",
-        "protein_disjoint_components_execution",
+        "c3_execution",
     }
 
 
@@ -233,3 +231,6 @@ def test_runner_script_has_valid_syntax_and_benchmark_knobs():
     assert "date -u +%Y-%m-%d_%H-%M-%S" in runner_text
     assert '--val-size "$VAL_SIZE"' in runner_text
     assert "scripts/aggregate_benchmark_results.py" in runner_text
+    assert 'YEAST_EXAMPLE="${YEAST_EXAMPLE:-0}"' in runner_text
+    assert "scripts/prepare_ppi_dataset.py biogrid" in runner_text
+    assert '--protein-metadata "$PROTEIN_METADATA"' in runner_text

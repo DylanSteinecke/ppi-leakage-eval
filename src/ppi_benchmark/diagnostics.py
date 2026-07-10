@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 
-from ppi_inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
+from .inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
 
 
 DEFAULT_SPLIT_ORDER = (TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT)
@@ -354,11 +354,9 @@ def compute_ppi_split_diagnostics(
             "unordered_pairs",
         ))
 
-    diagnostics["n_connected_components"] = native_value(
-        getattr(args, "n_connected_components", None))
-    diagnostics["n_pruned_pairs"] = native_value(
-        getattr(args, "n_pruned_pairs", 0))
-    diagnostics["pruned_pair_fraction"] = native_value(
-        getattr(args, "pruned_pair_fraction", 0.0))
+    diagnostics["n_discarded_edges"] = native_value(
+        getattr(args, "n_discarded_edges", 0))
+    diagnostics["discarded_edge_fraction"] = native_value(
+        getattr(args, "discarded_edge_fraction", 0.0))
 
     return native_value(diagnostics)

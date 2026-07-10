@@ -5,13 +5,13 @@ import random
 import pandas as pd
 import pytest
 
-from make_toy_data import (
+from ppi_benchmark.cli.make_toy_data import (
     PairCandidate,
     positive_float,
     probability,
     weighted_sample_without_replacement,
 )
-from ppi_results import summarize_metrics
+from ppi_benchmark.results import summarize_metrics
 
 
 def test_summarize_metrics_supports_plain_metric_tables(tmp_path):

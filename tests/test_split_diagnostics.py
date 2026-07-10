@@ -1,19 +1,18 @@
 import json
-from types import SimpleNamespace
 
 import pandas as pd
 
-from ppi_inputs import (
+from ppi_benchmark.inputs import (
     load_split_column,
-    make_protein_component_split,
     TEST_SPLIT,
     TRAIN_SPLIT,
     VAL_SPLIT,
 )
-from split_diagnostics import (
+from ppi_benchmark.diagnostics import (
     compute_generic_split_diagnostics,
     compute_ppi_split_diagnostics,
 )
+from ppi_benchmark.splitters import split_pairs
 
 
 def pair_frame(rows):
@@ -23,36 +22,6 @@ def pair_frame(rows):
     return pd.DataFrame(
         rows,
         columns=["protein_a", "protein_b", "label"],
-    )
-
-
-def multi_component_pairs(n_components=5):
-    """
-    Return disconnected pair components with both labels in each component.
-    """
-    rows = []
-    for component_index in range(n_components):
-        protein_a = f"C{component_index}_A"
-        protein_b = f"C{component_index}_B"
-        protein_c = f"C{component_index}_C"
-        rows.extend([
-            (protein_a, protein_b, 0),
-            (protein_b, protein_c, 1),
-        ])
-
-    return pair_frame(rows)
-
-
-def split_args(train_size=0.6, val_size=0.2, seed=5):
-    """
-    Return minimal args for split helper tests.
-    """
-    return SimpleNamespace(
-        train_size=train_size,
-        val_size=val_size,
-        seed=seed,
-        n_pruned_pairs=0,
-        pruned_pair_fraction=0.0,
     )
 
 
@@ -235,19 +204,23 @@ def test_provided_split_diagnostics_use_actual_split_rows():
     assert diagnostics["label_counts_val"] == {"0": 1, "1": 1}
 
 
-def test_protein_disjoint_components_reports_zero_shared_proteins():
-    pairs = multi_component_pairs()
-
-    train_df, val_df, test_df = make_protein_component_split(
+def test_c3_reports_zero_shared_proteins():
+    pairs = pair_frame([
+        (f"P{left}", f"P{right}", (left + right) % 2)
+        for left in range(12)
+        for right in range(left + 1, 12)
+    ])
+    split_result = split_pairs(
         pairs,
-        split_args(),
+        mode="c3",
+        test_size=0.3,
+        seed=5,
+        n_trials=20,
     )
     diagnostics = compute_ppi_split_diagnostics(
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
+        train_df=split_result.train,
+        val_df=None,
+        test_df=split_result.test,
     )
 
-    assert diagnostics["n_shared_proteins_train_val"] == 0
     assert diagnostics["n_shared_proteins_train_test"] == 0
-    assert diagnostics["n_shared_proteins_val_test"] == 0

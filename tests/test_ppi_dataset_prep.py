@@ -4,17 +4,22 @@ import math
 import subprocess
 import sys
 import zipfile
+from itertools import combinations, product
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from ppi_dataset_utils import (
+from ppi_benchmark.datasets.common import (
     apply_id_mapping_to_pairs,
     canonicalize_filter_and_assign,
     canonicalize_pairs,
+    IndexedPairSpace,
     infer_separator,
     read_fasta,
+    read_fasta_data,
+    read_fasta_with_taxa,
+    read_protein_taxa,
     read_table,
     sample_negative_pairs,
     validate_negative_ratio,
@@ -112,6 +117,88 @@ def test_gzip_uniprot_fasta_ids_are_normalized(tmp_path):
     )
 
     assert sequences == {"P12345": "AAAA", "Q98765": "CCCC"}
+
+
+def test_uniprot_ox_taxon_ids_are_parsed_with_sequences(tmp_path):
+    fasta_path = tmp_path / "proteins.fasta"
+    write_text(
+        fasta_path,
+        ">sp|P12345|PROT_A Protein A OX=559292 GN=GENE_A\nAAAA\n"
+        ">tr|Q98765|PROT_B Protein B OX=10090 GN=GENE_B\nCCCC\n",
+    )
+
+    fasta_data = read_fasta_data(
+        fasta_path,
+        id_format="uniprot_accession",
+    )
+
+    assert fasta_data.sequences == {"P12345": "AAAA", "Q98765": "CCCC"}
+    assert fasta_data.taxon_ids == {"P12345": "559292", "Q98765": "10090"}
+
+
+@pytest.mark.parametrize(
+    "contents, missing_column",
+    [
+        ("protein_id\nA\n", "taxon_id"),
+        ("taxon_id\n1\n", "protein_id"),
+    ],
+)
+def test_protein_metadata_requires_canonical_columns(
+        tmp_path, contents, missing_column):
+    metadata_path = tmp_path / "protein_metadata.csv"
+    write_text(metadata_path, contents)
+
+    with pytest.raises(ValueError, match=missing_column):
+        read_protein_taxa(metadata_path)
+
+
+def test_protein_metadata_rejects_duplicate_and_missing_protein_ids(tmp_path):
+    duplicate_path = tmp_path / "duplicate_metadata.csv"
+    missing_path = tmp_path / "missing_metadata.csv"
+    write_text(duplicate_path, "protein_id,taxon_id\nA,1\nA,1\n")
+    write_text(missing_path, "protein_id,taxon_id\n,1\n")
+
+    with pytest.raises(ValueError, match="one row per protein_id"):
+        read_protein_taxa(duplicate_path)
+    with pytest.raises(ValueError, match="missing protein_id"):
+        read_protein_taxa(missing_path)
+
+
+@pytest.mark.parametrize("taxon_id", ["0", "-1", "mouse", "1.5"])
+def test_protein_metadata_rejects_invalid_taxon_ids(tmp_path, taxon_id):
+    metadata_path = tmp_path / "protein_metadata.csv"
+    write_text(metadata_path, f"protein_id,taxon_id\nA,{taxon_id}\n")
+
+    with pytest.raises(ValueError, match="positive integer"):
+        read_protein_taxa(metadata_path)
+
+
+def test_conflicting_fasta_sidecar_and_dataset_taxa_are_rejected(tmp_path):
+    fasta_path = tmp_path / "proteins.fasta"
+    metadata_path = tmp_path / "protein_metadata.csv"
+    write_text(fasta_path, ">sp|A|PROT_A OX=1\nAAAA\n")
+    write_text(metadata_path, "protein_id,taxon_id\nA,2\n")
+
+    with pytest.raises(ValueError, match="Conflicting protein taxon"):
+        read_fasta_with_taxa(
+            fasta_path,
+            id_format="uniprot_accession",
+            protein_metadata_path=metadata_path,
+        )
+    with pytest.raises(ValueError, match="Conflicting protein taxon"):
+        read_fasta_with_taxa(
+            fasta_path,
+            id_format="uniprot_accession",
+            taxon_id="2",
+        )
+
+
+def test_fasta_rejects_conflicting_ox_fields(tmp_path):
+    fasta_path = tmp_path / "proteins.fasta"
+    write_text(fasta_path, ">A Protein A OX=1 OX=2\nAAAA\n")
+
+    with pytest.raises(ValueError, match="conflicting OX taxon IDs"):
+        read_fasta_data(fasta_path)
 
 
 def test_extension_separator_inference(tmp_path):
@@ -268,6 +355,173 @@ def test_negative_sampling_scales_without_materializing_pair_universe():
     ).any()
 
 
+def test_indexed_combination_pair_space_matches_explicit_pairs():
+    protein_ids = ["A", "B", "C", "D"]
+    pair_space = IndexedPairSpace(protein_ids)
+    expected_pairs = list(combinations(protein_ids, 2))
+
+    actual_pairs = [
+        pair_space.pair_from_index(index)
+        for index in range(pair_space.n_candidates)
+    ]
+
+    assert actual_pairs == expected_pairs
+    for index, pair in enumerate(expected_pairs):
+        assert pair_space.pair_index(*pair) == index
+        assert pair_space.pair_index(*reversed(pair)) == index
+
+
+def test_indexed_cross_taxon_pair_space_matches_explicit_pairs():
+    protein_a_ids = ["A", "B"]
+    protein_b_ids = ["X", "Y", "Z"]
+    pair_space = IndexedPairSpace(protein_a_ids, protein_b_ids)
+    expected_pairs = list(product(protein_a_ids, protein_b_ids))
+
+    actual_pairs = [
+        pair_space.pair_from_index(index)
+        for index in range(pair_space.n_candidates)
+    ]
+
+    assert actual_pairs == expected_pairs
+    for index, pair in enumerate(expected_pairs):
+        assert pair_space.pair_index(*pair) == index
+        assert pair_space.pair_index(*reversed(pair)) == index
+
+
+def test_negative_sampling_stays_within_positive_species_strata():
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+        ("W", "X", 1),
+        ("Y", "Z", 1),
+    ])
+    protein_taxa = {
+        "A": "1", "B": "1", "C": "1", "D": "1",
+        "W": "2", "X": "2", "Y": "2", "Z": "2",
+    }
+
+    negatives, metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=1.0,
+        seed=5,
+        protein_taxa=protein_taxa,
+    )
+
+    assert all(
+        protein_taxa[row.protein_a] == protein_taxa[row.protein_b]
+        for row in negatives.itertuples()
+    )
+    assert metadata["species_aware_sampling"] is True
+    assert metadata["sampled_negatives_by_taxon_pair"] == {
+        "1|1": 2,
+        "2|2": 2,
+    }
+
+
+def test_negative_sampling_preserves_observed_cross_species_stratum():
+    positives = pair_frame([
+        ("A", "X", 1),
+        ("B", "Y", 1),
+        ("C", "Z", 1),
+    ])
+    protein_taxa = {
+        "A": "1", "B": "1", "C": "1",
+        "X": "2", "Y": "2", "Z": "2",
+    }
+
+    negatives, metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=1.0,
+        seed=7,
+        protein_taxa=protein_taxa,
+    )
+
+    assert all(
+        protein_taxa[row.protein_a] != protein_taxa[row.protein_b]
+        for row in negatives.itertuples()
+    )
+    assert metadata["sampled_negatives_by_taxon_pair"] == {"1|2": 3}
+
+
+def test_negative_sampling_handles_mixed_taxon_pair_strata_reproducibly():
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+        ("W", "X", 1),
+        ("Y", "Z", 1),
+        ("A", "W", 1),
+        ("B", "X", 1),
+        ("C", "Y", 1),
+        ("D", "Z", 1),
+    ])
+    protein_taxa = {
+        "A": "1", "B": "1", "C": "1", "D": "1",
+        "W": "2", "X": "2", "Y": "2", "Z": "2",
+    }
+
+    first_negatives, first_metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=0.5,
+        seed=17,
+        protein_taxa=protein_taxa,
+    )
+    second_negatives, second_metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=0.5,
+        seed=17,
+        protein_taxa=protein_taxa,
+    )
+
+    pd.testing.assert_frame_equal(first_negatives, second_negatives)
+    assert first_metadata == second_metadata
+    assert first_metadata["sampled_negatives_by_taxon_pair"] == {
+        "1|1": 1,
+        "1|2": 2,
+        "2|2": 1,
+    }
+
+
+def test_species_aware_negative_sampling_rejects_missing_taxa():
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+    ])
+
+    with pytest.raises(ValueError, match="taxon_id for every eligible protein"):
+        sample_negative_pairs(
+            positive_pairs=positives,
+            negative_ratio=1.0,
+            seed=0,
+            protein_taxa={"A": "1", "B": "1", "C": "1"},
+        )
+
+
+def test_negative_sampling_redistributes_from_saturated_species_strata():
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+        ("E", "F", 1),
+    ])
+    protein_taxa = {
+        "A": "1", "B": "1",
+        "C": "2", "D": "2", "E": "2", "F": "2",
+    }
+
+    negatives, metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=1.0,
+        seed=3,
+        allowed_protein_ids=protein_taxa,
+        protein_taxa=protein_taxa,
+    )
+
+    assert len(negatives) == 3
+    assert metadata["sampled_negatives_by_taxon_pair"] == {
+        "1|1": 0,
+        "2|2": 3,
+    }
+
+
 def test_negative_sampling_fails_when_not_enough_candidates():
     positives = pair_frame([
         ("A", "B", 1),
@@ -401,6 +655,7 @@ def test_generic_edges_positive_negative_cli_writes_canonical_outputs(tmp_path):
         (dataset_dir / "dataset_metadata.json").read_text(encoding="utf-8"))
 
     assert (dataset_dir / "proteins.fasta").exists()
+    assert (dataset_dir / "protein_metadata.csv").exists()
     assert pairs.columns.tolist() == ["pair_id", "protein_a", "protein_b", "label"]
     assert set(pairs["label"]) == {0, 1}
     assert metadata["loader_name"] == "generic_edges"
@@ -431,6 +686,53 @@ def test_generic_edges_sampled_negatives_are_reproducible(tmp_path):
     second_pairs = pd.read_csv(out_dir / "sampled_two" / "pairs.csv")
 
     pd.testing.assert_frame_equal(first_pairs, second_pairs)
+
+
+def test_prepared_protein_metadata_contains_only_surviving_proteins(tmp_path):
+    fasta_path = tmp_path / "proteins.fasta"
+    positives_path = tmp_path / "positives.csv"
+    negatives_path = tmp_path / "negatives.csv"
+    out_dir = tmp_path / "processed"
+    write_test_fasta(fasta_path, ["A", "B", "C", "D", "E"])
+    write_text(
+        positives_path,
+        "protein_a,protein_b\nA,B\nC,MISSING\n",
+    )
+    write_text(
+        negatives_path,
+        "protein_a,protein_b\nC,D\nMISSING,E\n",
+    )
+
+    run_prep_cli(
+        "generic_edges",
+        "--dataset-name", "filtered_metadata",
+        "--positive-pairs", positives_path,
+        "--negative-pairs", negatives_path,
+        "--fasta", fasta_path,
+        "--taxon-id", "1",
+        "--out-dir", out_dir,
+    )
+
+    dataset_dir = out_dir / "filtered_metadata"
+    protein_metadata = pd.read_csv(
+        dataset_dir / "protein_metadata.csv",
+        dtype="string",
+    )
+    metadata = json.loads(
+        (dataset_dir / "dataset_metadata.json").read_text(encoding="utf-8"))
+
+    assert protein_metadata.columns.tolist() == ["protein_id", "taxon_id"]
+    assert protein_metadata.to_dict(orient="records") == [
+        {"protein_id": "A", "taxon_id": "1"},
+        {"protein_id": "B", "taxon_id": "1"},
+        {"protein_id": "C", "taxon_id": "1"},
+        {"protein_id": "D", "taxon_id": "1"},
+    ]
+    assert read_fasta(dataset_dir / "proteins.fasta").keys() == {
+        "A", "B", "C", "D",
+    }
+    assert metadata["n_pairs_dropped_missing_sequence"] == 2
+    assert metadata["species"]["n_proteins_with_taxon"] == 4
 
 
 def test_generic_edges_output_dir_overwrite_rules(tmp_path):
@@ -529,6 +831,10 @@ def test_biogrid_cli_filters_model_organism_and_writes_metadata(tmp_path):
     pairs = pd.read_csv(dataset_dir / "pairs.csv")
     metadata = json.loads(
         (dataset_dir / "dataset_metadata.json").read_text(encoding="utf-8"))
+    protein_metadata = pd.read_csv(
+        dataset_dir / "protein_metadata.csv",
+        dtype="string",
+    )
     positive_keys = {
         tuple(sorted((row.protein_a, row.protein_b)))
         for row in pairs[pairs["label"] == 1].itertuples()
@@ -550,6 +856,11 @@ def test_biogrid_cli_filters_model_organism_and_writes_metadata(tmp_path):
         == 3
     )
     assert metadata["id_mapping_used"] is False
+    assert set(protein_metadata["taxon_id"]) == {"559292"}
+    assert metadata["species_aware_sampling"] is True
+    assert metadata["sampled_negatives_by_taxon_pair"] == {
+        "559292|559292": 3,
+    }
 
 
 def test_biogrid_cli_reads_zip_member_and_compressed_uniprot_fasta(tmp_path):
@@ -559,7 +870,10 @@ def test_biogrid_cli_reads_zip_member_and_compressed_uniprot_fasta(tmp_path):
     out_dir = tmp_path / "processed"
     with gzip.open(fasta_path, "wt", encoding="utf-8") as fout:
         for protein_id in ("UPA", "UPB", "UPC", "UPD"):
-            fout.write(f">sp|{protein_id}|{protein_id}_YEAST\nACDEFGHIK\n")
+            fout.write(
+                f">sp|{protein_id}|{protein_id}_YEAST OX=559292\n"
+                "ACDEFGHIK\n"
+            )
     with zipfile.ZipFile(interactions_path, "w") as archive:
         archive.writestr("README.txt", "archive notes\n")
         archive.writestr(
@@ -590,12 +904,25 @@ def test_biogrid_cli_reads_zip_member_and_compressed_uniprot_fasta(tmp_path):
     pairs = pd.read_csv(dataset_dir / "pairs.csv")
     metadata = json.loads(
         (dataset_dir / "dataset_metadata.json").read_text(encoding="utf-8"))
+    protein_metadata = pd.read_csv(
+        dataset_dir / "protein_metadata.csv",
+        dtype="string",
+    )
 
     assert set(pairs["label"]) == {0, 1}
     assert set(pairs["protein_a"]) | set(pairs["protein_b"]) == {
         "UPA", "UPB", "UPC", "UPD",
     }
     assert metadata["n_pairs_dropped_ambiguous_interactor"] == 1
+    assert set(protein_metadata["taxon_id"]) == {"559292"}
+    assert metadata["species_aware_sampling"] is True
+    assert metadata["sampled_negatives_by_taxon_pair"] == {"559292|559292": 2}
+    assert metadata["species"] == {
+        "n_taxa": 1,
+        "n_proteins_with_taxon": 4,
+        "n_proteins_without_taxon": 0,
+        "protein_counts_by_taxon": {"559292": 4},
+    }
     assert metadata["loader_specific_options"]["archive_member"] == archive_member
     assert (
         metadata["loader_specific_options"]["fasta_id_format"]

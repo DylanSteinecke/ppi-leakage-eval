@@ -1,12 +1,15 @@
 """
 Compatibility imports for older scripts.
 
-New code should import from focused modules such as ppi_features, ppi_inputs,
-ppi_models, and ppi_results. This file should eventually disappear once no
-notebooks or external scripts rely on legacy imports.
+New code should import from the ppi_benchmark package. This file remains only
+for external scripts that still use the legacy utility import.
 """
 
-from ppi_features import BM25Vectorizer
+from _bootstrap import add_src_to_path
+
+add_src_to_path()
+
+from ppi_benchmark.features import BM25Vectorizer  # noqa: E402
 
 
 __all__ = ["BM25Vectorizer"]

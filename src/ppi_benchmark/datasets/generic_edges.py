@@ -7,10 +7,10 @@ from typing import Any
 
 import pandas as pd
 
-from ppi_dataset_utils import (
+from .common import (
     add_common_loader_args,
     input_protein_count,
-    read_fasta,
+    read_fasta_with_taxa,
     read_table,
     sample_negative_pairs,
     validate_negative_ratio,
@@ -109,7 +109,13 @@ def run(args: Any) -> None:
         raise ValueError(
             "Pass either --negative-pairs or --sample-negatives, not both.")
 
-    sequences = read_fasta(args.fasta, id_format=args.fasta_id_format)
+    fasta_data = read_fasta_with_taxa(
+        fasta_path=args.fasta,
+        id_format=args.fasta_id_format,
+        protein_metadata_path=args.protein_metadata,
+        taxon_id=args.taxon_id,
+    )
+    sequences = fasta_data.sequences
     positive_pairs = read_edge_pairs(
         input_path=args.positive_pairs,
         protein_a_col=args.protein_a_col,
@@ -126,6 +132,7 @@ def run(args: Any) -> None:
         "fasta": args.fasta,
         "positive_pairs": args.positive_pairs,
         "negative_pairs": args.negative_pairs,
+        "protein_metadata": args.protein_metadata,
     }
 
     if args.negative_pairs is not None:
@@ -143,6 +150,7 @@ def run(args: Any) -> None:
             negative_ratio=args.negative_ratio,
             seed=args.seed,
             allowed_protein_ids=sequences,
+            protein_taxa=fasta_data.taxon_ids,
         )
         sampled_negatives = True
     else:
@@ -170,4 +178,5 @@ def run(args: Any) -> None:
         input_paths=input_paths,
         loader_metadata=loader_metadata,
         loader_specific_options=make_loader_specific_options(args),
+        protein_taxa=fasta_data.taxon_ids,
     )

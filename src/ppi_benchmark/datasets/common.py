@@ -28,8 +28,10 @@ import pandas as pd
 
 PAIRS_FILENAME = "pairs.csv"
 FASTA_FILENAME = "proteins.fasta"
+PROTEIN_METADATA_FILENAME = "protein_metadata.csv"
 METADATA_FILENAME = "dataset_metadata.json"
 CANONICAL_PAIR_COLUMNS = ["pair_id", "protein_a", "protein_b", "label"]
+PROTEIN_METADATA_COLUMNS = ["protein_id", "taxon_id"]
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
 SUPPORTED_TABLE_SUFFIXES = {
     ".csv": ",",
@@ -48,6 +50,15 @@ class PairProcessingResult:
     """
     pairs: pd.DataFrame
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class FastaData:
+    """
+    FASTA sequences plus taxon IDs parsed from record headers.
+    """
+    sequences: dict[str, str]
+    taxon_ids: dict[str, str]
 
 
 def open_text_auto(input_path: str | Path) -> TextIO:
@@ -96,15 +107,46 @@ def fasta_record_id(header: str, id_format: str) -> str:
     return sequence_id
 
 
-def read_fasta(
+def normalize_taxon_id(value: Any, context: str = "Taxon ID") -> str:
+    """
+    Return one canonical positive NCBI taxonomy ID.
+    """
+    taxon_id = str(value).strip()
+    if not taxon_id.isdecimal() or int(taxon_id) < 1:
+        raise ValueError(
+            f"{context} must be a positive integer, found '{taxon_id}'.")
+
+    return str(int(taxon_id))
+
+
+def fasta_record_taxon_id(header: str) -> str | None:
+    """
+    Return the NCBI taxonomy ID from a UniProt ``OX=`` header field.
+    """
+    taxon_ids = {
+        normalize_taxon_id(token[3:], context="FASTA OX taxon ID")
+        for token in header.split()
+        if token.startswith("OX=")
+    }
+    if len(taxon_ids) > 1:
+        raise ValueError(
+            "FASTA record header contains conflicting OX taxon IDs: "
+            f"{sorted(taxon_ids)}")
+
+    return next(iter(taxon_ids), None)
+
+
+def read_fasta_data(
         fasta_path: str | Path, id_format: str = "first_token",
-    ) -> dict[str, str]:
+    ) -> FastaData:
     """
-    Read a FASTA file into a sequence dictionary.
+    Read FASTA sequences and optional UniProt taxonomy annotations.
     """
-    sequences = {}
-    current_id = None
-    chunks = []
+    sequences: dict[str, str] = {}
+    taxon_ids: dict[str, str] = {}
+    current_id: str | None = None
+    current_taxon_id: str | None = None
+    chunks: list[str] = []
 
     def save_current_record() -> None:
         """
@@ -116,6 +158,8 @@ def read_fasta(
             raise ValueError(f"FASTA record '{current_id}' has no sequence.")
 
         sequences[current_id] = "".join(chunks)
+        if current_taxon_id is not None:
+            taxon_ids[current_id] = current_taxon_id
 
     with open_text_auto(fasta_path) as fin:
         for line in fin:
@@ -125,10 +169,12 @@ def read_fasta(
 
             if line.startswith(">"):
                 save_current_record()
-                current_id = fasta_record_id(line[1:], id_format)
+                header = line[1:]
+                current_id = fasta_record_id(header, id_format)
                 if current_id in sequences:
                     raise ValueError(
                         f"Duplicate FASTA sequence ID: {current_id}")
+                current_taxon_id = fasta_record_taxon_id(header)
                 chunks = []
             else:
                 if current_id is None:
@@ -138,7 +184,156 @@ def read_fasta(
 
     save_current_record()
 
-    return sequences
+    return FastaData(sequences=sequences, taxon_ids=taxon_ids)
+
+
+def read_fasta(
+        fasta_path: str | Path, id_format: str = "first_token",
+    ) -> dict[str, str]:
+    """
+    Read a FASTA file into a sequence dictionary.
+    """
+    return read_fasta_data(fasta_path, id_format=id_format).sequences
+
+
+def read_protein_taxa(metadata_path: str | Path) -> dict[str, str]:
+    """
+    Read normalized protein-to-taxon assignments from a CSV table.
+    """
+    metadata = pd.read_csv(metadata_path, dtype="string")
+    missing_columns = [
+        column for column in PROTEIN_METADATA_COLUMNS
+        if column not in metadata.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "Protein metadata is missing required columns: "
+            f"{missing_columns}")
+
+    protein_ids = metadata["protein_id"]
+    missing_protein_mask = protein_ids.isna() | protein_ids.str.strip().eq("")
+    if missing_protein_mask.any():
+        raise ValueError(
+            "Protein metadata contains rows with missing protein_id values.")
+
+    protein_ids = protein_ids.str.strip()
+    duplicate_mask = protein_ids.duplicated(keep=False)
+    if duplicate_mask.any():
+        examples = sorted(set(protein_ids.loc[duplicate_mask]))[:10]
+        raise ValueError(
+            "Protein metadata must contain one row per protein_id. Duplicate "
+            f"examples: {examples}")
+
+    protein_taxa = {}
+    for protein_id, taxon_value in zip(protein_ids, metadata["taxon_id"]):
+        if pd.isna(taxon_value) or not str(taxon_value).strip():
+            continue
+        protein_taxa[str(protein_id)] = normalize_taxon_id(
+            taxon_value,
+            context=f"Taxon ID for protein '{protein_id}'",
+        )
+
+    return protein_taxa
+
+
+def merge_protein_taxa(
+        base_taxa: dict[str, str], additional_taxa: dict[str, str],
+        source_name: str,
+    ) -> dict[str, str]:
+    """
+    Merge protein taxa while rejecting conflicting assignments.
+    """
+    conflicts = [
+        protein_id
+        for protein_id, taxon_id in additional_taxa.items()
+        if protein_id in base_taxa and base_taxa[protein_id] != taxon_id
+    ]
+    if conflicts:
+        examples = [
+            {
+                "protein_id": protein_id,
+                "existing_taxon_id": base_taxa[protein_id],
+                "new_taxon_id": additional_taxa[protein_id],
+            }
+            for protein_id in sorted(conflicts)[:10]
+        ]
+        raise ValueError(
+            f"Conflicting protein taxon assignments from {source_name}. "
+            f"Examples: {examples}")
+
+    merged = {**base_taxa, **additional_taxa}
+
+    return merged
+
+
+def resolve_protein_taxa(
+        fasta_data: FastaData,
+        protein_metadata_path: str | Path | None = None,
+        taxon_id: str | int | None = None,
+    ) -> dict[str, str]:
+    """
+    Combine FASTA, sidecar, and optional dataset-wide taxon assignments.
+    """
+    protein_taxa = dict(fasta_data.taxon_ids)
+    if taxon_id is not None:
+        normalized_taxon_id = normalize_taxon_id(
+            taxon_id,
+            context="--taxon-id",
+        )
+        protein_taxa = merge_protein_taxa(
+            base_taxa=protein_taxa,
+            additional_taxa={
+                protein_id: normalized_taxon_id
+                for protein_id in fasta_data.sequences
+            },
+            source_name="--taxon-id",
+        )
+    if protein_metadata_path is not None:
+        protein_taxa = merge_protein_taxa(
+            base_taxa=protein_taxa,
+            additional_taxa=read_protein_taxa(protein_metadata_path),
+            source_name=str(protein_metadata_path),
+        )
+
+    return protein_taxa
+
+
+def read_fasta_with_taxa(
+        fasta_path: str | Path, id_format: str = "first_token",
+        protein_metadata_path: str | Path | None = None,
+        taxon_id: str | int | None = None,
+    ) -> FastaData:
+    """
+    Read FASTA data and resolve all available protein taxon assignments.
+    """
+    fasta_data = read_fasta_data(fasta_path, id_format=id_format)
+
+    return FastaData(
+        sequences=fasta_data.sequences,
+        taxon_ids=resolve_protein_taxa(
+            fasta_data=fasta_data,
+            protein_metadata_path=protein_metadata_path,
+            taxon_id=taxon_id,
+        ),
+    )
+
+
+def discover_protein_metadata_path(
+        pairs_path: str | Path,
+        explicit_path: str | Path | None = None,
+    ) -> Path | None:
+    """
+    Return an explicit sidecar or discover one beside canonical pairs.csv.
+    """
+    if explicit_path is not None:
+        return Path(explicit_path)
+
+    pairs_path = Path(pairs_path)
+    candidate = pairs_path.with_name(PROTEIN_METADATA_FILENAME)
+    if pairs_path.name == PAIRS_FILENAME and candidate.exists():
+        return candidate
+
+    return None
 
 
 def write_fasta(
@@ -162,6 +357,46 @@ def write_fasta(
     with fasta_path.open("w", encoding="utf-8") as fout:
         for protein_id in selected_ids:
             fout.write(f">{protein_id}\n{sequences[protein_id]}\n")
+
+
+def write_protein_metadata(
+        protein_ids: Iterable[str], protein_taxa: dict[str, str],
+        metadata_path: str | Path,
+    ) -> None:
+    """
+    Write one compact protein-to-taxon sidecar in deterministic order.
+    """
+    metadata_path = Path(metadata_path)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = pd.DataFrame({
+        "protein_id": sorted(set(protein_ids)),
+    })
+    metadata["taxon_id"] = metadata["protein_id"].map(protein_taxa)
+    metadata.to_csv(metadata_path, index=False)
+
+
+def protein_taxon_summary(
+        protein_ids: Iterable[str], protein_taxa: dict[str, str],
+    ) -> dict[str, Any]:
+    """
+    Return compact coverage and per-taxon protein counts.
+    """
+    selected_ids = set(protein_ids)
+    counts: dict[str, int] = {}
+    for protein_id in selected_ids:
+        taxon_id = protein_taxa.get(protein_id)
+        if taxon_id is not None:
+            counts[taxon_id] = counts.get(taxon_id, 0) + 1
+
+    n_with_taxon = sum(counts.values())
+    summary = {
+        "n_taxa": len(counts),
+        "n_proteins_with_taxon": n_with_taxon,
+        "n_proteins_without_taxon": len(selected_ids) - n_with_taxon,
+        "protein_counts_by_taxon": dict(sorted(counts.items())),
+    }
+
+    return summary
 
 
 def file_sha256(input_path: str | Path) -> str:
@@ -313,6 +548,19 @@ def add_common_loader_args(parser: Any) -> None:
         choices=FASTA_ID_FORMAT_CHOICES,
         default="first_token",
         help="How sequence IDs are parsed from FASTA headers.",
+    )
+    parser.add_argument(
+        "--protein-metadata",
+        default=None,
+        help=(
+            "Optional CSV with protein_id and taxon_id columns. UniProt OX= "
+            "header fields are used automatically when present."
+        ),
+    )
+    parser.add_argument(
+        "--taxon-id",
+        default=None,
+        help="Optional NCBI taxonomy ID applied to every FASTA record.",
     )
     parser.add_argument("--out-dir", default="processed")
     parser.add_argument("--seed", type=int, default=0)
@@ -705,12 +953,320 @@ def observed_pair_keys(pairs: pd.DataFrame) -> set[tuple[str, str]]:
     return keys
 
 
+def complement_index_from_rank(
+        allowed_rank: int, forbidden_indexes: list[int],
+    ) -> int:
+    """
+    Map a rank in a complement to its full candidate-space index.
+    """
+    lower = allowed_rank
+    upper = allowed_rank + len(forbidden_indexes)
+    while lower < upper:
+        midpoint = (lower + upper) // 2
+        n_allowed_through_midpoint = (
+            midpoint + 1 - bisect_right(forbidden_indexes, midpoint)
+        )
+        if n_allowed_through_midpoint <= allowed_rank:
+            lower = midpoint + 1
+        else:
+            upper = midpoint
+
+    return lower
+
+
+def sample_complement_indexes(
+        n_candidates: int, forbidden_indexes: Iterable[int],
+        n_samples: int, rng: random.Random,
+    ) -> list[int]:
+    """
+    Sample indexes without materializing the allowed candidate complement.
+    """
+    forbidden_indexes = sorted(set(forbidden_indexes))
+    n_available = n_candidates - len(forbidden_indexes)
+    if n_samples > n_available:
+        raise ValueError(
+            f"Requested {n_samples} samples from {n_available} candidates.")
+
+    sampled_ranks = rng.sample(range(n_available), n_samples)
+
+    return [
+        complement_index_from_rank(rank, forbidden_indexes)
+        for rank in sampled_ranks
+    ]
+
+
+class IndexedPairSpace:
+    """
+    Indexed combinations or Cartesian products of protein IDs.
+    """
+    def __init__(
+            self, protein_a_ids: list[str],
+            protein_b_ids: list[str] | None = None,
+        ) -> None:
+        self.protein_a_ids = protein_a_ids
+        self.protein_b_ids = protein_b_ids
+        self.protein_a_indexes = {
+            protein_id: index
+            for index, protein_id in enumerate(protein_a_ids)
+        }
+        if protein_b_ids is None:
+            n_proteins = len(protein_a_ids)
+            self.offsets = [
+                index * (2 * n_proteins - index - 1) // 2
+                for index in range(n_proteins)
+            ]
+            self.protein_b_indexes = None
+            self.n_candidates = n_proteins * (n_proteins - 1) // 2
+        else:
+            self.offsets = None
+            self.protein_b_indexes = {
+                protein_id: index
+                for index, protein_id in enumerate(protein_b_ids)
+            }
+            self.n_candidates = len(protein_a_ids) * len(protein_b_ids)
+
+    def pair_index(self, protein_a: str, protein_b: str) -> int:
+        """
+        Encode one candidate pair as an integer index.
+        """
+        if self.protein_b_ids is None:
+            item_a_index = self.protein_a_indexes[protein_a]
+            item_b_index = self.protein_a_indexes[protein_b]
+            if item_a_index > item_b_index:
+                item_a_index, item_b_index = item_b_index, item_a_index
+            return (
+                self.offsets[item_a_index]
+                + item_b_index
+                - item_a_index
+                - 1
+            )
+
+        if protein_a in self.protein_a_indexes:
+            left_id, right_id = protein_a, protein_b
+        else:
+            left_id, right_id = protein_b, protein_a
+
+        return (
+            self.protein_a_indexes[left_id] * len(self.protein_b_ids)
+            + self.protein_b_indexes[right_id]
+        )
+
+    def pair_from_index(self, pair_index: int) -> tuple[str, str]:
+        """
+        Decode one integer index as a canonical protein pair.
+        """
+        if self.protein_b_ids is None:
+            item_a_index = bisect_right(self.offsets, pair_index) - 1
+            item_b_index = (
+                item_a_index + 1 + pair_index - self.offsets[item_a_index]
+            )
+            return (
+                self.protein_a_ids[item_a_index],
+                self.protein_a_ids[item_b_index],
+            )
+
+        item_a_index, item_b_index = divmod(
+            pair_index,
+            len(self.protein_b_ids),
+        )
+
+        return unordered_pair_key(
+            self.protein_a_ids[item_a_index],
+            self.protein_b_ids[item_b_index],
+        )
+
+
+def sample_pair_space(
+        pair_space: IndexedPairSpace,
+        forbidden_pairs: set[tuple[str, str]],
+        n_samples: int, rng: random.Random,
+    ) -> tuple[list[tuple[str, str]], int]:
+    """
+    Sample from an indexed pair space while excluding observed pairs.
+    """
+    forbidden_indexes = [
+        pair_space.pair_index(*pair)
+        for pair in forbidden_pairs
+    ]
+    sampled_indexes = sample_complement_indexes(
+        n_candidates=pair_space.n_candidates,
+        forbidden_indexes=forbidden_indexes,
+        n_samples=n_samples,
+        rng=rng,
+    )
+
+    return (
+        [pair_space.pair_from_index(index) for index in sampled_indexes],
+        pair_space.n_candidates - len(forbidden_pairs),
+    )
+
+
+def allocate_stratified_samples(
+        weights: dict[tuple[str, str], int],
+        capacities: dict[tuple[str, str], int],
+        target_count: int,
+    ) -> dict[tuple[str, str], int]:
+    """
+    Allocate an exact sample target proportionally across bounded strata.
+    """
+    allocations = {key: 0 for key in weights}
+    remaining = target_count
+    while remaining:
+        active = [
+            key for key in sorted(weights)
+            if allocations[key] < capacities[key]
+        ]
+        if not active:
+            raise ValueError(
+                f"Cannot allocate {target_count} samples across the available "
+                "strata.")
+
+        total_weight = sum(weights[key] for key in active)
+        quotas = {
+            key: remaining * weights[key] / total_weight
+            for key in active
+        }
+        grants = {
+            key: min(
+                capacities[key] - allocations[key],
+                int(quotas[key]),
+            )
+            for key in active
+        }
+        n_granted = sum(grants.values())
+        if n_granted == 0:
+            ranked_keys = sorted(
+                active,
+                key=lambda key: (-quotas[key], key),
+            )
+            for key in ranked_keys[:remaining]:
+                grants[key] = 1
+            n_granted = sum(grants.values())
+
+        for key, count in grants.items():
+            allocations[key] += count
+        remaining -= n_granted
+
+    return allocations
+
+
+def taxon_pair_key(taxon_a: str, taxon_b: str) -> tuple[str, str]:
+    """
+    Return a canonical unordered taxonomy-pair key.
+    """
+    return tuple(sorted((taxon_a, taxon_b)))
+
+
+def taxon_pair_name(taxon_pair: tuple[str, str]) -> str:
+    """
+    Return a compact JSON key for one taxonomy-pair stratum.
+    """
+    return "|".join(taxon_pair)
+
+
+def sample_taxon_stratified_negative_keys(
+        protein_ids: list[str], positive_keys: set[tuple[str, str]],
+        protein_taxa: dict[str, str], target_count: int,
+        rng: random.Random,
+    ) -> tuple[list[tuple[str, str]], dict[str, dict[str, int]]]:
+    """
+    Sample within taxonomy-pair strata represented by positive interactions.
+    """
+    missing_taxa = sorted(
+        protein_id for protein_id in protein_ids
+        if protein_id not in protein_taxa
+    )
+    if missing_taxa:
+        raise ValueError(
+            "Species-aware negative sampling requires a taxon_id for every "
+            f"eligible protein. Missing {len(missing_taxa)}; examples: "
+            f"{missing_taxa[:10]}")
+
+    proteins_by_taxon: dict[str, list[str]] = {}
+    for protein_id in protein_ids:
+        proteins_by_taxon.setdefault(
+            protein_taxa[protein_id],
+            [],
+        ).append(protein_id)
+
+    positives_by_stratum: dict[
+        tuple[str, str], set[tuple[str, str]]
+    ] = {}
+    for protein_a, protein_b in positive_keys:
+        stratum = taxon_pair_key(
+            protein_taxa[protein_a],
+            protein_taxa[protein_b],
+        )
+        positives_by_stratum.setdefault(stratum, set()).add(
+            (protein_a, protein_b))
+
+    capacities: dict[tuple[str, str], int] = {}
+    weights: dict[tuple[str, str], int] = {}
+    for stratum, stratum_positives in positives_by_stratum.items():
+        taxon_a, taxon_b = stratum
+        if taxon_a == taxon_b:
+            n_proteins = len(proteins_by_taxon[taxon_a])
+            n_candidates = n_proteins * (n_proteins - 1) // 2
+        else:
+            n_candidates = (
+                len(proteins_by_taxon[taxon_a])
+                * len(proteins_by_taxon[taxon_b])
+            )
+        capacities[stratum] = n_candidates - len(stratum_positives)
+        weights[stratum] = len(stratum_positives)
+
+    if sum(capacities.values()) < target_count:
+        raise ValueError(
+            "Not enough possible negative pairs in the observed taxon-pair "
+            f"strata. Requested {target_count}, available "
+            f"{sum(capacities.values())}.")
+    allocations = allocate_stratified_samples(
+        weights=weights,
+        capacities=capacities,
+        target_count=target_count,
+    )
+
+    sampled_keys = []
+    for stratum in sorted(positives_by_stratum):
+        taxon_a, taxon_b = stratum
+        protein_a_ids = proteins_by_taxon[taxon_a]
+        if taxon_a == taxon_b:
+            protein_b_ids = None
+        else:
+            protein_b_ids = proteins_by_taxon[taxon_b]
+        stratum_samples, _ = sample_pair_space(
+            pair_space=IndexedPairSpace(protein_a_ids, protein_b_ids),
+            forbidden_pairs=positives_by_stratum[stratum],
+            n_samples=allocations[stratum],
+            rng=rng,
+        )
+        sampled_keys.extend(stratum_samples)
+
+    metadata = {
+        "positive_pairs_by_taxon_pair": {
+            taxon_pair_name(key): weights[key]
+            for key in sorted(weights)
+        },
+        "sampled_negatives_by_taxon_pair": {
+            taxon_pair_name(key): allocations[key]
+            for key in sorted(allocations)
+        },
+        "available_negatives_by_taxon_pair": {
+            taxon_pair_name(key): capacities[key]
+            for key in sorted(capacities)
+        },
+    }
+
+    return sampled_keys, metadata
+
+
 def sample_negative_pairs(
         positive_pairs: pd.DataFrame, negative_ratio: float,
         seed: int, allowed_protein_ids: Iterable[str] | None = None,
-    ) -> tuple[pd.DataFrame, dict[str, int | float]]:
+        protein_taxa: dict[str, str] | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
-    Sample unordered negative pairs from proteins present in positives.
+    Sample unobserved pairs globally or within observed taxon-pair strata.
     """
     prepared = prepare_pair_columns(positive_pairs)
     prepared = prepared.loc[prepared["protein_a"] != prepared["protein_b"]]
@@ -733,71 +1289,34 @@ def sample_negative_pairs(
         negative_ratio,
     )
     n_proteins = len(protein_ids)
-    n_possible_pairs = n_proteins * (n_proteins - 1) // 2
-    n_available_negatives = n_possible_pairs - len(positive_keys)
-    if n_available_negatives < target_n_negatives:
-        raise ValueError(
-            "Not enough possible negative pairs to satisfy "
-            f"negative_ratio={negative_ratio}. Requested "
-            f"{target_n_negatives}, available {n_available_negatives}.")
-
-    protein_indexes = {
-        protein_id: index
-        for index, protein_id in enumerate(protein_ids)
-    }
-    pair_offsets = [
-        index * (2 * n_proteins - index - 1) // 2
-        for index in range(n_proteins)
-    ]
-    positive_indexes = sorted(
-        pair_offsets[protein_indexes[protein_a]]
-        + protein_indexes[protein_b]
-        - protein_indexes[protein_a]
-        - 1
-        for protein_a, protein_b in positive_keys
-    )
-
-    def pair_index_from_allowed_rank(allowed_rank: int) -> int:
-        """
-        Map a rank in the negative complement to the full pair-index space.
-        """
-        lower = allowed_rank
-        upper = allowed_rank + len(positive_indexes)
-        while lower < upper:
-            midpoint = (lower + upper) // 2
-            n_allowed_through_midpoint = (
-                midpoint + 1 - bisect_right(positive_indexes, midpoint)
-            )
-            if n_allowed_through_midpoint <= allowed_rank:
-                lower = midpoint + 1
-            else:
-                upper = midpoint
-
-        return lower
-
-    def pair_from_index(pair_index: int) -> tuple[str, str]:
-        """
-        Decode one lexicographic combination index into protein IDs.
-        """
-        protein_a_index = bisect_right(pair_offsets, pair_index) - 1
-        protein_b_index = (
-            protein_a_index
-            + 1
-            + pair_index
-            - pair_offsets[protein_a_index]
+    rng = random.Random(seed)
+    taxon_metadata: dict[str, Any] = {}
+    if protein_taxa:
+        sampled_keys, taxon_metadata = sample_taxon_stratified_negative_keys(
+            protein_ids=protein_ids,
+            positive_keys=positive_keys,
+            protein_taxa=protein_taxa,
+            target_count=target_n_negatives,
+            rng=rng,
+        )
+        n_available_negatives = sum(
+            taxon_metadata["available_negatives_by_taxon_pair"].values()
+        )
+    else:
+        n_possible_pairs = n_proteins * (n_proteins - 1) // 2
+        n_available_negatives = n_possible_pairs - len(positive_keys)
+        if n_available_negatives < target_n_negatives:
+            raise ValueError(
+                "Not enough possible negative pairs to satisfy "
+                f"negative_ratio={negative_ratio}. Requested "
+                f"{target_n_negatives}, available {n_available_negatives}.")
+        sampled_keys, n_available_negatives = sample_pair_space(
+            pair_space=IndexedPairSpace(protein_ids),
+            forbidden_pairs=positive_keys,
+            n_samples=target_n_negatives,
+            rng=rng,
         )
 
-        return protein_ids[protein_a_index], protein_ids[protein_b_index]
-
-    rng = random.Random(seed)
-    sampled_ranks = rng.sample(
-        range(n_available_negatives),
-        target_n_negatives,
-    )
-    sampled_keys = [
-        pair_from_index(pair_index_from_allowed_rank(allowed_rank))
-        for allowed_rank in sampled_ranks
-    ]
     sampled_pairs = pd.DataFrame(sampled_keys, columns=["protein_a", "protein_b"])
     sampled_pairs["label"] = 0
     metadata = {
@@ -806,6 +1325,8 @@ def sample_negative_pairs(
         "n_positive_pairs_for_sampling": int(len(positive_keys)),
         "n_proteins_for_sampling": int(n_proteins),
         "n_available_negative_pairs": int(n_available_negatives),
+        "species_aware_sampling": bool(protein_taxa),
+        **taxon_metadata,
     }
 
     return sampled_pairs, metadata
@@ -849,20 +1370,28 @@ def input_path_metadata(input_paths: dict[str, str | Path | None]) -> tuple[
 
 def final_output_metadata(
         dataset_dir: Path,
-    ) -> tuple[Path, Path, Path, dict[str, str]]:
+    ) -> tuple[Path, Path, Path, Path, dict[str, str]]:
     """
     Return canonical output paths plus path metadata.
     """
     pairs_path = dataset_dir / PAIRS_FILENAME
     fasta_path = dataset_dir / FASTA_FILENAME
+    protein_metadata_path = dataset_dir / PROTEIN_METADATA_FILENAME
     metadata_path = dataset_dir / METADATA_FILENAME
     path_metadata = {
         "output_pairs_path": str(pairs_path),
         "output_fasta_path": str(fasta_path),
+        "output_protein_metadata_path": str(protein_metadata_path),
         "output_metadata_path": str(metadata_path),
     }
 
-    return pairs_path, fasta_path, metadata_path, path_metadata
+    return (
+        pairs_path,
+        fasta_path,
+        protein_metadata_path,
+        metadata_path,
+        path_metadata,
+    )
 
 
 def canonicalize_filter_and_assign(
@@ -891,6 +1420,7 @@ def write_prepared_dataset(
         sequences: dict[str, str], input_paths: dict[str, str | Path | None],
         loader_metadata: dict[str, Any],
         loader_specific_options: dict[str, Any],
+        protein_taxa: dict[str, str] | None = None,
     ) -> dict[str, Any]:
     """
     Write canonical dataset outputs and return dataset metadata.
@@ -907,15 +1437,22 @@ def write_prepared_dataset(
         dataset_name=args.dataset_name,
         overwrite=args.overwrite,
     )
-    pairs_path, fasta_path, metadata_path, output_path_metadata = (
-        final_output_metadata(dataset_dir))
+    (
+        pairs_path,
+        fasta_path,
+        protein_metadata_path,
+        metadata_path,
+        output_path_metadata,
+    ) = final_output_metadata(dataset_dir)
     proteins = (
         set(processed.pairs["protein_a"])
         | set(processed.pairs["protein_b"])
     )
+    protein_taxa = protein_taxa or {}
 
     processed.pairs.to_csv(pairs_path, index=False)
     write_fasta(sequences, proteins, fasta_path)
+    write_protein_metadata(proteins, protein_taxa, protein_metadata_path)
     input_paths_json, input_sha256, input_sizes = input_path_metadata(
         input_paths)
     metadata = {
@@ -933,6 +1470,7 @@ def write_prepared_dataset(
         "seed": int(args.seed),
         **loader_metadata,
         **processed.metadata,
+        "species": protein_taxon_summary(proteins, protein_taxa),
         "loader_specific_options": loader_specific_options,
     }
     write_json(metadata, metadata_path)

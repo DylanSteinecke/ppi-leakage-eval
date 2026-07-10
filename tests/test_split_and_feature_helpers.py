@@ -4,19 +4,12 @@ import pandas as pd
 import pytest
 from sklearn.feature_extraction.text import CountVectorizer
 
-import ppi_features
-from ppi_features import build_feature_matrices
-from ppi_inputs import (
+from ppi_benchmark import features as ppi_features
+from ppi_benchmark.features import build_feature_matrices
+from ppi_benchmark.inputs import (
     load_split_column,
-    make_protein_component_split,
-    make_protein_prune_split,
     make_random_pair_split,
     prepare_input_data,
-    protein_ids_in_pairs,
-    TEST_SPLIT,
-    TRAIN_SPLIT,
-    VAL_SPLIT,
-    validate_disjoint_splits,
     validate_splits,
 )
 
@@ -36,48 +29,6 @@ def balanced_pairs(n_pairs=24):
     return pd.DataFrame(rows)
 
 
-def complete_graph_pairs(n_proteins=8):
-    """
-    Return all undirected pairs among proteins for prune-split tests.
-    """
-    rows = []
-    proteins = [f"P{index}" for index in range(n_proteins)]
-    for left_index, protein_a in enumerate(proteins[:-1]):
-        for right_index, protein_b in enumerate(proteins[left_index + 1:]):
-            rows.append({
-                "protein_a": protein_a,
-                "protein_b": protein_b,
-                "label": (left_index + right_index) % 2,
-            })
-
-    return pd.DataFrame(rows)
-
-
-def multi_component_pairs(n_components=5):
-    """
-    Return disconnected pair components with both labels in each component.
-    """
-    rows = []
-    for component_index in range(n_components):
-        protein_a = f"C{component_index}_A"
-        protein_b = f"C{component_index}_B"
-        protein_c = f"C{component_index}_C"
-        rows.extend([
-            {
-                "protein_a": protein_a,
-                "protein_b": protein_b,
-                "label": 0,
-            },
-            {
-                "protein_a": protein_b,
-                "protein_b": protein_c,
-                "label": 1,
-            },
-        ])
-
-    return pd.DataFrame(rows)
-
-
 def split_args(train_size=0.5, val_size=0.0, seed=0):
     """
     Return minimal split args.
@@ -86,8 +37,6 @@ def split_args(train_size=0.5, val_size=0.0, seed=0):
         train_size=train_size,
         val_size=val_size,
         seed=seed,
-        n_pruned_pairs=0,
-        pruned_pair_fraction=0.0,
     )
 
     return args
@@ -129,65 +78,6 @@ def test_random_pair_split_with_validation_has_binary_non_empty_splits():
     assert_has_both_labels(train_df)
     assert_has_both_labels(val_df)
     assert_has_both_labels(test_df)
-
-
-def test_protein_prune_split_is_disjoint_without_validation():
-    pairs = complete_graph_pairs()
-
-    train_df, val_df, test_df = make_protein_prune_split(
-        pairs,
-        split_args(train_size=0.6, val_size=0.0, seed=3),
-    )
-
-    assert val_df is None
-    assert protein_ids_in_pairs(train_df).isdisjoint(protein_ids_in_pairs(test_df))
-
-
-def test_protein_prune_split_is_disjoint_with_validation():
-    pairs = complete_graph_pairs()
-
-    train_df, val_df, test_df = make_protein_prune_split(
-        pairs,
-        split_args(train_size=0.5, val_size=0.25, seed=4),
-    )
-
-    validate_disjoint_splits({
-        TRAIN_SPLIT: train_df,
-        VAL_SPLIT: val_df,
-        TEST_SPLIT: test_df,
-    })
-
-
-def test_protein_component_split_is_disjoint_with_validation():
-    pairs = multi_component_pairs()
-
-    train_df, val_df, test_df = make_protein_component_split(
-        pairs,
-        split_args(train_size=0.6, val_size=0.2, seed=5),
-    )
-
-    validate_disjoint_splits({
-        TRAIN_SPLIT: train_df,
-        VAL_SPLIT: val_df,
-        TEST_SPLIT: test_df,
-    })
-
-
-def test_protein_component_split_keeps_both_sides_non_empty_at_extreme_size():
-    pairs = pd.DataFrame({
-        "protein_a": ["A", "C"],
-        "protein_b": ["B", "D"],
-        "label": [0, 1],
-    })
-
-    train_df, val_df, test_df = make_protein_component_split(
-        pairs,
-        split_args(train_size=0.01, val_size=0.0, seed=5),
-    )
-
-    assert val_df is None
-    assert not train_df.empty
-    assert not test_df.empty
 
 
 def test_validate_splits_rejects_empty_required_split():

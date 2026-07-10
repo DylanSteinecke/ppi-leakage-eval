@@ -7,13 +7,13 @@ from typing import Any
 
 import pandas as pd
 
-from ppi_dataset_utils import (
+from .common import (
     add_common_loader_args,
     apply_id_mapping_to_pairs,
     file_sha256,
     input_protein_count,
     iter_table_chunks,
-    read_fasta,
+    read_fasta_with_taxa,
     read_table,
     sample_negative_pairs,
     validate_negative_ratio,
@@ -352,7 +352,13 @@ def run(args: Any) -> None:
             "BioGRID provides positives only in this loader version; pass "
             "--sample-negatives.")
 
-    sequences = read_fasta(args.fasta, id_format=args.fasta_id_format)
+    fasta_data = read_fasta_with_taxa(
+        fasta_path=args.fasta,
+        id_format=args.fasta_id_format,
+        protein_metadata_path=args.protein_metadata,
+        taxon_id=args.taxon_id or args.organism_id,
+    )
+    sequences = fasta_data.sequences
     (
         positive_pairs,
         protein_a_col,
@@ -388,6 +394,7 @@ def run(args: Any) -> None:
         negative_ratio=args.negative_ratio,
         seed=args.seed,
         allowed_protein_ids=sequences,
+        protein_taxa=fasta_data.taxon_ids,
     )
     raw_pairs = pd.concat(
         [positive_pairs, negative_pairs],
@@ -415,6 +422,7 @@ def run(args: Any) -> None:
             "fasta": args.fasta,
             "interactions": Path(args.interactions),
             "id_map": args.id_map,
+            "protein_metadata": args.protein_metadata,
         },
         loader_metadata=loader_metadata,
         loader_specific_options=make_loader_specific_options(
@@ -423,4 +431,5 @@ def run(args: Any) -> None:
             protein_b_col=protein_b_col,
             n_positive_after_loader_filters=n_positive_after_loader_filters,
         ),
+        protein_taxa=fasta_data.taxon_ids,
     )

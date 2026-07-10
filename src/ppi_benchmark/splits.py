@@ -15,14 +15,14 @@ from typing import Any
 
 import pandas as pd
 
-from ppi_dataset_utils import file_sha256
-from ppi_inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
-from ppi_results import output_lock
-from split_diagnostics import (
+from .datasets.common import file_sha256, protein_taxon_summary, taxon_pair_name
+from .diagnostics import (
     compute_ppi_split_diagnostics,
     label_counts,
     native_value,
 )
+from .inputs import protein_ids_in_pairs, TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT
+from .results import output_lock
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"
@@ -33,6 +33,11 @@ SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 DROPPED_PAIRS_FILENAME = "dropped_pairs.csv"
 SPLIT_METADATA_FILENAME = "split_metadata.json"
 INVOCATIONS_FILENAME = "invocations.jsonl"
+INPUT_HASH_FIELDS = (
+    "pairs_file_sha256",
+    "fasta_file_sha256",
+    "protein_metadata_file_sha256",
+)
 
 
 #######################
@@ -200,6 +205,53 @@ def split_protein_ids(split_df: pd.DataFrame | None) -> set[str]:
     return protein_ids
 
 
+def split_species_summary(
+        split_df: pd.DataFrame | None, protein_taxa: dict[str, str],
+    ) -> dict[str, Any]:
+    """
+    Return compact protein and pair taxon counts for one optional split.
+    """
+    proteins = split_protein_ids(split_df)
+    summary = protein_taxon_summary(proteins, protein_taxa)
+    pair_counts: dict[str, int] = {}
+    n_pairs_with_unknown_taxon = 0
+    if split_df is not None:
+        for protein_a, protein_b in zip(
+                split_df["protein_a"], split_df["protein_b"]):
+            taxon_a = protein_taxa.get(protein_a)
+            taxon_b = protein_taxa.get(protein_b)
+            if taxon_a is None or taxon_b is None:
+                n_pairs_with_unknown_taxon += 1
+                continue
+            pair_name = taxon_pair_name(tuple(sorted((taxon_a, taxon_b))))
+            pair_counts[pair_name] = pair_counts.get(pair_name, 0) + 1
+
+    n_pairs = 0 if split_df is None else len(split_df)
+    summary.update({
+        "n_pairs_with_known_taxa": n_pairs - n_pairs_with_unknown_taxon,
+        "n_pairs_with_unknown_taxon": n_pairs_with_unknown_taxon,
+        "pair_counts_by_taxon_pair": dict(sorted(pair_counts.items())),
+    })
+
+    return summary
+
+
+def species_audit_metadata(
+        protein_pairs: pd.DataFrame, train_df: pd.DataFrame,
+        val_df: pd.DataFrame | None, test_df: pd.DataFrame,
+        protein_taxa: dict[str, str],
+    ) -> dict[str, Any]:
+    """
+    Return species coverage summaries without repeating per-pair metadata.
+    """
+    return {
+        "total": split_species_summary(protein_pairs, protein_taxa),
+        "train": split_species_summary(train_df, protein_taxa),
+        "val": split_species_summary(val_df, protein_taxa),
+        "test": split_species_summary(test_df, protein_taxa),
+    }
+
+
 def path_string(output_path: Path | None) -> str | None:
     """
     Return a string path or None for optional output paths.
@@ -214,6 +266,8 @@ def compute_split_metadata(
         dropped_pairs: pd.DataFrame, train_df: pd.DataFrame,
         val_df: pd.DataFrame | None, test_df: pd.DataFrame,
         execution_id: str, n_input_pairs_before_filtering: int,
+        protein_taxa: dict[str, str] | None = None,
+        protein_metadata_path: str | Path | None = None,
     ) -> dict[str, Any]:
     """
     Return reproducibility and audit metadata for one train/val/test split.
@@ -232,6 +286,7 @@ def compute_split_metadata(
     val_proteins = split_protein_ids(val_df)
     test_proteins = split_protein_ids(test_df)
     working_directory = Path.cwd()
+    protein_taxa = protein_taxa or {}
     diagnostics = compute_ppi_split_diagnostics(
         train_df=train_df,
         val_df=val_df,
@@ -284,9 +339,16 @@ def compute_split_metadata(
         "n_shared_proteins_train_val": len(train_proteins & val_proteins),
         "n_shared_proteins_train_test": len(train_proteins & test_proteins),
         "n_shared_proteins_val_test": len(val_proteins & test_proteins),
-        "n_connected_components": args.n_connected_components,
-        "n_pruned_pairs": args.n_pruned_pairs,
-        "pruned_pair_fraction": args.pruned_pair_fraction,
+        "n_discarded_edges": args.n_discarded_edges,
+        "discarded_edge_fraction": args.discarded_edge_fraction,
+        "split_audit": getattr(args, "split_audit", None),
+        "species": species_audit_metadata(
+            protein_pairs=protein_pairs,
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            protein_taxa=protein_taxa,
+        ),
         "diagnostics": diagnostics,
         "train_metrics_path": path_string(output_paths.train_metrics_path),
         "split_assignments_path": path_string(
@@ -304,7 +366,16 @@ def compute_split_metadata(
     if output_paths.predictions_path is not None:
         metadata["predictions_path"] = path_string(
             output_paths.predictions_path)
-
+    if protein_metadata_path is not None:
+        protein_metadata_path = Path(protein_metadata_path)
+        metadata.update({
+            "protein_metadata_path": str(protein_metadata_path),
+            "protein_metadata_file_size_bytes": (
+                protein_metadata_path.stat().st_size
+            ),
+            "protein_metadata_file_sha256": file_sha256(
+                protein_metadata_path),
+        })
     return metadata
 
 
@@ -355,10 +426,9 @@ def validate_append_input_files(
 
     with existing_path.open("r", encoding="utf-8") as fin:
         existing_metadata = json.load(fin)
-    hash_fields = ("pairs_file_sha256", "fasta_file_sha256")
     changed_fields = [
         field
-        for field in hash_fields
+        for field in INPUT_HASH_FIELDS
         if existing_metadata.get(field) != new_metadata.get(field)
     ]
     if changed_fields:

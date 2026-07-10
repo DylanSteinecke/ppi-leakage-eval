@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ppi-leakage"
+dynamic = ["version"]
+description = "Leakage-aware protein-protein interaction benchmarking tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+ppi-train = "ppi_benchmark.cli.train:main"
+ppi-prepare = "ppi_benchmark.cli.prepare:main"
+ppi-aggregate = "ppi_benchmark.cli.aggregate:main"
+ppi-make-toy-data = "ppi_benchmark.cli.make_toy_data:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "ppi_benchmark.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
