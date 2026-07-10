@@ -204,6 +204,8 @@ def test_append_results_requires_identical_split(
 
     run_cli(*common_args)
     run_cli(*common_args, "--append-results")
+    summary_path = run_dir / "train_metrics_summary.csv"
+    summary_before_failure = summary_path.read_bytes()
 
     changed_split = common_args.copy()
     changed_split[changed_split.index("--seed") + 1] = "12"
@@ -215,6 +217,40 @@ def test_append_results_requires_identical_split(
 
     assert completed_process.returncode != 0
     assert "different split" in completed_process.stderr
+    assert summary_path.read_bytes() == summary_before_failure
+
+
+def test_append_results_rejects_changed_fasta_contents(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "append_changed_fasta"
+    common_args = [
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--no-metrics-plots",
+    ]
+    run_cli(*common_args)
+    summary_path = run_dir / "train_metrics_summary.csv"
+    summary_before_failure = summary_path.read_bytes()
+    changed_fasta_path = tmp_path / "changed_proteins.fasta"
+    changed_fasta_path.write_text(
+        fasta_path.read_text(encoding="utf-8").replace(
+            "ACDEFGHIKL",
+            "ACDEYGHIKL",
+        ),
+        encoding="utf-8",
+    )
+    changed_args = common_args.copy()
+    changed_args[changed_args.index("--fasta") + 1] = changed_fasta_path
+
+    completed_process = run_cli(
+        *changed_args,
+        "--append-results",
+        check=False,
+    )
+
+    assert completed_process.returncode != 0
+    assert "input file contents changed" in completed_process.stderr
+    assert summary_path.read_bytes() == summary_before_failure
 
 
 def test_append_results_adds_model_rows_and_regenerates_summary(

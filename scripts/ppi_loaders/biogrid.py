@@ -8,9 +8,11 @@ from typing import Any
 import pandas as pd
 
 from ppi_dataset_utils import (
+    add_common_loader_args,
     apply_id_mapping_to_pairs,
     file_sha256,
     input_protein_count,
+    iter_table_chunks,
     read_fasta,
     read_table,
     sample_negative_pairs,
@@ -34,7 +36,6 @@ PROTEIN_B_CANDIDATES = (
     "BioGRID ID Interactor B",
     "Entrez Gene Interactor B",
 )
-AMBIGUOUS_ID_SEPARATORS = ("|", ";", ",")
 
 
 def register_subcommand(subparsers: Any) -> None:
@@ -48,8 +49,19 @@ def register_subcommand(subparsers: Any) -> None:
             "must already match FASTA IDs or be mapped with --id-map."
         ),
     )
-    add_common_args(parser)
+    add_common_loader_args(parser)
     parser.add_argument("--interactions", required=True)
+    parser.add_argument(
+        "--archive-member",
+        default=None,
+        help="Table member to read when --interactions is a multi-file ZIP.",
+    )
+    parser.add_argument(
+        "--table-chunksize",
+        type=int,
+        default=100_000,
+        help="Rows read at once from the BioGRID interaction table.",
+    )
     parser.add_argument("--protein-a-col", default=None)
     parser.add_argument("--protein-b-col", default=None)
     parser.add_argument("--id-map", default=None)
@@ -59,21 +71,16 @@ def register_subcommand(subparsers: Any) -> None:
     parser.add_argument("--organism-b-col", default=None)
     parser.add_argument("--organism-id", default=None)
     parser.add_argument("--experimental-system-type-col", default=None)
-    parser.add_argument("--allowed-system-types", nargs="*", default=None)
+    parser.add_argument("--allowed-system-types", nargs="+", default=None)
+    parser.add_argument(
+        "--ambiguous-id-policy",
+        choices=("error", "drop"),
+        default="error",
+        help="How rows containing multi-ID interactor values are handled.",
+    )
     parser.add_argument("--sample-negatives", action="store_true")
     parser.add_argument("--negative-ratio", type=float, default=1.0)
     parser.set_defaults(func=run)
-
-
-def add_common_args(parser: Any) -> None:
-    """
-    Add shared dataset-prep arguments to one subcommand parser.
-    """
-    parser.add_argument("--dataset-name", required=True)
-    parser.add_argument("--fasta", required=True)
-    parser.add_argument("--out-dir", default="processed")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--overwrite", action="store_true")
 
 
 def infer_biogrid_column(
@@ -130,25 +137,45 @@ def validate_id_mapping_args(args: Any) -> None:
         raise ValueError("--id-map requires --map-from-col and --map-to-col.")
 
 
-def reject_ambiguous_interactor_values(
+def filter_ambiguous_interactor_values(
         table: pd.DataFrame, columns: list[str],
-    ) -> None:
+        policy: str,
+    ) -> tuple[pd.DataFrame, int]:
     """
-    Fail on simple multi-ID interactor values instead of guessing a mapping.
+    Reject or drop simple multi-ID interactor values without guessing a mapping.
     """
-    for column in columns:
-        values = table[column].dropna().astype(str)
-        ambiguous_mask = values.apply(
-            lambda value: any(separator in value
-                              for separator in AMBIGUOUS_ID_SEPARATORS)
+    if policy not in {"error", "drop"}:
+        raise ValueError(
+            "ambiguous interactor policy must be 'error' or 'drop'.")
+
+    require_columns(table, columns)
+    separator_pattern = "[|;,]"
+    ambiguous_by_column = table[columns].apply(
+        lambda values: values.astype("string").str.contains(
+            separator_pattern,
+            regex=True,
+            na=False,
         )
-        if ambiguous_mask.any():
-            examples = values.loc[ambiguous_mask].head(10).tolist()
-            raise ValueError(
-                f"BioGRID column '{column}' contains ambiguous multi-ID "
-                f"values. Pass columns that already match FASTA IDs or "
-                f"preprocess ID mapping outside this loader. Examples: "
-                f"{examples}")
+    )
+    ambiguous_mask = ambiguous_by_column.any(axis=1)
+    n_ambiguous = int(ambiguous_mask.sum())
+    if n_ambiguous == 0:
+        return table, 0
+
+    if policy == "error":
+        examples = (
+            table.loc[ambiguous_mask, columns]
+            .head(10)
+            .to_dict(orient="records")
+        )
+        raise ValueError(
+            f"BioGRID interactor columns contain {n_ambiguous} rows with "
+            "ambiguous multi-ID values. Pass --ambiguous-id-policy drop or "
+            f"preprocess the mapping explicitly. Examples: {examples}")
+
+    filtered = table.loc[~ambiguous_mask].copy()
+
+    return filtered, n_ambiguous
 
 
 def apply_biogrid_filters(table: pd.DataFrame, args: Any) -> pd.DataFrame:
@@ -192,15 +219,93 @@ def positive_pairs_from_table(
     Return positive pair rows from filtered BioGRID interactions.
     """
     require_columns(table, [protein_a_col, protein_b_col])
-    reject_ambiguous_interactor_values(
-        table=table,
-        columns=[protein_a_col, protein_b_col],
-    )
     pairs = table[[protein_a_col, protein_b_col]].copy()
     pairs.columns = ["protein_a", "protein_b"]
     pairs["label"] = 1
 
     return pairs
+
+
+def read_biogrid_positive_pairs(
+        args: Any,
+    ) -> tuple[pd.DataFrame, str, str, int, int]:
+    """
+    Stream selected BioGRID columns and return filtered positive pairs.
+    """
+    if args.table_chunksize < 1:
+        raise ValueError("--table-chunksize must be at least 1.")
+
+    table_header = read_table(
+        args.interactions,
+        archive_member=args.archive_member,
+        nrows=0,
+    )
+    protein_a_col = infer_biogrid_column(
+        table=table_header,
+        explicit_column=args.protein_a_col,
+        candidates=PROTEIN_A_CANDIDATES,
+        role_name="BioGRID protein_a column",
+        arg_name="--protein-a-col",
+    )
+    protein_b_col = infer_biogrid_column(
+        table=table_header,
+        explicit_column=args.protein_b_col,
+        candidates=PROTEIN_B_CANDIDATES,
+        role_name="BioGRID protein_b column",
+        arg_name="--protein-b-col",
+    )
+    selected_columns = [protein_a_col, protein_b_col]
+    if args.organism_id is not None:
+        if args.organism_a_col is None or args.organism_b_col is None:
+            raise ValueError(
+                "--organism-id requires --organism-a-col and "
+                "--organism-b-col.")
+        selected_columns.extend([args.organism_a_col, args.organism_b_col])
+    if args.allowed_system_types:
+        if args.experimental_system_type_col is None:
+            raise ValueError(
+                "--allowed-system-types requires "
+                "--experimental-system-type-col.")
+        selected_columns.append(args.experimental_system_type_col)
+    selected_columns = list(dict.fromkeys(selected_columns))
+    require_columns(table_header, selected_columns)
+
+    positive_pair_frames = []
+    n_positive_input = 0
+    n_pairs_dropped_ambiguous = 0
+    for table_chunk in iter_table_chunks(
+            args.interactions,
+            chunksize=args.table_chunksize,
+            archive_member=args.archive_member,
+            usecols=selected_columns):
+        n_positive_input += len(table_chunk)
+        filtered_chunk = apply_biogrid_filters(table_chunk, args)
+        filtered_chunk, n_ambiguous = filter_ambiguous_interactor_values(
+            table=filtered_chunk,
+            columns=[protein_a_col, protein_b_col],
+            policy=args.ambiguous_id_policy,
+        )
+        n_pairs_dropped_ambiguous += n_ambiguous
+        if not filtered_chunk.empty:
+            positive_pair_frames.append(positive_pairs_from_table(
+                table=filtered_chunk,
+                protein_a_col=protein_a_col,
+                protein_b_col=protein_b_col,
+            ))
+
+    if positive_pair_frames:
+        positive_pairs = pd.concat(positive_pair_frames, ignore_index=True)
+    else:
+        positive_pairs = pd.DataFrame(
+            columns=["protein_a", "protein_b", "label"])
+
+    return (
+        positive_pairs,
+        protein_a_col,
+        protein_b_col,
+        int(n_positive_input),
+        int(n_pairs_dropped_ambiguous),
+    )
 
 
 def make_loader_specific_options(
@@ -212,8 +317,11 @@ def make_loader_specific_options(
     """
     options = {
         "interactions": str(args.interactions),
+        "archive_member": args.archive_member,
+        "table_chunksize": int(args.table_chunksize),
         "protein_a_col": protein_a_col,
         "protein_b_col": protein_b_col,
+        "fasta_id_format": args.fasta_id_format,
         "organism_a_col": args.organism_a_col,
         "organism_b_col": args.organism_b_col,
         "organism_id": args.organism_id,
@@ -223,6 +331,7 @@ def make_loader_specific_options(
         "negative_ratio": float(args.negative_ratio),
         "n_positive_after_loader_filters": int(
             n_positive_after_loader_filters),
+        "ambiguous_id_policy": args.ambiguous_id_policy,
         "id_mapping_used": args.id_map is not None,
         "id_map": None if args.id_map is None else str(args.id_map),
         "map_from_col": args.map_from_col,
@@ -243,28 +352,15 @@ def run(args: Any) -> None:
             "BioGRID provides positives only in this loader version; pass "
             "--sample-negatives.")
 
-    sequences = read_fasta(args.fasta)
-    table = read_table(args.interactions)
-    n_positive_input = int(len(table))
-    protein_a_col = infer_biogrid_column(
-        table=table,
-        explicit_column=args.protein_a_col,
-        candidates=PROTEIN_A_CANDIDATES,
-        role_name="BioGRID protein_a column",
-        arg_name="--protein-a-col",
-    )
-    protein_b_col = infer_biogrid_column(
-        table=table,
-        explicit_column=args.protein_b_col,
-        candidates=PROTEIN_B_CANDIDATES,
-        role_name="BioGRID protein_b column",
-        arg_name="--protein-b-col",
-    )
-    filtered_table = apply_biogrid_filters(table, args)
-    positive_pairs = positive_pairs_from_table(
-        table=filtered_table,
-        protein_a_col=protein_a_col,
-        protein_b_col=protein_b_col,
+    sequences = read_fasta(args.fasta, id_format=args.fasta_id_format)
+    (
+        positive_pairs,
+        protein_a_col,
+        protein_b_col,
+        n_positive_input,
+        n_pairs_dropped_ambiguous_interactor,
+    ) = read_biogrid_positive_pairs(
+        args,
     )
     n_positive_after_loader_filters = int(len(positive_pairs))
     id_mapping_metadata = {
@@ -291,6 +387,7 @@ def run(args: Any) -> None:
         positive_pairs=positive_pairs,
         negative_ratio=args.negative_ratio,
         seed=args.seed,
+        allowed_protein_ids=sequences,
     )
     raw_pairs = pd.concat(
         [positive_pairs, negative_pairs],
@@ -301,11 +398,12 @@ def run(args: Any) -> None:
         "n_negative_input": 0,
         "n_unique_proteins_input": input_protein_count(raw_pairs),
         "n_positive_after_id_mapping": int(len(positive_pairs)),
+        "n_pairs_dropped_ambiguous_interactor": (
+            n_pairs_dropped_ambiguous_interactor),
         "n_pairs_after_loader_filters": int(len(raw_pairs)),
         "sampled_negatives": True,
         "negative_ratio": float(args.negative_ratio),
-        "target_n_negatives": int(sampling_metadata["target_n_negatives"]),
-        "n_sampled_negatives": int(sampling_metadata["n_sampled_negatives"]),
+        **sampling_metadata,
         **id_mapping_metadata,
     }
     write_prepared_dataset(

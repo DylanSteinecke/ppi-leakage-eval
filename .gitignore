@@ -4,6 +4,14 @@
 *npy
 *fasta
 *pyc
+*zip
+*gz
+*bz2
+*xz
+
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 
 results/*
 processed/*

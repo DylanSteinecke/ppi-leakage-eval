@@ -9,10 +9,11 @@ leakage checks, and alternative train/test split strategies.
 import argparse
 import logging
 import random
-from pathlib import Path
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
+
+from ppi_dataset_utils import normalize_labels
 
 
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
@@ -32,90 +33,9 @@ SPLIT_STRATEGY_CHOICES = (
 )
 LOGGER = logging.getLogger(__name__)
 
-
-#################
-# FASTA parsing #
-#################
-def read_fasta(sequences_path: str | Path) -> dict[str, str]:
-    """
-    Read protein sequences from a FASTA file.
-    """
-    sequences = {}
-    current_id = None
-    chunks = []
-
-    def save_current_record() -> None:
-        """
-        Save the current FASTA record after checking it has sequence text.
-        """
-        if current_id is None:
-            return
-        if not chunks:
-            raise ValueError(
-                f"FASTA record '{current_id}' has no sequence.")
-
-        sequences[current_id] = "".join(chunks)
-
-    with Path(sequences_path).open("r", encoding="utf-8") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-
-            if line.startswith(">"):
-                save_current_record()
-
-                header_parts = line[1:].split()
-                if not header_parts:
-                    raise ValueError(
-                        "FASTA record header is missing a sequence ID.")
-
-                current_id = header_parts[0]
-                if current_id in sequences:
-                    raise ValueError(
-                        f"Duplicate FASTA sequence ID: {current_id}")
-                chunks = []
-            else:
-                if current_id is None:
-                    raise ValueError(
-                        "FASTA sequence line found before any header.")
-                chunks.append(line)
-
-    save_current_record()
-
-    return sequences
-
-
 ####################
 # Data-checking QC #
 ####################
-def normalize_labels(labels: pd.Series, context: str) -> pd.Series:
-    """
-    Return labels as ints after validating they are binary 0/1 values.
-    """
-    if labels.isna().any():
-        raise ValueError(f"{context} label column contains missing values.")
-
-    try:
-        numeric_labels = pd.to_numeric(labels, errors="raise")
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{context} label column must contain only 0/1 values.") from exc
-
-    unexpected_values = sorted(
-        value
-        for value in pd.unique(numeric_labels)
-        if value not in EXPECTED_LABEL_VALUES)
-    if unexpected_values:
-        raise ValueError(
-            f"{context} label column must contain only 0/1 values. "
-            f"Found: {unexpected_values}")
-
-    normalized_labels = numeric_labels.astype(int)
-
-    return normalized_labels
-
-
 def validate_binary_labeling(labels: pd.Series, context: str) -> None:
     """
     Fail fast unless a label series contains both binary classes.
@@ -133,8 +53,14 @@ def validate_pair_ids(protein_pairs: pd.DataFrame) -> None:
     """
     Fail fast if pair rows are missing protein identifiers.
     """
-    missing_id_mask = protein_pairs[["protein_a", "protein_b"]].isna().any(
-        axis=1)
+    pair_ids = protein_pairs[["protein_a", "protein_b"]]
+    missing_id_mask = pair_ids.isna().any(axis=1)
+    blank_id_mask = (
+        pair_ids.astype("string")
+        .apply(lambda values: values.str.strip().eq(""))
+        .any(axis=1)
+    )
+    missing_id_mask = missing_id_mask | blank_id_mask
     if missing_id_mask.any():
         n_missing_rows = int(missing_id_mask.sum())
         raise ValueError(
@@ -147,17 +73,20 @@ def drop_pairs_missing_sequences(
     """
     Drop rows where either protein is absent from the FASTA sequences.
     """
-    sequence_ids = pd.Index(sequences.keys())
+    sequence_ids = pd.Index(sequences)
     has_protein_a = protein_pairs["protein_a"].isin(sequence_ids)
     has_protein_b = protein_pairs["protein_b"].isin(sequence_ids)
     keep_mask = has_protein_a & has_protein_b
     n_dropped = int((~keep_mask).sum())
-    dropped_columns = ["source_row_index", "drop_reason"]
+    dropped_columns = []
+    if "source_row_index" in protein_pairs.columns:
+        dropped_columns.append("source_row_index")
+    dropped_columns.append("drop_reason")
     if "pair_id" in protein_pairs.columns:
         dropped_columns.append("pair_id")
 
     if n_dropped == 0:
-        filtered_pairs = protein_pairs
+        filtered_pairs = protein_pairs.copy()
         dropped_pairs = pd.DataFrame(columns=dropped_columns)
     else:
         missing_a = protein_pairs.loc[
@@ -216,6 +145,10 @@ def prepare_input_data(
     # Check protein IDs, normalize labels, and drop missing-sequence pairs
     prepared_pairs = protein_pairs.copy()
     validate_pair_ids(prepared_pairs)
+    prepared_pairs["protein_a"] = (
+        prepared_pairs["protein_a"].astype("string").str.strip())
+    prepared_pairs["protein_b"] = (
+        prepared_pairs["protein_b"].astype("string").str.strip())
     prepared_pairs["label"] = normalize_labels(
         labels=prepared_pairs["label"], context="pairs.csv")
     prepared_pairs, dropped_pairs = drop_pairs_missing_sequences(
@@ -337,11 +270,14 @@ def validate_splits(
         TEST_SPLIT: test_df,
     }
     for split_name, split_df in split_dfs.items():
-        if split_df is not None and not split_df.empty:
-            validate_binary_labeling(
-                split_df["label"],
-                context=f"{split_name} split",
-            )
+        if split_df is None:
+            continue
+        if split_df.empty:
+            raise ValueError(f"{split_name} split must not be empty.")
+        validate_binary_labeling(
+            split_df["label"],
+            context=f"{split_name} split",
+        )
 
 
 def validate_train_test_splits(
@@ -393,7 +329,7 @@ def load_split_column(
     if split_col not in pairs.columns:
         raise ValueError(f"split_col '{split_col}' is not in pairs.csv.")
 
-    split_values = pairs[split_col].astype(str).str.lower()
+    split_values = pairs[split_col].astype(str).str.strip().str.lower()
     unexpected_values = sorted(set(split_values) - EXPECTED_SPLIT_VALUES)
     if unexpected_values:
         raise ValueError(
@@ -437,24 +373,15 @@ def choose_train_components(
     """
     Choose connected components with train rows close to the target size.
     """
-    target_n_train = component_sizes.sum() * train_size
-    component_items = list(component_sizes.items())
-    rng = random.Random(seed)
-    rng.shuffle(component_items)
-    component_items = sorted(
-        component_items,
-        key=lambda component_item: component_item[1],
-        reverse=True,
+    split_components = choose_components_by_targets(
+        component_sizes=component_sizes,
+        split_targets={
+            TRAIN_SPLIT: train_size,
+            TEST_SPLIT: 1.0 - train_size,
+        },
+        seed=seed,
     )
-
-    train_components = set()
-    n_train = 0
-    for component_id, component_n_rows in component_items:
-        current_distance = abs(n_train - target_n_train)
-        next_distance = abs(n_train + component_n_rows - target_n_train)
-        if next_distance <= current_distance:
-            train_components.add(component_id)
-            n_train = n_train + component_n_rows
+    train_components = split_components[TRAIN_SPLIT]
 
     return train_components
 
@@ -488,9 +415,21 @@ def choose_components_by_targets(
         split_name: 0
         for split_name in split_targets
     }
-    for component_id, component_n_rows in component_items:
+    for component_index, (component_id, component_n_rows) in enumerate(
+            component_items):
+        empty_splits = [
+            split_name
+            for split_name, components in split_components.items()
+            if not components
+        ]
+        n_remaining_components = len(component_items) - component_index
+        candidate_splits = (
+            empty_splits
+            if n_remaining_components == len(empty_splits)
+            else split_targets
+        )
         best_split = min(
-            split_targets,
+            candidate_splits,
             key=lambda split_name: (
                 abs(
                     split_counts[split_name]
@@ -577,9 +516,11 @@ def estimate_train_protein_fraction(train_size: float) -> float:
     the retained train/test pair ratio closer to the requested pair ratio after
     crossing pairs are pruned.
     """
-    train_weight = train_size ** 0.5
-    test_weight = (1.0 - train_size) ** 0.5
-    train_protein_fraction = train_weight / (train_weight + test_weight)
+    protein_fractions = estimate_split_protein_fractions({
+        TRAIN_SPLIT: train_size,
+        TEST_SPLIT: 1.0 - train_size,
+    })
+    train_protein_fraction = protein_fractions[TRAIN_SPLIT]
 
     return train_protein_fraction
 
@@ -609,19 +550,15 @@ def choose_train_proteins(
     """
     Choose proteins assigned to the training side of a disjoint split.
     """
-    proteins = sorted(protein_ids_in_pairs(pairs))
-    if len(proteins) < 2:
-        raise ValueError(
-            "protein_disjoint_prune_edges split requires at least two "
-            "proteins.")
-
-    train_protein_fraction = estimate_train_protein_fraction(train_size)
-    n_train_proteins = round(len(proteins) * train_protein_fraction)
-    n_train_proteins = max(1, min(n_train_proteins, len(proteins) - 1))
-
-    rng = random.Random(seed)
-    rng.shuffle(proteins)
-    train_proteins = set(proteins[:n_train_proteins])
+    split_proteins = choose_proteins_by_targets(
+        pairs=pairs,
+        split_targets={
+            TRAIN_SPLIT: train_size,
+            TEST_SPLIT: 1.0 - train_size,
+        },
+        seed=seed,
+    )
+    train_proteins = split_proteins[TRAIN_SPLIT]
 
     return train_proteins
 

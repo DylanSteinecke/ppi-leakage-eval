@@ -589,6 +589,32 @@ def merge_train_test_summaries(
     return combined_df
 
 
+def load_combined_summary(
+        train_summary_path: str | Path, comparison_summary_path: str | Path,
+        comparison_split_name: str,
+    ) -> pd.DataFrame:
+    """
+    Read, validate, and align train/comparison metric summaries.
+    """
+    train_summary_path = Path(train_summary_path)
+    comparison_summary_path = Path(comparison_summary_path)
+    train_summary_df = pd.read_csv(train_summary_path)
+    comparison_summary_df = pd.read_csv(comparison_summary_path)
+    if train_summary_df.empty:
+        raise ValueError(f"Train metrics summary is empty: {train_summary_path}")
+    if comparison_summary_df.empty:
+        comparison_label = comparison_split_name.title()
+        raise ValueError(
+            f"{comparison_label} metrics summary is empty: "
+            f"{comparison_summary_path}")
+
+    return merge_train_test_summaries(
+        train_summary_df=train_summary_df,
+        test_summary_df=comparison_summary_df,
+        comparison_split_name=comparison_split_name,
+    )
+
+
 def add_estimate_marker(
         svg_parts: list[str], plot_x: float, row_y: float,
         mean_value: float | None, se_value: float | None, fill: str,
@@ -781,22 +807,13 @@ def plot_train_test_metrics_summary(
     """
     Plot train and comparison metric estimates on the same model rows.
     """
-    train_summary_path = Path(train_summary_path)
-    test_summary_path = Path(test_summary_path)
     plot_path = Path(plot_path)
     if plot_path.suffix.lower() != ".svg":
         raise ValueError("metrics plot output must end with '.svg'.")
 
-    train_summary_df = pd.read_csv(train_summary_path)
-    test_summary_df = pd.read_csv(test_summary_path)
-    if train_summary_df.empty:
-        raise ValueError(f"Train metrics summary is empty: {train_summary_path}")
-    if test_summary_df.empty:
-        raise ValueError(f"Test metrics summary is empty: {test_summary_path}")
-
-    combined_df = merge_train_test_summaries(
-        train_summary_df=train_summary_df,
-        test_summary_df=test_summary_df,
+    combined_df = load_combined_summary(
+        train_summary_path=train_summary_path,
+        comparison_summary_path=test_summary_path,
         comparison_split_name=comparison_split_name,
     )
     comparison_label = comparison_split_name.title()
@@ -990,22 +1007,13 @@ def plot_train_test_metrics_summary_png(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    train_summary_path = Path(train_summary_path)
-    test_summary_path = Path(test_summary_path)
     plot_path = Path(plot_path)
     if plot_path.suffix.lower() != ".png":
         raise ValueError("metrics PNG plot output must end with '.png'.")
 
-    train_summary_df = pd.read_csv(train_summary_path)
-    test_summary_df = pd.read_csv(test_summary_path)
-    if train_summary_df.empty:
-        raise ValueError(f"Train metrics summary is empty: {train_summary_path}")
-    if test_summary_df.empty:
-        raise ValueError(f"Test metrics summary is empty: {test_summary_path}")
-
-    combined_df = merge_train_test_summaries(
-        train_summary_df=train_summary_df,
-        test_summary_df=test_summary_df,
+    combined_df = load_combined_summary(
+        train_summary_path=train_summary_path,
+        comparison_summary_path=test_summary_path,
         comparison_split_name=comparison_split_name,
     )
     comparison_label = comparison_split_name.title()
@@ -1167,25 +1175,14 @@ def plot_train_test_f1_heatmap(
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
 
-    train_summary_path = Path(train_summary_path)
-    test_summary_path = Path(test_summary_path)
     plot_path = Path(plot_path)
     if plot_path.suffix.lower() != ".png":
         raise ValueError("F1 heatmap output path must end with '.png'.")
 
     comparison_label = comparison_split_name.title()
-    train_summary_df = pd.read_csv(train_summary_path)
-    test_summary_df = pd.read_csv(test_summary_path)
-    if train_summary_df.empty:
-        raise ValueError(f"Train metrics summary is empty: {train_summary_path}")
-    if test_summary_df.empty:
-        raise ValueError(
-            f"{comparison_label} metrics summary is empty: "
-            f"{test_summary_path}")
-
-    combined_df = merge_train_test_summaries(
-        train_summary_df=train_summary_df,
-        test_summary_df=test_summary_df,
+    combined_df = load_combined_summary(
+        train_summary_path=train_summary_path,
+        comparison_summary_path=test_summary_path,
         comparison_split_name=comparison_split_name,
     )
     required_columns = {

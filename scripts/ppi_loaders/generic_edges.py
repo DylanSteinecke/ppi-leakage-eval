@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from ppi_dataset_utils import (
+    add_common_loader_args,
     input_protein_count,
     read_fasta,
     read_table,
@@ -28,7 +29,7 @@ def register_subcommand(subparsers: Any) -> None:
         LOADER_NAME,
         help="Prepare a generic positive/negative PPI edge-list dataset.",
     )
-    add_common_args(parser)
+    add_common_loader_args(parser)
     parser.add_argument("--positive-pairs", required=True)
     parser.add_argument("--negative-pairs", default=None)
     parser.add_argument("--protein-a-col", default="protein_a")
@@ -36,17 +37,6 @@ def register_subcommand(subparsers: Any) -> None:
     parser.add_argument("--sample-negatives", action="store_true")
     parser.add_argument("--negative-ratio", type=float, default=1.0)
     parser.set_defaults(func=run)
-
-
-def add_common_args(parser: Any) -> None:
-    """
-    Add shared dataset-prep arguments to one subcommand parser.
-    """
-    parser.add_argument("--dataset-name", required=True)
-    parser.add_argument("--fasta", required=True)
-    parser.add_argument("--out-dir", default="processed")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--overwrite", action="store_true")
 
 
 def select_pair_columns(
@@ -102,6 +92,7 @@ def make_loader_specific_options(args: Any) -> dict[str, Any]:
         ),
         "protein_a_col": args.protein_a_col,
         "protein_b_col": args.protein_b_col,
+        "fasta_id_format": args.fasta_id_format,
         "sample_negatives": bool(args.sample_negatives),
         "negative_ratio": float(args.negative_ratio),
     }
@@ -118,7 +109,7 @@ def run(args: Any) -> None:
         raise ValueError(
             "Pass either --negative-pairs or --sample-negatives, not both.")
 
-    sequences = read_fasta(args.fasta)
+    sequences = read_fasta(args.fasta, id_format=args.fasta_id_format)
     positive_pairs = read_edge_pairs(
         input_path=args.positive_pairs,
         protein_a_col=args.protein_a_col,
@@ -127,8 +118,10 @@ def run(args: Any) -> None:
     )
     n_positive_input = int(len(positive_pairs))
     n_negative_input = 0
-    target_n_negatives = 0
-    n_sampled_negatives = 0
+    sampling_metadata = {
+        "target_n_negatives": 0,
+        "n_sampled_negatives": 0,
+    }
     input_paths = {
         "fasta": args.fasta,
         "positive_pairs": args.positive_pairs,
@@ -149,9 +142,8 @@ def run(args: Any) -> None:
             positive_pairs=positive_pairs,
             negative_ratio=args.negative_ratio,
             seed=args.seed,
+            allowed_protein_ids=sequences,
         )
-        target_n_negatives = int(sampling_metadata["target_n_negatives"])
-        n_sampled_negatives = int(sampling_metadata["n_sampled_negatives"])
         sampled_negatives = True
     else:
         raise ValueError(
@@ -168,8 +160,7 @@ def run(args: Any) -> None:
         "n_pairs_after_loader_filters": int(len(raw_pairs)),
         "sampled_negatives": sampled_negatives,
         "negative_ratio": float(args.negative_ratio),
-        "target_n_negatives": target_n_negatives,
-        "n_sampled_negatives": n_sampled_negatives,
+        **sampling_metadata,
     }
     write_prepared_dataset(
         args=args,

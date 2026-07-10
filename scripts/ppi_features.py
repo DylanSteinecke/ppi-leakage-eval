@@ -171,25 +171,57 @@ def make_vectorizer(feature_type: str, args: argparse.Namespace) -> Any:
 #################
 # Pair features #
 #################
+def unique_protein_ids(
+        dataframes: tuple[pd.DataFrame | None, ...],
+    ) -> pd.Index:
+    """
+    Return stable unique protein IDs across non-empty pair dataframes.
+    """
+    protein_ids = set()
+    for dataframe in dataframes:
+        if dataframe is None or dataframe.empty:
+            continue
+        protein_ids.update(dataframe["protein_a"])
+        protein_ids.update(dataframe["protein_b"])
+
+    return pd.Index(sorted(protein_ids))
+
+
+def compose_pair_features(
+        df: pd.DataFrame, protein_ids: pd.Index, protein_features: Any,
+    ) -> csr_matrix:
+    """
+    Compose symmetric pair features from precomputed protein feature rows.
+    """
+    protein_a_rows = protein_ids.get_indexer(df["protein_a"])
+    protein_b_rows = protein_ids.get_indexer(df["protein_b"])
+    if (protein_a_rows < 0).any() or (protein_b_rows < 0).any():
+        raise ValueError("Pair dataframe contains proteins without features.")
+
+    prot_a_fts = protein_features[protein_a_rows]
+    prot_b_fts = protein_features[protein_b_rows]
+    ft_sums = prot_a_fts + prot_b_fts
+    ft_diffs = np.abs(prot_a_fts - prot_b_fts)
+    ft_prods = prot_a_fts.multiply(prot_b_fts)
+
+    return hstack([ft_sums, ft_diffs, ft_prods], format="csr")
+
+
 def make_pair_features(
         df: pd.DataFrame, sequences: dict[str, str], vectorizer: Any,
     ) -> Any:
     """
     Create features for each protein pair.
     """
-    # Protein sequences
-    sequence_a = df["protein_a"].map(sequences).tolist()
-    sequence_b = df["protein_b"].map(sequences).tolist()
-
-    # Protein features
-    prot_a_fts = vectorizer.transform(sequence_a)
-    prot_b_fts = vectorizer.transform(sequence_b)
-
-    # Protein pair features
-    ft_sums = prot_a_fts + prot_b_fts
-    ft_diffs = np.abs(prot_a_fts - prot_b_fts)
-    ft_prods = prot_a_fts.multiply(prot_b_fts)
-    prot_pair_fts = hstack([ft_sums, ft_diffs, ft_prods], format="csr")
+    protein_ids = unique_protein_ids((df,))
+    protein_features = vectorizer.transform(
+        [sequences[protein_id] for protein_id in protein_ids]
+    )
+    prot_pair_fts = compose_pair_features(
+        df=df,
+        protein_ids=protein_ids,
+        protein_features=protein_features,
+    )
 
     return prot_pair_fts
 
@@ -213,29 +245,33 @@ def build_feature_matrices(
     train_feature_blocks = []
     val_feature_blocks = []
     test_feature_blocks = []
+    feature_dataframes = (train_df, val_df, test_df)
+    all_protein_ids = unique_protein_ids(feature_dataframes)
+    all_sequences = [sequences[protein_id] for protein_id in all_protein_ids]
     for feature_type in feature_types:
         vectorizer = make_vectorizer(feature_type, args)
         vectorizer.fit(train_sequences)
-        train_feature_block = make_pair_features(
-            train_df,
-            sequences,
-            vectorizer,
+        protein_features = vectorizer.transform(all_sequences)
+        train_feature_block = compose_pair_features(
+            df=train_df,
+            protein_ids=all_protein_ids,
+            protein_features=protein_features,
         )
         train_feature_blocks.append(train_feature_block)
         if val_df is not None and not val_df.empty:
             val_feature_blocks.append(
-                make_pair_features(
-                    val_df,
-                    sequences,
-                    vectorizer,
+                compose_pair_features(
+                    df=val_df,
+                    protein_ids=all_protein_ids,
+                    protein_features=protein_features,
                 )
             )
         if test_df is not None and not test_df.empty:
             test_feature_blocks.append(
-                make_pair_features(
-                    test_df,
-                    sequences,
-                    vectorizer,
+                compose_pair_features(
+                    df=test_df,
+                    protein_ids=all_protein_ids,
+                    protein_features=protein_features,
                 )
             )
 

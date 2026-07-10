@@ -5,7 +5,6 @@ This module owns source-row tracking, split assignment outputs, split metadata,
 and append-mode split compatibility checks.
 """
 
-import hashlib
 import json
 import shlex
 import subprocess
@@ -16,8 +15,14 @@ from typing import Any
 
 import pandas as pd
 
+from ppi_dataset_utils import file_sha256
 from ppi_inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
-from split_diagnostics import compute_ppi_split_diagnostics, native_value
+from ppi_results import output_lock
+from split_diagnostics import (
+    compute_ppi_split_diagnostics,
+    label_counts,
+    native_value,
+)
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"
@@ -91,21 +96,6 @@ def make_split_assignments(
     ).reset_index(drop=True)
 
     return assignments_df
-
-
-#################
-# File metadata #
-#################
-def file_sha256(input_path: str | Path) -> str:
-    """
-    Return the SHA256 digest for a file.
-    """
-    digest = hashlib.sha256()
-    with Path(input_path).open("rb") as fin:
-        for chunk in iter(lambda: fin.read(1024 * 1024), b""):
-            digest.update(chunk)
-
-    return digest.hexdigest()
 
 
 def run_git_command(args: list[str], working_directory: Path) -> str | None:
@@ -193,28 +183,9 @@ def append_invocation_log(entry: dict[str, Any], output_path: Path) -> None:
     Append one invocation record to a run-level JSONL log.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("a", encoding="utf-8") as fout:
-        fout.write(json.dumps(entry, sort_keys=True) + "\n")
-
-
-##################
-# Split metadata #
-##################
-def label_counts(split_df: pd.DataFrame | None) -> dict[str, int]:
-    """
-    Return JSON-friendly label counts for one dataframe.
-    """
-    if split_df is None or split_df.empty:
-        counts = {}
-    else:
-        counts = {
-            str(label): int(count)
-            for label, count in split_df["label"].value_counts(
-                sort=False,
-            ).sort_index().items()
-        }
-
-    return counts
+    with output_lock(output_path):
+        with output_path.open("a", encoding="utf-8") as fout:
+            fout.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
 def split_protein_ids(split_df: pd.DataFrame | None) -> set[str]:
@@ -373,6 +344,30 @@ def validate_append_split_assignments(
         ) from exc
 
 
+def validate_append_input_files(
+        new_metadata: dict[str, Any], existing_path: Path,
+    ) -> None:
+    """
+    Fail if append mode would mix results from different input contents.
+    """
+    if not existing_path.exists():
+        return
+
+    with existing_path.open("r", encoding="utf-8") as fin:
+        existing_metadata = json.load(fin)
+    hash_fields = ("pairs_file_sha256", "fasta_file_sha256")
+    changed_fields = [
+        field
+        for field in hash_fields
+        if existing_metadata.get(field) != new_metadata.get(field)
+    ]
+    if changed_fields:
+        raise ValueError(
+            f"Cannot append results to {existing_path.parent.parent}: input "
+            f"file contents changed ({changed_fields}). Use a new --run-dir "
+            "or rerun without --append-results.")
+
+
 def write_split_artifacts(
         split_assignments: pd.DataFrame, dropped_pairs: pd.DataFrame,
         split_metadata: dict[str, Any], output_paths: Any,
@@ -389,6 +384,10 @@ def write_split_artifacts(
         validate_append_split_assignments(
             new_assignments=split_assignments,
             existing_path=split_assignments_path,
+        )
+        validate_append_input_files(
+            new_metadata=split_metadata,
+            existing_path=split_metadata_path,
         )
         if not dropped_pairs_path.exists():
             dropped_pairs.to_csv(dropped_pairs_path, index=False)

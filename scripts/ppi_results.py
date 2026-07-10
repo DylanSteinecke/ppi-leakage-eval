@@ -144,6 +144,15 @@ def summarize_metrics(metrics_path: Path) -> pd.DataFrame:
     metric_columns = [
         column for column in METRIC_COLUMNS if column in metrics_df.columns
     ]
+    if not metric_columns:
+        raise ValueError(
+            f"Metrics file contains no supported metric columns: {metrics_path}")
+
+    synthetic_group_column = None
+    if not group_columns:
+        synthetic_group_column = "_summary_group"
+        metrics_df[synthetic_group_column] = 0
+        group_columns = [synthetic_group_column]
 
     grouped = metrics_df.groupby(group_columns, dropna=False)
     n_runs = grouped.size().rename("n_runs").reset_index()
@@ -158,5 +167,7 @@ def summarize_metrics(metrics_path: Path) -> pd.DataFrame:
     summary_df = n_runs.merge(means, on=group_columns)
     summary_df = summary_df.merge(standard_errors, on=group_columns)
     summary_df = summary_df.sort_values(group_columns).reset_index(drop=True)
+    if synthetic_group_column is not None:
+        summary_df = summary_df.drop(columns=synthetic_group_column)
 
     return summary_df

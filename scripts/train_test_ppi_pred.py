@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ppi_dataset_utils import FASTA_ID_FORMAT_CHOICES, read_fasta
 from ppi_features import (
     FEATURE_CHOICES,
     build_feature_matrices,
@@ -29,7 +30,6 @@ from ppi_inputs import (
     PROVIDED_SPLIT_STRATEGY,
     load_or_make_split,
     prepare_input_data,
-    read_fasta,
     RANDOM_SPLIT_STRATEGY,
     SPLIT_STRATEGY_CHOICES,
     validate_splits,
@@ -187,6 +187,11 @@ def argument_parser() -> argparse.Namespace:
     input_group.add_argument(
         "--fasta", required=True,
         help="FASTA file of protein sequences")
+    input_group.add_argument(
+        "--fasta-id-format",
+        choices=FASTA_ID_FORMAT_CHOICES,
+        default="first_token",
+        help="How sequence IDs are parsed from FASTA headers.")
 
     # Output data args
     output_group = parser.add_argument_group("Outputs")
@@ -571,7 +576,7 @@ def run_model_reruns(
 
 def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     """
-    Resolve and initialize canonical output paths inside --run-dir.
+    Resolve canonical output paths inside --run-dir.
     """
     run_dir = Path(args.run_dir)
     plots_dir = run_dir / PLOTS_DIRNAME
@@ -633,82 +638,6 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
             train_test_png_path = all_train_test_png_path
             train_test_f1_heatmap_path = all_train_test_f1_heatmap_path
 
-    # Clear stale canonical files on fresh runs. In append mode, preserve
-    # metric/prediction CSVs but always regenerate summaries and plots.
-    all_metric_prediction_paths = [
-        all_predictions_path,
-        train_metrics_path,
-        all_val_metrics_path,
-        all_test_metrics_path,
-    ]
-    all_summary_plot_paths = [
-        train_summary_path,
-        all_val_summary_path,
-        all_test_summary_path,
-        all_train_plot_path,
-        all_val_plot_path,
-        all_test_plot_path,
-        all_train_val_plot_path,
-        all_train_val_png_path,
-        all_train_val_f1_heatmap_path,
-        all_train_test_plot_path,
-        all_train_test_png_path,
-        all_train_test_f1_heatmap_path,
-    ]
-    legacy_heatmap_paths = [
-        *legacy_f1_heatmap_output_paths(
-            all_train_val_f1_heatmap_path,
-            comparison_split_name="val",
-        ).values(),
-        *legacy_f1_heatmap_output_paths(
-            all_train_test_f1_heatmap_path,
-            comparison_split_name="test",
-        ).values(),
-    ]
-    all_split_artifact_paths = [
-        split_assignments_path,
-        dropped_pairs_path,
-        split_metadata_path,
-        invocations_path,
-    ]
-    active_metric_prediction_paths = [
-        train_metrics_path,
-        val_metrics_path,
-        predictions_path,
-        test_metrics_path,
-    ]
-    active_summary_plot_paths = [
-        train_summary_path,
-        val_summary_path,
-        test_summary_path,
-        train_plot_path,
-        val_plot_path,
-        test_plot_path,
-        train_val_plot_path,
-        train_val_png_path,
-        train_val_f1_heatmap_path,
-        train_test_plot_path,
-        train_test_png_path,
-        train_test_f1_heatmap_path,
-    ]
-    if not args.append_results:
-        reset_output_files(
-            all_metric_prediction_paths
-            + all_summary_plot_paths
-            + all_split_artifact_paths
-            + legacy_heatmap_paths,
-            append_results=False,
-        )
-    else:
-        reset_output_files(
-            active_metric_prediction_paths,
-            append_results=True,
-        )
-        reset_output_files(
-            active_summary_plot_paths,
-            append_results=False,
-        )
-
     output_paths = OutputPaths(
         run_dir=run_dir,
         plots_dir=plots_dir,
@@ -738,6 +667,93 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     return output_paths
 
 
+def initialize_output_files(
+        args: argparse.Namespace, output_paths: OutputPaths,
+    ) -> None:
+    """
+    Clear stale outputs after append compatibility has been validated.
+    """
+    run_dir = output_paths.run_dir
+    plots_dir = output_paths.plots_dir
+    metric_prediction_paths = [
+        run_dir / filename
+        for filename in (
+            PREDICTIONS_FILENAME,
+            TRAIN_METRICS_FILENAME,
+            VAL_METRICS_FILENAME,
+            TEST_METRICS_FILENAME,
+        )
+    ]
+    summary_paths = [
+        run_dir / filename
+        for filename in (
+            TRAIN_SUMMARY_FILENAME,
+            VAL_SUMMARY_FILENAME,
+            TEST_SUMMARY_FILENAME,
+        )
+    ]
+    plot_paths = [
+        plots_dir / filename
+        for filename in (
+            TRAIN_PLOT_FILENAME,
+            VAL_PLOT_FILENAME,
+            TEST_PLOT_FILENAME,
+            TRAIN_VAL_PLOT_FILENAME,
+            TRAIN_VAL_PNG_FILENAME,
+            TRAIN_VAL_F1_HEATMAP_FILENAME,
+            TRAIN_TEST_PLOT_FILENAME,
+            TRAIN_TEST_PNG_FILENAME,
+            TRAIN_TEST_F1_HEATMAP_FILENAME,
+        )
+    ]
+    legacy_heatmap_paths = [
+        *legacy_f1_heatmap_output_paths(
+            plots_dir / TRAIN_VAL_F1_HEATMAP_FILENAME,
+            comparison_split_name="val",
+        ).values(),
+        *legacy_f1_heatmap_output_paths(
+            plots_dir / TRAIN_TEST_F1_HEATMAP_FILENAME,
+            comparison_split_name="test",
+        ).values(),
+    ]
+
+    if not args.append_results:
+        reset_output_files(
+            metric_prediction_paths
+            + summary_paths
+            + plot_paths
+            + legacy_heatmap_paths
+            + [output_paths.invocations_path],
+            append_results=False,
+        )
+        return
+
+    active_derived_paths = [
+        output_paths.train_summary_path,
+        plots_dir / TRAIN_PLOT_FILENAME,
+    ]
+    if args.has_validation_split:
+        active_derived_paths.extend([
+            output_paths.val_summary_path,
+            plots_dir / VAL_PLOT_FILENAME,
+            plots_dir / TRAIN_VAL_PLOT_FILENAME,
+            plots_dir / TRAIN_VAL_PNG_FILENAME,
+            plots_dir / TRAIN_VAL_F1_HEATMAP_FILENAME,
+        ])
+    if args.evaluate_test_metrics:
+        active_derived_paths.extend([
+            output_paths.test_summary_path,
+            plots_dir / TEST_PLOT_FILENAME,
+            plots_dir / TRAIN_TEST_PLOT_FILENAME,
+            plots_dir / TRAIN_TEST_PNG_FILENAME,
+            plots_dir / TRAIN_TEST_F1_HEATMAP_FILENAME,
+        ])
+    reset_output_files(
+        active_derived_paths + legacy_heatmap_paths,
+        append_results=False,
+    )
+
+
 def main() -> None:
     """
     Run the full CLI pipeline.
@@ -746,10 +762,13 @@ def main() -> None:
     configure_logging(args)
 
     # Load and process input data
-    protein_pairs = pd.read_csv(args.pairs)
+    protein_pairs = pd.read_csv(
+        args.pairs,
+        dtype={"protein_a": "string", "protein_b": "string"},
+    )
     protein_pairs = add_source_row_index(protein_pairs)
     n_input_pairs_before_filtering = len(protein_pairs)
-    sequences = read_fasta(args.fasta)
+    sequences = read_fasta(args.fasta, id_format=args.fasta_id_format)
     protein_pairs, dropped_pairs = prepare_input_data(
         protein_pairs,
         sequences,
@@ -789,6 +808,7 @@ def main() -> None:
             output_paths=output_paths,
             append_results=args.append_results,
         )
+        initialize_output_files(args, output_paths)
         append_invocation_log(
             invocation_log_entry(
                 args=args,

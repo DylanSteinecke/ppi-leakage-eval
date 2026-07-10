@@ -1,4 +1,4 @@
-name: ppi-leakage
+name: ppi
 channels:
   - pytorch
   - nvidia

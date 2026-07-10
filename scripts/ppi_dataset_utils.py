@@ -6,17 +6,22 @@ Dataset loaders convert raw sources into pair tables with ``protein_a``,
 canonicalization, FASTA filtering, metadata, and output writing steps.
 """
 
+import bz2
+import gzip
 import hashlib
 import json
+import lzma
 import math
 import random
 import shlex
 import sys
+import zipfile
+from bisect import bisect_right
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from itertools import combinations
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator, TextIO
 
 import pandas as pd
 
@@ -32,6 +37,8 @@ SUPPORTED_TABLE_SUFFIXES = {
     ".tsv": "\t",
     ".txt": "\t",
 }
+COMPRESSED_TEXT_SUFFIXES = {".bz2", ".gz", ".xz"}
+FASTA_ID_FORMAT_CHOICES = ("first_token", "uniprot_accession")
 
 
 @dataclass(frozen=True)
@@ -43,7 +50,55 @@ class PairProcessingResult:
     metadata: dict[str, Any]
 
 
-def read_fasta(fasta_path: str | Path) -> dict[str, str]:
+def open_text_auto(input_path: str | Path) -> TextIO:
+    """
+    Open plain or gzip/bzip2/xz-compressed text for reading.
+    """
+    input_path = Path(input_path)
+    suffix = input_path.suffix.lower()
+    if suffix == ".gz":
+        fin = gzip.open(input_path, "rt", encoding="utf-8")
+    elif suffix == ".bz2":
+        fin = bz2.open(input_path, "rt", encoding="utf-8")
+    elif suffix == ".xz":
+        fin = lzma.open(input_path, "rt", encoding="utf-8")
+    else:
+        fin = input_path.open("r", encoding="utf-8")
+
+    return fin
+
+
+def fasta_record_id(header: str, id_format: str) -> str:
+    """
+    Return the requested sequence ID from one FASTA header.
+    """
+    if id_format not in FASTA_ID_FORMAT_CHOICES:
+        raise ValueError(
+            f"Unknown FASTA ID format '{id_format}'. Expected one of "
+            f"{list(FASTA_ID_FORMAT_CHOICES)}.")
+
+    header_parts = header.split()
+    if not header_parts:
+        raise ValueError("FASTA record header is missing a sequence ID.")
+
+    sequence_id = header_parts[0]
+    if id_format == "uniprot_accession":
+        token_parts = sequence_id.split("|")
+        if (
+                len(token_parts) < 3
+                or token_parts[0] not in {"sp", "tr"}
+                or not token_parts[1]):
+            raise ValueError(
+                "Expected a UniProt FASTA header such as "
+                f"'sp|P12345|NAME', found '{sequence_id}'.")
+        sequence_id = token_parts[1]
+
+    return sequence_id
+
+
+def read_fasta(
+        fasta_path: str | Path, id_format: str = "first_token",
+    ) -> dict[str, str]:
     """
     Read a FASTA file into a sequence dictionary.
     """
@@ -62,7 +117,7 @@ def read_fasta(fasta_path: str | Path) -> dict[str, str]:
 
         sequences[current_id] = "".join(chunks)
 
-    with Path(fasta_path).open("r", encoding="utf-8") as fin:
+    with open_text_auto(fasta_path) as fin:
         for line in fin:
             line = line.strip()
             if not line:
@@ -70,12 +125,7 @@ def read_fasta(fasta_path: str | Path) -> dict[str, str]:
 
             if line.startswith(">"):
                 save_current_record()
-                header_parts = line[1:].split()
-                if not header_parts:
-                    raise ValueError(
-                        "FASTA record header is missing a sequence ID.")
-
-                current_id = header_parts[0]
+                current_id = fasta_record_id(line[1:], id_format)
                 if current_id in sequences:
                     raise ValueError(
                         f"Duplicate FASTA sequence ID: {current_id}")
@@ -149,7 +199,10 @@ def infer_separator(table_path: str | Path) -> str:
     """
     Infer a table separator from a supported file extension.
     """
-    suffix = Path(table_path).suffix.lower()
+    suffixes = [suffix.lower() for suffix in Path(table_path).suffixes]
+    while suffixes and suffixes[-1] in COMPRESSED_TEXT_SUFFIXES:
+        suffixes.pop()
+    suffix = suffixes[-1] if suffixes else ""
     if suffix not in SUPPORTED_TABLE_SUFFIXES:
         supported = ", ".join(sorted(SUPPORTED_TABLE_SUFFIXES))
         raise ValueError(
@@ -159,14 +212,111 @@ def infer_separator(table_path: str | Path) -> str:
     return SUPPORTED_TABLE_SUFFIXES[suffix]
 
 
-def read_table(table_path: str | Path) -> pd.DataFrame:
+def selected_archive_member(
+        archive: zipfile.ZipFile, table_path: Path,
+        archive_member: str | None,
+    ) -> str:
+    """
+    Resolve one table member from a ZIP archive.
+    """
+    members = [
+        member for member in archive.namelist()
+        if not member.endswith("/")
+    ]
+    if archive_member is None:
+        if len(members) != 1:
+            raise ValueError(
+                f"ZIP archive '{table_path}' contains {len(members)} files. "
+                "Pass --archive-member with the table to read. "
+                f"Examples: {members[:10]}")
+        archive_member = members[0]
+    elif archive_member not in members:
+        raise ValueError(
+            f"ZIP archive member '{archive_member}' was not found in "
+            f"'{table_path}'. Examples: {members[:10]}")
+
+    return archive_member
+
+
+@contextmanager
+def table_source(
+        table_path: str | Path, archive_member: str | None = None,
+    ) -> Iterator[tuple[Any, str]]:
+    """
+    Yield a readable table source and its inferred separator.
+    """
+    table_path = Path(table_path)
+    if table_path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(table_path) as archive:
+            member = selected_archive_member(
+                archive=archive,
+                table_path=table_path,
+                archive_member=archive_member,
+            )
+            with archive.open(member) as fin:
+                yield fin, infer_separator(member)
+        return
+
+    if archive_member is not None:
+        raise ValueError("--archive-member can only be used with a ZIP table.")
+    yield table_path, infer_separator(table_path)
+
+
+def read_table(
+        table_path: str | Path, archive_member: str | None = None,
+        usecols: Iterable[str] | None = None, nrows: int | None = None,
+    ) -> pd.DataFrame:
     """
     Read a CSV/TSV/TXT table using extension-based separator inference.
     """
-    sep = infer_separator(table_path)
-    table = pd.read_csv(table_path, sep=sep)
+    with table_source(table_path, archive_member) as (source, sep):
+        table = pd.read_csv(
+            source,
+            sep=sep,
+            dtype=str,
+            usecols=usecols,
+            nrows=nrows,
+        )
 
     return table
+
+
+def iter_table_chunks(
+        table_path: str | Path, chunksize: int,
+        archive_member: str | None = None,
+        usecols: Iterable[str] | None = None,
+    ) -> Iterator[pd.DataFrame]:
+    """
+    Yield bounded-memory chunks from a plain, compressed, or ZIP table.
+    """
+    if chunksize < 1:
+        raise ValueError("chunksize must be at least 1.")
+
+    with table_source(table_path, archive_member) as (source, sep):
+        yield from pd.read_csv(
+            source,
+            sep=sep,
+            dtype=str,
+            usecols=usecols,
+            chunksize=chunksize,
+        )
+
+
+def add_common_loader_args(parser: Any) -> None:
+    """
+    Add shared dataset-preparation arguments to one loader parser.
+    """
+    parser.add_argument("--dataset-name", required=True)
+    parser.add_argument("--fasta", required=True)
+    parser.add_argument(
+        "--fasta-id-format",
+        choices=FASTA_ID_FORMAT_CHOICES,
+        default="first_token",
+        help="How sequence IDs are parsed from FASTA headers.",
+    )
+    parser.add_argument("--out-dir", default="processed")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--overwrite", action="store_true")
 
 
 def validate_negative_ratio(negative_ratio: float) -> float:
@@ -212,24 +362,26 @@ def validate_pair_columns(pairs: pd.DataFrame) -> None:
             f"{missing_columns}")
 
 
-def normalize_labels(labels: pd.Series) -> pd.Series:
+def normalize_labels(
+        labels: pd.Series, context: str = "Pair table",
+    ) -> pd.Series:
     """
     Return labels as integer 0/1 values.
     """
     if labels.isna().any():
-        raise ValueError("Pair table label column contains missing values.")
+        raise ValueError(f"{context} label column contains missing values.")
 
     try:
         numeric_labels = pd.to_numeric(labels, errors="raise")
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "Pair table label column must contain only 0/1 values.") from exc
+            f"{context} label column must contain only 0/1 values.") from exc
 
     unexpected_values = sorted(
         value for value in pd.unique(numeric_labels) if value not in {0, 1})
     if unexpected_values:
         raise ValueError(
-            "Pair table label column must contain only 0/1 values. "
+            f"{context} label column must contain only 0/1 values. "
             f"Found: {unexpected_values}")
 
     return numeric_labels.astype(int)
@@ -414,16 +566,20 @@ def contradiction_examples(
     """
     Return contradictory unordered pair examples after same-label deduplication.
     """
-    examples = []
-    for (protein_a, protein_b), group in deduped_pairs.groupby(
-            ["protein_a", "protein_b"], sort=True):
-        labels = sorted(group["label"].unique().tolist())
-        if len(labels) > 1:
-            examples.append({
-                "protein_a": protein_a,
-                "protein_b": protein_b,
-                "labels": labels,
-            })
+    label_counts = deduped_pairs.groupby(
+        ["protein_a", "protein_b"],
+        sort=True,
+    )["label"].nunique()
+    contradictory_keys = label_counts[label_counts > 1].index
+    examples = [
+        {
+            "protein_a": protein_a,
+            "protein_b": protein_b,
+            "labels": [0, 1],
+        }
+        for protein_a, protein_b in contradictory_keys
+    ]
+
     return examples
 
 
@@ -436,14 +592,11 @@ def canonicalize_pairs(pairs: pd.DataFrame) -> PairProcessingResult:
     n_self_pairs_removed = int(self_pair_mask.sum())
     work = work.loc[~self_pair_mask].copy()
 
-    ordered_pairs = work.apply(
-        lambda row: unordered_pair_key(row["protein_a"], row["protein_b"]),
-        axis=1,
-        result_type="expand",
-    )
-    if not ordered_pairs.empty:
-        work["protein_a"] = ordered_pairs[0]
-        work["protein_b"] = ordered_pairs[1]
+    swap_mask = work["protein_a"] > work["protein_b"]
+    work.loc[swap_mask, ["protein_a", "protein_b"]] = work.loc[
+        swap_mask,
+        ["protein_b", "protein_a"],
+    ].to_numpy()
 
     n_before_deduplication = len(work)
     deduped = work.drop_duplicates(
@@ -554,15 +707,24 @@ def observed_pair_keys(pairs: pd.DataFrame) -> set[tuple[str, str]]:
 
 def sample_negative_pairs(
         positive_pairs: pd.DataFrame, negative_ratio: float,
-        seed: int,
+        seed: int, allowed_protein_ids: Iterable[str] | None = None,
     ) -> tuple[pd.DataFrame, dict[str, int | float]]:
     """
     Sample unordered negative pairs from proteins present in positives.
     """
     prepared = prepare_pair_columns(positive_pairs)
     prepared = prepared.loc[prepared["protein_a"] != prepared["protein_b"]]
+    if allowed_protein_ids is not None:
+        allowed_protein_ids = set(allowed_protein_ids)
+        allowed_mask = (
+            prepared["protein_a"].isin(allowed_protein_ids)
+            & prepared["protein_b"].isin(allowed_protein_ids)
+        )
+        prepared = prepared.loc[allowed_mask]
     if prepared.empty:
-        raise ValueError("Cannot sample negatives without positive pairs.")
+        raise ValueError(
+            "Cannot sample negatives without positive pairs whose proteins "
+            "have FASTA sequences.")
 
     protein_ids = sorted(set(prepared["protein_a"]) | set(prepared["protein_b"]))
     positive_keys = observed_pair_keys(prepared)
@@ -570,29 +732,80 @@ def sample_negative_pairs(
         len(positive_keys),
         negative_ratio,
     )
-    all_pair_keys = set(combinations(protein_ids, 2))
-    candidate_keys = sorted(all_pair_keys - positive_keys)
-    if len(candidate_keys) < target_n_negatives:
+    n_proteins = len(protein_ids)
+    n_possible_pairs = n_proteins * (n_proteins - 1) // 2
+    n_available_negatives = n_possible_pairs - len(positive_keys)
+    if n_available_negatives < target_n_negatives:
         raise ValueError(
             "Not enough possible negative pairs to satisfy "
             f"negative_ratio={negative_ratio}. Requested "
-            f"{target_n_negatives}, available {len(candidate_keys)}.")
+            f"{target_n_negatives}, available {n_available_negatives}.")
+
+    protein_indexes = {
+        protein_id: index
+        for index, protein_id in enumerate(protein_ids)
+    }
+    pair_offsets = [
+        index * (2 * n_proteins - index - 1) // 2
+        for index in range(n_proteins)
+    ]
+    positive_indexes = sorted(
+        pair_offsets[protein_indexes[protein_a]]
+        + protein_indexes[protein_b]
+        - protein_indexes[protein_a]
+        - 1
+        for protein_a, protein_b in positive_keys
+    )
+
+    def pair_index_from_allowed_rank(allowed_rank: int) -> int:
+        """
+        Map a rank in the negative complement to the full pair-index space.
+        """
+        lower = allowed_rank
+        upper = allowed_rank + len(positive_indexes)
+        while lower < upper:
+            midpoint = (lower + upper) // 2
+            n_allowed_through_midpoint = (
+                midpoint + 1 - bisect_right(positive_indexes, midpoint)
+            )
+            if n_allowed_through_midpoint <= allowed_rank:
+                lower = midpoint + 1
+            else:
+                upper = midpoint
+
+        return lower
+
+    def pair_from_index(pair_index: int) -> tuple[str, str]:
+        """
+        Decode one lexicographic combination index into protein IDs.
+        """
+        protein_a_index = bisect_right(pair_offsets, pair_index) - 1
+        protein_b_index = (
+            protein_a_index
+            + 1
+            + pair_index
+            - pair_offsets[protein_a_index]
+        )
+
+        return protein_ids[protein_a_index], protein_ids[protein_b_index]
 
     rng = random.Random(seed)
-    sampled_keys = rng.sample(candidate_keys, target_n_negatives)
-    sampled_pairs = pd.DataFrame(
-        [
-            {
-                "protein_a": protein_a,
-                "protein_b": protein_b,
-                "label": 0,
-            }
-            for protein_a, protein_b in sampled_keys
-        ],
+    sampled_ranks = rng.sample(
+        range(n_available_negatives),
+        target_n_negatives,
     )
+    sampled_keys = [
+        pair_from_index(pair_index_from_allowed_rank(allowed_rank))
+        for allowed_rank in sampled_ranks
+    ]
+    sampled_pairs = pd.DataFrame(sampled_keys, columns=["protein_a", "protein_b"])
+    sampled_pairs["label"] = 0
     metadata = {
         "target_n_negatives": int(target_n_negatives),
         "n_sampled_negatives": int(len(sampled_pairs)),
+        "n_positive_pairs_for_sampling": int(len(positive_keys)),
+        "n_proteins_for_sampling": int(n_proteins),
+        "n_available_negative_pairs": int(n_available_negatives),
     }
 
     return sampled_pairs, metadata
@@ -682,6 +895,13 @@ def write_prepared_dataset(
     """
     Write canonical dataset outputs and return dataset metadata.
     """
+    processed = canonicalize_filter_and_assign(raw_pairs, sequences)
+    observed_labels = set(processed.pairs["label"])
+    if observed_labels != {0, 1}:
+        raise ValueError(
+            "Prepared dataset must contain both labels 0 and 1 after "
+            f"sequence filtering. Found: {sorted(observed_labels)}")
+
     dataset_dir = prepare_output_dir(
         out_dir=args.out_dir,
         dataset_name=args.dataset_name,
@@ -689,7 +909,6 @@ def write_prepared_dataset(
     )
     pairs_path, fasta_path, metadata_path, output_path_metadata = (
         final_output_metadata(dataset_dir))
-    processed = canonicalize_filter_and_assign(raw_pairs, sequences)
     proteins = (
         set(processed.pairs["protein_a"])
         | set(processed.pairs["protein_b"])

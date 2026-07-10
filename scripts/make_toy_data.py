@@ -9,7 +9,9 @@ manifests.
 """
 
 import argparse
+import heapq
 import logging
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,7 +123,7 @@ def positive_float(value: str) -> float:
     Parse a positive float argparse value.
     """
     parsed_value = float(value)
-    if parsed_value <= 0.0:
+    if not math.isfinite(parsed_value) or parsed_value <= 0.0:
         raise argparse.ArgumentTypeError("value must be greater than 0")
 
     return parsed_value
@@ -132,7 +134,10 @@ def probability(value: str) -> float:
     Parse a probability argparse value.
     """
     parsed_value = float(value)
-    if (parsed_value < 0.0) or (parsed_value > 1.0):
+    if (
+            not math.isfinite(parsed_value)
+            or parsed_value < 0.0
+            or parsed_value > 1.0):
         raise argparse.ArgumentTypeError("value must be between 0 and 1")
 
     return parsed_value
@@ -671,21 +676,19 @@ def weighted_sample_without_replacement(
     """
     Sample candidates without replacement using positive weights.
     """
-    candidate_pool = candidates.copy()
-    selected_candidates = []
-    for _ in range(min(n_candidates, len(candidate_pool))):
-        total_weight = sum(candidate.sample_weight
-                           for candidate in candidate_pool)
-        threshold = random.random() * total_weight
-        cumulative_weight = 0.0
-        selected_index = len(candidate_pool) - 1
-        for index, candidate in enumerate(candidate_pool):
-            cumulative_weight = cumulative_weight + candidate.sample_weight
-            if cumulative_weight >= threshold:
-                selected_index = index
-                break
+    n_candidates = min(n_candidates, len(candidates))
+    if n_candidates <= 0:
+        return []
+    if n_candidates == len(candidates):
+        return candidates.copy()
 
-        selected_candidates.append(candidate_pool.pop(selected_index))
+    selected_candidates = heapq.nsmallest(
+        n_candidates,
+        candidates,
+        key=lambda candidate: (
+            -math.log1p(-random.random()) / candidate.sample_weight
+        ),
+    )
 
     return selected_candidates
 

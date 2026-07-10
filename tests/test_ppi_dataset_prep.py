@@ -1,7 +1,9 @@
+import gzip
 import json
 import math
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +15,7 @@ from ppi_dataset_utils import (
     canonicalize_pairs,
     infer_separator,
     read_fasta,
+    read_table,
     sample_negative_pairs,
     validate_negative_ratio,
     write_fasta,
@@ -95,14 +98,46 @@ def test_duplicate_fasta_ids_fail(tmp_path):
         read_fasta(fasta_path)
 
 
+def test_gzip_uniprot_fasta_ids_are_normalized(tmp_path):
+    fasta_path = tmp_path / "proteins.fasta.gz"
+    with gzip.open(fasta_path, "wt", encoding="utf-8") as fout:
+        fout.write(
+            ">sp|P12345|PROT_A description\nAAAA\n"
+            ">tr|Q98765|PROT_B description\nCCCC\n"
+        )
+
+    sequences = read_fasta(
+        fasta_path,
+        id_format="uniprot_accession",
+    )
+
+    assert sequences == {"P12345": "AAAA", "Q98765": "CCCC"}
+
+
 def test_extension_separator_inference(tmp_path):
     assert infer_separator(tmp_path / "pairs.csv") == ","
     assert infer_separator(tmp_path / "pairs.tab") == "\t"
     assert infer_separator(tmp_path / "pairs.tsv") == "\t"
     assert infer_separator(tmp_path / "pairs.txt") == "\t"
+    assert infer_separator(tmp_path / "pairs.tsv.gz") == "\t"
 
     with pytest.raises(ValueError, match="Cannot infer separator"):
         infer_separator(tmp_path / "pairs.dat")
+
+
+def test_read_table_selects_member_from_multi_file_zip(tmp_path):
+    archive_path = tmp_path / "tables.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("first.tsv", "protein_a\tprotein_b\n001\t002\n")
+        archive.writestr("second.tsv", "protein_a\tprotein_b\nA\tB\n")
+
+    table = read_table(archive_path, archive_member="first.tsv")
+
+    assert table.to_dict(orient="records") == [
+        {"protein_a": "001", "protein_b": "002"},
+    ]
+    with pytest.raises(ValueError, match="contains 2 files"):
+        read_table(archive_path)
 
 
 @pytest.mark.parametrize("negative_ratio", [0.0, -1.0, math.inf, math.nan])
@@ -190,6 +225,47 @@ def test_sampled_negatives_do_not_overlap_positives():
     assert metadata["target_n_negatives"] == 2
     assert len(negative_keys) == 2
     assert positive_keys.isdisjoint(negative_keys)
+
+
+def test_negative_sampling_uses_only_proteins_with_sequences():
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+        ("MISSING_X", "MISSING_Y", 1),
+    ])
+
+    negatives, metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=1.0,
+        seed=3,
+        allowed_protein_ids={"A", "B", "C", "D"},
+    )
+
+    sampled_proteins = set(negatives["protein_a"]) | set(negatives["protein_b"])
+    assert sampled_proteins <= {"A", "B", "C", "D"}
+    assert metadata["n_positive_pairs_for_sampling"] == 2
+    assert metadata["target_n_negatives"] == 2
+
+
+def test_negative_sampling_scales_without_materializing_pair_universe():
+    n_proteins = 5000
+    positives = pair_frame([
+        ("P0000", f"P{index:04d}", 1)
+        for index in range(1, n_proteins)
+    ])
+
+    negatives, metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        negative_ratio=0.001,
+        seed=9,
+    )
+
+    assert len(negatives) == 5
+    assert metadata["n_proteins_for_sampling"] == n_proteins
+    assert not (
+        (negatives["protein_a"] == "P0000")
+        | (negatives["protein_b"] == "P0000")
+    ).any()
 
 
 def test_negative_sampling_fails_when_not_enough_candidates():
@@ -385,6 +461,31 @@ def test_generic_edges_output_dir_overwrite_rules(tmp_path):
     assert sentinel_path.exists()
 
 
+def test_generic_edges_rejects_single_class_output_without_creating_dir(
+        tmp_path):
+    fasta_path = tmp_path / "proteins.fasta"
+    positives_path = tmp_path / "positives.tsv"
+    negatives_path = tmp_path / "negatives.tsv"
+    out_dir = tmp_path / "processed"
+    write_test_fasta(fasta_path, ["A", "B"])
+    write_text(positives_path, "protein_a\tprotein_b\nA\tB\n")
+    write_text(negatives_path, "protein_a\tprotein_b\nX\tY\n")
+
+    completed_process = run_prep_cli(
+        "generic_edges",
+        "--dataset-name", "invalid_single_class",
+        "--positive-pairs", positives_path,
+        "--negative-pairs", negatives_path,
+        "--fasta", fasta_path,
+        "--out-dir", out_dir,
+        check=False,
+    )
+
+    assert completed_process.returncode != 0
+    assert "must contain both labels" in completed_process.stderr
+    assert not (out_dir / "invalid_single_class").exists()
+
+
 def test_biogrid_cli_filters_model_organism_and_writes_metadata(tmp_path):
     fasta_path = tmp_path / "model_organism.fasta"
     interactions_path = tmp_path / "biogrid.tsv"
@@ -449,6 +550,57 @@ def test_biogrid_cli_filters_model_organism_and_writes_metadata(tmp_path):
         == 3
     )
     assert metadata["id_mapping_used"] is False
+
+
+def test_biogrid_cli_reads_zip_member_and_compressed_uniprot_fasta(tmp_path):
+    fasta_path = tmp_path / "model_organism.fasta.gz"
+    interactions_path = tmp_path / "biogrid.tab3.zip"
+    archive_member = "BIOGRID-ORGANISM-Yeast.tab3.txt"
+    out_dir = tmp_path / "processed"
+    with gzip.open(fasta_path, "wt", encoding="utf-8") as fout:
+        for protein_id in ("UPA", "UPB", "UPC", "UPD"):
+            fout.write(f">sp|{protein_id}|{protein_id}_YEAST\nACDEFGHIK\n")
+    with zipfile.ZipFile(interactions_path, "w") as archive:
+        archive.writestr("README.txt", "archive notes\n")
+        archive.writestr(
+            archive_member,
+            "Interactor A\tInteractor B\n"
+            "UPA\tUPB\n"
+            "UPC\tUPD\n"
+            "UPA|ALT\tUPD\n",
+        )
+
+    run_prep_cli(
+        "biogrid",
+        "--dataset-name", "biogrid_archive",
+        "--interactions", interactions_path,
+        "--archive-member", archive_member,
+        "--table-chunksize", "2",
+        "--fasta", fasta_path,
+        "--fasta-id-format", "uniprot_accession",
+        "--out-dir", out_dir,
+        "--protein-a-col", "Interactor A",
+        "--protein-b-col", "Interactor B",
+        "--ambiguous-id-policy", "drop",
+        "--sample-negatives",
+        "--seed", "5",
+    )
+
+    dataset_dir = out_dir / "biogrid_archive"
+    pairs = pd.read_csv(dataset_dir / "pairs.csv")
+    metadata = json.loads(
+        (dataset_dir / "dataset_metadata.json").read_text(encoding="utf-8"))
+
+    assert set(pairs["label"]) == {0, 1}
+    assert set(pairs["protein_a"]) | set(pairs["protein_b"]) == {
+        "UPA", "UPB", "UPC", "UPD",
+    }
+    assert metadata["n_pairs_dropped_ambiguous_interactor"] == 1
+    assert metadata["loader_specific_options"]["archive_member"] == archive_member
+    assert (
+        metadata["loader_specific_options"]["fasta_id_format"]
+        == "uniprot_accession"
+    )
 
 
 def test_biogrid_id_map_maps_before_deduplication(tmp_path):
