@@ -93,6 +93,14 @@ The selected source rows and deterministic ranks are written to
 `sampling/selected_examples.csv`; audit details are stored under `sampling` in
 `splits/split_metadata.json`.
 
+## Performance reporting
+
+Every `ppi-train` invocation appends one record to `performance.jsonl`. Each
+record contains stage durations, process peak resident memory, feature-matrix
+shape/density/storage statistics, and per-model fit/evaluation timings and
+solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
+`evaluation_seconds`, and `solver_iterations` columns.
+
 ## Leakage-aware splits
 
 Use `--split-strategy c1`, `c2`, or `c3` to select a standard PPI

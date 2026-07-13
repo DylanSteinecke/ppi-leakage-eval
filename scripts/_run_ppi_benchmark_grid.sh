@@ -99,6 +99,7 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     echo "Metrics: $RUN_DIR/train_metrics.csv"
     echo "Summaries: $RUN_DIR/*_metrics_summary.csv"
     echo "Plots: $RUN_DIR/plots/"
+    echo "Performance: $RUN_DIR/performance.jsonl"
     echo "Predictions, when test is evaluated: $RUN_DIR/predictions.csv"
 done
 

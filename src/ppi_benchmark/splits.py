@@ -367,6 +367,9 @@ def compute_split_metadata(
         "split_metadata_path": path_string(output_paths.split_metadata_path),
         "invocations_path": path_string(output_paths.invocations_path),
     }
+    performance_path = getattr(output_paths, "performance_path", None)
+    if performance_path is not None:
+        metadata["performance_path"] = path_string(performance_path)
     if output_paths.val_metrics_path is not None:
         metadata["val_metrics_path"] = path_string(
             output_paths.val_metrics_path)

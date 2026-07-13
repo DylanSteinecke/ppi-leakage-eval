@@ -14,6 +14,7 @@ import math
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -53,6 +54,13 @@ from ..plots import (
     plot_train_test_f1_heatmap,
     plot_train_test_metrics_summary,
     plot_train_test_metrics_summary_png,
+)
+from ..performance import (
+    PERFORMANCE_FILENAME,
+    PerformanceTracker,
+    append_performance_report,
+    peak_memory_bytes,
+    solver_iteration_report,
 )
 from ..results import (
     append_dataframe,
@@ -431,6 +439,7 @@ class OutputPaths:
     dropped_pairs_path: Path
     split_metadata_path: Path
     invocations_path: Path
+    performance_path: Path
     train_summary_path: Path
     val_summary_path: Path | None
     test_summary_path: Path | None
@@ -529,7 +538,7 @@ def train_and_evaluate_model_run(
         run_number: int,
         execution_id: str, args: argparse.Namespace
     ) -> tuple[pd.DataFrame, pd.DataFrame | None,
-               pd.DataFrame | None, pd.DataFrame | None]:
+               pd.DataFrame | None, pd.DataFrame | None, dict[str, Any]]:
     """
     Train and evaluate one model configuration for one run number.
     """
@@ -551,7 +560,13 @@ def train_and_evaluate_model_run(
         random_state=run_seed,
     )
     # Fit the model to the training data
+    model_run_started_at = perf_counter()
+    fit_started_at = perf_counter()
     model.fit(x_train, y_train)
+    fit_seconds = perf_counter() - fit_started_at
+    iteration_report = solver_iteration_report(model)
+    solver_iterations = (
+        np.nan if iteration_report is None else iteration_report["maximum"])
 
     # Define the evaluate metrics tables
     n_val = 0 if val_df is None else len(val_df)
@@ -580,7 +595,11 @@ def train_and_evaluate_model_run(
         "actual_test_size": actual_test_size,
         "n_discarded_edges": args.n_discarded_edges,
         "discarded_edge_fraction": args.discarded_edge_fraction,
+        "fit_seconds": fit_seconds,
+        "solver_iterations": solver_iterations,
     }
+
+    evaluation_seconds: dict[str, float] = {}
 
     def evaluate_split(
             split_df: pd.DataFrame, x_split: Any, split_name: str,
@@ -588,6 +607,7 @@ def train_and_evaluate_model_run(
         """
         Evaluate one split and return metrics plus raw predictions.
         """
+        evaluation_started_at = perf_counter()
         y_true = split_df["label"].to_numpy()
         y_score, y_pred = get_scores_and_predictions(model, x_split)
         metrics = get_metrics(
@@ -600,6 +620,9 @@ def train_and_evaluate_model_run(
             metrics=metrics,
             split_name=split_name,
         )
+        elapsed = perf_counter() - evaluation_started_at
+        evaluation_seconds[split_name] = elapsed
+        metrics_df["evaluation_seconds"] = elapsed
 
         return metrics_df, y_score, y_pred
 
@@ -636,7 +659,25 @@ def train_and_evaluate_model_run(
         predictions_df["pred_score"] = y_test_score
         predictions_df["pred_label"] = y_test_pred
 
-    return train_metrics_df, val_metrics_df, test_metrics_df, predictions_df
+    model_performance = {
+        "model_name": model_name,
+        "feature_name": feature_name,
+        "classifier": classifier_name,
+        "run_number": run_number,
+        "model_seed": None if is_baseline else run_seed,
+        "fit_seconds": float(fit_seconds),
+        "evaluation_seconds": evaluation_seconds,
+        "total_seconds": float(perf_counter() - model_run_started_at),
+        "solver_iterations": iteration_report,
+        "peak_memory_bytes_after_run": peak_memory_bytes(),
+    }
+    return (
+        train_metrics_df,
+        val_metrics_df,
+        test_metrics_df,
+        predictions_df,
+        model_performance,
+    )
 
 
 def run_model_reruns(
@@ -645,11 +686,12 @@ def run_model_reruns(
         x_test: Any | None, feature_name: str, classifier_name: str,
         execution_id: str, args: argparse.Namespace,
         output_paths: OutputPaths,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
     """
     Run one model configuration repeatedly and append each result.
     """
     model_name = make_model_name(feature_name, classifier_name)
+    model_performance_records = []
 
     # Re-run the model
     for run_number in range(1, args.num_reruns + 1):
@@ -658,6 +700,7 @@ def run_model_reruns(
             val_metrics_df,
             test_metrics_df,
             predictions_df,
+            model_performance,
         ) = (
             train_and_evaluate_model_run(
                 train_df=train_df,
@@ -673,6 +716,7 @@ def run_model_reruns(
                 args=args,
             )
         )
+        model_performance_records.append(model_performance)
         # Save performance and prediction results
         output_dfs = (
             (train_metrics_df, output_paths.train_metrics_path),
@@ -687,6 +731,8 @@ def run_model_reruns(
             f"Finished model={model_name} "
             f"run={run_number}/{args.num_reruns}"
         )
+
+    return model_performance_records
 
 
 def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
@@ -710,6 +756,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
     selected_examples_path = sampling_dir / SELECTED_EXAMPLES_FILENAME
     invocations_path = run_dir / INVOCATIONS_FILENAME
+    performance_path = run_dir / PERFORMANCE_FILENAME
     train_summary_path = run_dir / TRAIN_SUMMARY_FILENAME
     all_val_summary_path = run_dir / VAL_SUMMARY_FILENAME
     all_test_summary_path = run_dir / TEST_SUMMARY_FILENAME
@@ -769,6 +816,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         dropped_pairs_path=dropped_pairs_path,
         split_metadata_path=split_metadata_path,
         invocations_path=invocations_path,
+        performance_path=performance_path,
         train_summary_path=train_summary_path,
         val_summary_path=val_summary_path,
         test_summary_path=test_summary_path,
@@ -842,7 +890,7 @@ def initialize_output_files(
             + summary_paths
             + plot_paths
             + legacy_heatmap_paths
-            + [output_paths.invocations_path],
+            + [output_paths.invocations_path, output_paths.performance_path],
             append_results=False,
         )
         return
@@ -1031,41 +1079,49 @@ def main() -> None:
     """
     Run the full CLI pipeline.
     """
-    args = argument_parser()
-    configure_logging(args)
+    performance = PerformanceTracker()
+    with performance.stage("argument_parsing"):
+        args = argument_parser()
+        configure_logging(args)
 
     # Load and process input data
-    protein_pairs = pd.read_csv(
-        args.pairs,
-        dtype={"protein_a": "string", "protein_b": "string"},
-    )
-    protein_pairs = add_source_row_index(protein_pairs)
-    n_input_pairs_before_filtering = len(protein_pairs)
-    protein_metadata_path = discover_protein_metadata_path(
-        pairs_path=args.pairs,
-        explicit_path=args.protein_metadata,
-    )
-    args.protein_metadata = (
-        None if protein_metadata_path is None else str(protein_metadata_path)
-    )
-    fasta_data = read_fasta_with_taxa(
-        fasta_path=args.fasta,
-        id_format=args.fasta_id_format,
-        protein_metadata_path=protein_metadata_path,
-        taxon_id=args.taxon_id,
-    )
-    sequences = fasta_data.sequences
-    eligible_protein_pairs, dropped_pairs = prepare_input_data(
-        protein_pairs,
-        sequences,
-    )
+    with performance.stage("load_pairs"):
+        protein_pairs = pd.read_csv(
+            args.pairs,
+            dtype={"protein_a": "string", "protein_b": "string"},
+        )
+        protein_pairs = add_source_row_index(protein_pairs)
+        n_input_pairs_before_filtering = len(protein_pairs)
+        protein_metadata_path = discover_protein_metadata_path(
+            pairs_path=args.pairs,
+            explicit_path=args.protein_metadata,
+        )
+        args.protein_metadata = (
+            None
+            if protein_metadata_path is None
+            else str(protein_metadata_path)
+        )
+    with performance.stage("load_sequences"):
+        fasta_data = read_fasta_with_taxa(
+            fasta_path=args.fasta,
+            id_format=args.fasta_id_format,
+            protein_metadata_path=protein_metadata_path,
+            taxon_id=args.taxon_id,
+        )
+        sequences = fasta_data.sequences
+    with performance.stage("validate_inputs"):
+        eligible_protein_pairs, dropped_pairs = prepare_input_data(
+            protein_pairs,
+            sequences,
+        )
 
     # Select the complete benchmark cohort before constructing any split.
-    (
-        protein_pairs,
-        selection_manifest,
-        sampling_metadata,
-    ) = sample_ppi_cohort(eligible_protein_pairs, args)
+    with performance.stage("sample_cohort"):
+        (
+            protein_pairs,
+            selection_manifest,
+            sampling_metadata,
+        ) = sample_ppi_cohort(eligible_protein_pairs, args)
     LOGGER.info(
         "Cohort sampling: eligible pairs=%s; selected pairs=%s; "
         "excluded pairs=%s; applied=%s",
@@ -1076,63 +1132,65 @@ def main() -> None:
     )
 
     # Split into train/validation/test sets
-    train_df, val_df, test_df = load_or_make_split(protein_pairs, args)
-    args.has_validation_split = val_df is not None and not val_df.empty
-    args.evaluate_test_metrics = (
-        args.eval_test_set or not args.has_validation_split)
-    validate_splits(train_df=train_df, val_df=val_df, test_df=test_df)
+    with performance.stage("split_cohort"):
+        train_df, val_df, test_df = load_or_make_split(protein_pairs, args)
+        args.has_validation_split = val_df is not None and not val_df.empty
+        args.evaluate_test_metrics = (
+            args.eval_test_set or not args.has_validation_split)
+        validate_splits(train_df=train_df, val_df=val_df, test_df=test_df)
 
     # Prepare to run the models
-    execution_id = args.execution_id or uuid.uuid4().hex
-    output_paths = prepare_outputs(args)
-    sampling_metadata["selected_examples_path"] = (
-        str(output_paths.selected_examples_path)
-        if selection_manifest is not None else None
-    )
-    split_assignments = make_split_assignments(
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
-    )
-    split_metadata = compute_split_metadata(
-        args=args,
-        output_paths=output_paths,
-        protein_pairs=protein_pairs,
-        dropped_pairs=dropped_pairs,
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
-        execution_id=execution_id,
-        n_input_pairs_before_filtering=n_input_pairs_before_filtering,
-        eligible_protein_pairs=eligible_protein_pairs,
-        sampling_metadata=sampling_metadata,
-        protein_taxa=fasta_data.taxon_ids,
-        protein_metadata_path=protein_metadata_path,
-    )
-    try:
-        write_selection_manifest(
-            selection_manifest=selection_manifest,
-            output_path=output_paths.selected_examples_path,
-            append_results=args.append_results,
+    with performance.stage("prepare_artifacts"):
+        execution_id = args.execution_id or uuid.uuid4().hex
+        output_paths = prepare_outputs(args)
+        sampling_metadata["selected_examples_path"] = (
+            str(output_paths.selected_examples_path)
+            if selection_manifest is not None else None
         )
-        write_split_artifacts(
-            split_assignments=split_assignments,
-            dropped_pairs=dropped_pairs,
-            split_metadata=split_metadata,
+        split_assignments = make_split_assignments(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+        )
+        split_metadata = compute_split_metadata(
+            args=args,
             output_paths=output_paths,
-            append_results=args.append_results,
+            protein_pairs=protein_pairs,
+            dropped_pairs=dropped_pairs,
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            execution_id=execution_id,
+            n_input_pairs_before_filtering=n_input_pairs_before_filtering,
+            eligible_protein_pairs=eligible_protein_pairs,
+            sampling_metadata=sampling_metadata,
+            protein_taxa=fasta_data.taxon_ids,
+            protein_metadata_path=protein_metadata_path,
         )
-        initialize_output_files(args, output_paths)
-        append_invocation_log(
-            invocation_log_entry(
-                args=args,
+        try:
+            write_selection_manifest(
+                selection_manifest=selection_manifest,
+                output_path=output_paths.selected_examples_path,
+                append_results=args.append_results,
+            )
+            write_split_artifacts(
+                split_assignments=split_assignments,
+                dropped_pairs=dropped_pairs,
+                split_metadata=split_metadata,
                 output_paths=output_paths,
-                execution_id=execution_id,
-            ),
-            output_paths.invocations_path,
-        )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from None
+                append_results=args.append_results,
+            )
+            initialize_output_files(args, output_paths)
+            append_invocation_log(
+                invocation_log_entry(
+                    args=args,
+                    output_paths=output_paths,
+                    execution_id=execution_id,
+                ),
+                output_paths.invocations_path,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
 
     # Define the model configurations to run
     baseline_classifiers = [
@@ -1147,53 +1205,76 @@ def main() -> None:
     ]
 
     # Run the baseline models
-    for classifier_name in baseline_classifiers:
-        run_model_reruns(
-            train_df=train_df,
-            val_df=val_df,
-            test_df=test_df,
-            x_train=train_df,
-            x_val=val_df,
-            x_test=test_df if args.evaluate_test_metrics else None,
-            feature_name=FEATURELESS_FEATURE,
-            classifier_name=classifier_name,
-            execution_id=execution_id,
-            args=args,
-            output_paths=output_paths,
-        )
+    with performance.stage("baseline_models"):
+        for classifier_name in baseline_classifiers:
+            performance.add_model_runs(
+                run_model_reruns(
+                    train_df=train_df,
+                    val_df=val_df,
+                    test_df=test_df,
+                    x_train=train_df,
+                    x_val=val_df,
+                    x_test=(
+                        test_df if args.evaluate_test_metrics else None),
+                    feature_name=FEATURELESS_FEATURE,
+                    classifier_name=classifier_name,
+                    execution_id=execution_id,
+                    args=args,
+                    output_paths=output_paths,
+                )
+            )
 
     # Extract the combined feature set
     if learned_classifiers:
         feature_name = make_feature_name(args.features)
-        x_train, x_val, x_test = build_feature_matrices(
-            train_df=train_df,
-            val_df=val_df,
-            test_df=test_df if args.evaluate_test_metrics else None,
-            sequences=sequences,
-            feature_types=args.features,
-            args=args,
-        )
+        with performance.stage("feature_extraction"):
+            x_train, x_val, x_test = build_feature_matrices(
+                train_df=train_df,
+                val_df=val_df,
+                test_df=test_df if args.evaluate_test_metrics else None,
+                sequences=sequences,
+                feature_types=args.features,
+                args=args,
+            )
+            performance.add_matrices({
+                "train": x_train,
+                "val": x_val,
+                "test": x_test,
+            })
 
     # Run the learned classifiers
-    for classifier_name in learned_classifiers:
-        run_model_reruns(
-            train_df=train_df,
-            val_df=val_df,
-            test_df=test_df,
-            x_train=x_train,
-            x_val=x_val,
-            x_test=x_test,
-            feature_name=feature_name,
-            classifier_name=classifier_name,
-            execution_id=execution_id,
-            args=args,
-            output_paths=output_paths,
-        )
+    with performance.stage("learned_models"):
+        for classifier_name in learned_classifiers:
+            performance.add_model_runs(
+                run_model_reruns(
+                    train_df=train_df,
+                    val_df=val_df,
+                    test_df=test_df,
+                    x_train=x_train,
+                    x_val=x_val,
+                    x_test=x_test,
+                    feature_name=feature_name,
+                    classifier_name=classifier_name,
+                    execution_id=execution_id,
+                    args=args,
+                    output_paths=output_paths,
+                )
+            )
 
     # Summarize and plot model performance
-    summaries = summarize_model_outputs(output_paths)
-    heatmap_paths = plot_model_outputs(output_paths)
+    with performance.stage("summarize_results"):
+        summaries = summarize_model_outputs(output_paths)
+    with performance.stage("plot_results"):
+        heatmap_paths = plot_model_outputs(output_paths)
     log_model_outputs(summaries, output_paths, heatmap_paths)
+    append_performance_report(
+        performance.report(execution_id),
+        output_paths.performance_path,
+    )
+    LOGGER.info(
+        "Saved performance report to: %s",
+        output_paths.performance_path,
+    )
 
 
 if __name__ == "__main__":

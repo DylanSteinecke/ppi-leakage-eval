@@ -121,6 +121,7 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
         run_dir / "splits" / "dropped_pairs.csv",
         run_dir / "splits" / "split_metadata.json",
         run_dir / "invocations.jsonl",
+        run_dir / "performance.jsonl",
     )
     assert_not_written(
         run_dir / "val_metrics.csv",
@@ -132,6 +133,54 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
 
     predictions = pd.read_csv(run_dir / "predictions.csv", nrows=0)
     assert "source_row_index" in predictions.columns[:6]
+    performance = json.loads(
+        (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    assert performance["total_seconds"] > 0.0
+    assert performance["peak_memory_bytes"] > 0
+    assert performance["matrices"] == {}
+    assert performance["model_runs"][0]["solver_iterations"] is None
+    assert {
+        "load_pairs",
+        "load_sequences",
+        "validate_inputs",
+        "sample_cohort",
+        "split_cohort",
+        "prepare_artifacts",
+        "baseline_models",
+        "summarize_results",
+        "plot_results",
+    } <= set(performance["stages_seconds"])
+
+
+def test_learned_model_reports_matrix_and_solver_performance(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "learned_performance"
+
+    run_cli(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--classifier", "sgd_logistic",
+        "--features", "count",
+        "--no-metrics-plots",
+    )
+
+    performance = json.loads(
+        (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    train_matrix = performance["matrices"]["train"]
+    model_run = performance["model_runs"][0]
+    train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
+
+    assert performance["stages_seconds"]["feature_extraction"] > 0.0
+    assert train_matrix["shape"][0] == 12
+    assert train_matrix["n_columns"] > 0
+    assert 0.0 < train_matrix["density"] <= 1.0
+    assert train_matrix["storage_bytes"] > 0
+    assert model_run["fit_seconds"] > 0.0
+    assert model_run["solver_iterations"]["maximum"] >= 1
+    assert model_run["evaluation_seconds"]["train"] > 0.0
+    assert train_metrics.loc[0, "fit_seconds"] > 0.0
+    assert train_metrics.loc[0, "solver_iterations"] >= 1
+    assert train_metrics.loc[0, "evaluation_seconds"] > 0.0
 
 
 def test_cli_samples_the_whole_cohort_before_splitting(
