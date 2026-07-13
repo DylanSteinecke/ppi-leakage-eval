@@ -242,10 +242,11 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
         encoding="utf-8"
     )
     assert 'VAL_SIZE="${VAL_SIZE:-0.0}"' in grid_text
-    assert 'MAX_PAIRS="${MAX_PAIRS:-}"' in grid_text
+    assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in grid_text
     assert '--max-pairs "$MAX_PAIRS"' in grid_text
-    assert 'MAX_PAIRS="${MAX_PAIRS:-10000}"' in yeast_text
-    assert 'N_SPLIT_TRIALS="${N_SPLIT_TRIALS:-25}"' in yeast_text
+    assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-laptop}"' in yeast_text
+    assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in toy_text
+    assert 'Unknown BENCHMARK_PROFILE' in grid_text
     assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
     assert '--val-size "$VAL_SIZE"' in grid_text
     assert "ppi-train" in grid_text
@@ -253,3 +254,72 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert "ppi-prepare biogrid" in yeast_text
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
+
+
+def test_benchmark_profiles_expand_to_expected_command_grids(tmp_path):
+    grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
+
+    def profile_commands(profile):
+        calls_path = tmp_path / f"{profile}_calls.txt"
+        out_dir = tmp_path / f"{profile}_results"
+        shell_script = r'''
+set -euo pipefail
+CALLS_PATH="$1"
+GRID_PATH="$2"
+OUT_DIR="$3"
+BENCHMARK_PROFILE="$4"
+ppi-train() {
+    printf '%s\n' "$*" >> "$CALLS_PATH"
+}
+ppi-aggregate() {
+    :
+}
+PAIRS="pairs.csv"
+FASTA="proteins.fasta"
+NUM_RERUNS=1
+MAX_ITER=100
+K=2
+RUN_STAMP="profile-test"
+AGGREGATE_RESULTS=0
+source "$GRID_PATH" --no-metrics-plots
+'''
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                shell_script,
+                "profile-test",
+                str(calls_path),
+                str(grid_path),
+                str(out_dir),
+                profile,
+            ],
+            check=True,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        return calls_path.read_text(encoding="utf-8").splitlines()
+
+    laptop_calls = profile_commands("laptop")
+    exhaustive_calls = profile_commands("exhaustive")
+
+    assert len(laptop_calls) == 12
+    assert len(exhaustive_calls) == 24
+    assert all("--n-split-trials 25" in call for call in laptop_calls)
+    assert all("--max-pairs 10000" in call for call in laptop_calls)
+    laptop_learned_calls = [
+        call for call in laptop_calls if "--features" in call
+    ]
+    assert all("--classifier sgd_logistic" in call
+               for call in laptop_learned_calls)
+    assert {call.split("--features ", 1)[1].split(" --classifier", 1)[0]
+            for call in laptop_learned_calls} == {"tfidf", "count"}
+
+    assert all("--n-split-trials 100" in call for call in exhaustive_calls)
+    assert all("--max-pairs" not in call for call in exhaustive_calls)
+    assert sum(
+        "--features tfidf bm25 count binary "
+        "--classifier logistic linear_svm sgd_logistic" in call
+        for call in exhaustive_calls
+    ) == 4

@@ -36,26 +36,45 @@ conda activate ppi
 bash scripts/run_toy_ppi_example.sh --no-metrics-plots
 ```
 
-Set `GENERATE_TOY_DATA=0` to reuse the existing files under `processed/`.
+The toy runner defaults to the `exhaustive` profile. Set
+`BENCHMARK_PROFILE=laptop` for the smaller grid, or `GENERATE_TOY_DATA=0` to
+reuse the existing files under `processed/`.
 
 ## Run the yeast BioGRID example
 
 The local UniProt FASTA uses headers such as `sp|P04387|GAL80_YEAST`, while
 BioGRID stores the matching accession as `P04387`. The example runner prepares
 the current local files, samples negatives within the yeast taxon, and runs a
-laptop-sized sparse benchmark. By default, it selects a deterministic,
-label-stratified cohort of at most 10,000 pairs before creating each split:
+laptop-sized sparse benchmark. By default, the `laptop` profile selects a
+deterministic, label-stratified cohort of at most 10,000 pairs before creating
+each split:
 
 ```bash
 conda activate ppi
-MAX_PAIRS=10000 bash scripts/run_yeast_biogrid_ppi_example.sh \
+BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh \
     --no-metrics-plots
 ```
 
-Set `MAX_PAIRS` to a different compute budget, or to an empty string to use the
-entire eligible cohort. `SAMPLING_SEED` controls cohort selection independently
-of the train/test split seed. To reuse already prepared yeast files, add
-`PREPARE_YEAST_DATA=0` before the command.
+The runner profiles are:
+
+- `laptop`: TF-IDF and count features with SGD logistic regression, at most
+  10,000 pairs, and 25 C-split trials.
+- `exhaustive`: TF-IDF, BM25, count, binary, and their combined feature set with
+  logistic regression, linear SVM, and SGD logistic regression; the full
+  cohort and 100 C-split trials are used by default.
+
+Both profiles include the constant baselines and random/C1/C2/C3 splits. Set
+`MAX_PAIRS` or `N_SPLIT_TRIALS` explicitly to override a profile default. An
+explicitly empty `MAX_PAIRS` uses the entire eligible cohort. `SAMPLING_SEED`
+controls cohort selection independently of the train/test split seed. To reuse
+already prepared yeast files, add `PREPARE_YEAST_DATA=0` before the command.
+
+For example, run the exhaustive model grid on a bounded cohort with:
+
+```bash
+BENCHMARK_PROFILE=exhaustive MAX_PAIRS=50000 PREPARE_YEAST_DATA=0 \
+    bash scripts/run_yeast_biogrid_ppi_example.sh --no-metrics-plots
+```
 
 Prepared data are written under `processed/biogrid_yeast_physical/` as
 `pairs.csv`, `proteins.fasta`, `protein_metadata.csv`, and

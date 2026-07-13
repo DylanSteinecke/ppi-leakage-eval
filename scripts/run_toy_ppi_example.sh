@@ -15,6 +15,7 @@ OUT_DIR="${OUT_DIR:-results/toy_all_models}"
 NUM_RERUNS="${NUM_RERUNS:-5}"
 MAX_ITER="${MAX_ITER:-10000}"
 K="${K:-3}"
+BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"
 GENERATE_TOY_DATA="${GENERATE_TOY_DATA:-1}"
 
 if [[ "$GENERATE_TOY_DATA" == "1" ]]; then

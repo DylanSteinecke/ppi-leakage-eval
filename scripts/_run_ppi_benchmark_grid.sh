@@ -2,7 +2,8 @@
 
 # Shared benchmark grid for the example runners. This file is sourced, not run
 # directly. The caller must set PAIRS, FASTA, OUT_DIR, and the default values
-# for NUM_RERUNS, MAX_ITER, and K before sourcing it.
+# for NUM_RERUNS, MAX_ITER, and K before sourcing it. BENCHMARK_PROFILE selects
+# a laptop or exhaustive feature/model grid.
 
 PAIRS="${PAIRS:?Set PAIRS before sourcing _run_ppi_benchmark_grid.sh}"
 FASTA="${FASTA:?Set FASTA before sourcing _run_ppi_benchmark_grid.sh}"
@@ -11,12 +12,11 @@ PROTEIN_METADATA="${PROTEIN_METADATA:-}"
 NUM_RERUNS="${NUM_RERUNS:?Set NUM_RERUNS before sourcing _run_ppi_benchmark_grid.sh}"
 MAX_ITER="${MAX_ITER:?Set MAX_ITER before sourcing _run_ppi_benchmark_grid.sh}"
 K="${K:?Set K before sourcing _run_ppi_benchmark_grid.sh}"
-MAX_PAIRS="${MAX_PAIRS:-}"
+BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"
 SAMPLING_SEED="${SAMPLING_SEED:-0}"
-N_SPLIT_TRIALS="${N_SPLIT_TRIALS:-100}"
 TRAIN_SIZE="${TRAIN_SIZE:-0.80}"
 VAL_SIZE="${VAL_SIZE:-0.0}"
-EXECUTION_ID="${EXECUTION_ID:-all_models_$(date -u +%Y-%m-%d_%H-%M-%S)}"
+EXECUTION_ID="${EXECUTION_ID:-${BENCHMARK_PROFILE}_models_$(date -u +%Y-%m-%d_%H-%M-%S)}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
 USER_ARGS=("$@")
@@ -30,18 +30,48 @@ SPLIT_STRATEGIES=(
     c2
     c3
 )
-FEATURE_SETS=(
-    tfidf
-    bm25
-    count
-    binary
-    "tfidf bm25 count binary"
-)
-LEARNED_CLASSIFIERS=(
-    logistic
-    linear_svm
-    sgd_logistic
-)
+
+case "$BENCHMARK_PROFILE" in
+    laptop)
+        if [[ -z "${MAX_PAIRS+x}" ]]; then
+            MAX_PAIRS=10000
+        fi
+        if [[ -z "${N_SPLIT_TRIALS+x}" ]]; then
+            N_SPLIT_TRIALS=25
+        fi
+        FEATURE_SETS=(
+            tfidf
+            count
+        )
+        LEARNED_CLASSIFIERS=(
+            sgd_logistic
+        )
+        ;;
+    exhaustive)
+        if [[ -z "${MAX_PAIRS+x}" ]]; then
+            MAX_PAIRS=""
+        fi
+        if [[ -z "${N_SPLIT_TRIALS+x}" ]]; then
+            N_SPLIT_TRIALS=100
+        fi
+        FEATURE_SETS=(
+            tfidf
+            bm25
+            count
+            binary
+            "tfidf bm25 count binary"
+        )
+        LEARNED_CLASSIFIERS=(
+            logistic
+            linear_svm
+            sgd_logistic
+        )
+        ;;
+    *)
+        echo "Unknown BENCHMARK_PROFILE '$BENCHMARK_PROFILE'; expected laptop or exhaustive." >&2
+        return 2
+        ;;
+esac
 
 PROTEIN_METADATA_ARGS=()
 if [[ -n "$PROTEIN_METADATA" ]]; then
@@ -57,6 +87,9 @@ if [[ -n "$MAX_PAIRS" ]]; then
 fi
 
 mkdir -p "$OUT_DIR"
+echo "Benchmark profile: $BENCHMARK_PROFILE"
+echo "Feature sets: ${FEATURE_SETS[*]}"
+echo "Learned classifiers: ${LEARNED_CLASSIFIERS[*]}"
 
 for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     STRATEGY_EXECUTION_ID="${EXECUTION_ID}__${split_strategy}"
