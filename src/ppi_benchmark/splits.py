@@ -32,11 +32,13 @@ SPLITS_DIRNAME = "splits"
 SPLIT_ASSIGNMENTS_FILENAME = "split_assignments.csv"
 DROPPED_PAIRS_FILENAME = "dropped_pairs.csv"
 SPLIT_METADATA_FILENAME = "split_metadata.json"
+SEQUENCE_CLUSTER_ASSIGNMENTS_FILENAME = "sequence_cluster_assignments.csv"
 INVOCATIONS_FILENAME = "invocations.jsonl"
 INPUT_HASH_FIELDS = (
     "pairs_file_sha256",
     "fasta_file_sha256",
     "protein_metadata_file_sha256",
+    "sequence_clusters_file_sha256",
 )
 
 
@@ -324,7 +326,8 @@ def compute_split_metadata(
         "split_strategy": args.effective_split_strategy,
         "split_name": args.split_name,
         "split_col": args.split_col,
-        "split_seed": args.seed,
+        "split_seed": getattr(args, "split_seed", args.seed),
+        "model_seed": getattr(args, "model_seed", args.seed),
         "target_train_size": args.train_size,
         "target_val_size": args.val_size,
         "target_test_size": target_test_size,
@@ -360,6 +363,11 @@ def compute_split_metadata(
             protein_taxa=protein_taxa,
         ),
         "diagnostics": diagnostics,
+        "sequence_clusters": getattr(
+            args,
+            "sequence_cluster_metadata",
+            None,
+        ),
         "train_metrics_path": path_string(output_paths.train_metrics_path),
         "split_assignments_path": path_string(
             output_paths.split_assignments_path),
@@ -370,6 +378,17 @@ def compute_split_metadata(
     performance_path = getattr(output_paths, "performance_path", None)
     if performance_path is not None:
         metadata["performance_path"] = path_string(performance_path)
+    training_history_path = getattr(
+        output_paths,
+        "training_history_path",
+        None,
+    )
+    if training_history_path is not None:
+        metadata["training_history_path"] = path_string(
+            training_history_path)
+    checkpoints_dir = getattr(output_paths, "checkpoints_dir", None)
+    if checkpoints_dir is not None:
+        metadata["checkpoints_dir"] = path_string(checkpoints_dir)
     if output_paths.val_metrics_path is not None:
         metadata["val_metrics_path"] = path_string(
             output_paths.val_metrics_path)
@@ -389,6 +408,29 @@ def compute_split_metadata(
             "protein_metadata_file_sha256": file_sha256(
                 protein_metadata_path),
         })
+    sequence_cluster_metadata = getattr(
+        args,
+        "sequence_cluster_metadata",
+        None,
+    )
+    if sequence_cluster_metadata is not None:
+        metadata.update({
+            "sequence_clusters_path": sequence_cluster_metadata["path"],
+            "sequence_clusters_file_size_bytes": (
+                sequence_cluster_metadata["file_size_bytes"]
+            ),
+            "sequence_clusters_file_sha256": (
+                sequence_cluster_metadata["file_sha256"]
+            ),
+        })
+        sequence_cluster_assignments_path = getattr(
+            output_paths,
+            "sequence_cluster_assignments_path",
+            None,
+        )
+        if sequence_cluster_assignments_path is not None:
+            metadata["sequence_cluster_assignments_path"] = path_string(
+                sequence_cluster_assignments_path)
     return metadata
 
 
@@ -455,6 +497,7 @@ def write_split_artifacts(
         split_assignments: pd.DataFrame, dropped_pairs: pd.DataFrame,
         split_metadata: dict[str, Any], output_paths: Any,
         append_results: bool,
+        sequence_cluster_assignments: pd.DataFrame | None = None,
     ) -> None:
     """
     Write split assignments, dropped rows, and split metadata.
@@ -462,6 +505,11 @@ def write_split_artifacts(
     split_assignments_path = output_paths.split_assignments_path
     dropped_pairs_path = output_paths.dropped_pairs_path
     split_metadata_path = output_paths.split_metadata_path
+    sequence_cluster_path = getattr(
+        output_paths,
+        "sequence_cluster_assignments_path",
+        None,
+    )
 
     if append_results and split_assignments_path.exists():
         validate_append_split_assignments(
@@ -476,9 +524,45 @@ def write_split_artifacts(
             dropped_pairs.to_csv(dropped_pairs_path, index=False)
         if not split_metadata_path.exists():
             write_metadata_json(split_metadata, split_metadata_path)
+        if (
+            sequence_cluster_assignments is not None
+            and sequence_cluster_path is not None
+        ):
+            if sequence_cluster_path.exists():
+                existing_clusters = pd.read_csv(
+                    sequence_cluster_path,
+                    dtype="string",
+                )
+                try:
+                    pd.testing.assert_frame_equal(
+                        existing_clusters,
+                        sequence_cluster_assignments.astype("string"),
+                        check_dtype=False,
+                    )
+                except AssertionError as exc:
+                    raise ValueError(
+                        f"Cannot append results to "
+                        f"{sequence_cluster_path.parent.parent}: existing "
+                        "sequence_cluster_assignments.csv does not match "
+                        "the mapping for this run. Use a new --run-dir or "
+                        "rerun without --append-results."
+                    ) from exc
+            else:
+                sequence_cluster_assignments.to_csv(
+                    sequence_cluster_path,
+                    index=False,
+                )
         return
 
     split_assignments_path.parent.mkdir(parents=True, exist_ok=True)
     split_assignments.to_csv(split_assignments_path, index=False)
     dropped_pairs.to_csv(dropped_pairs_path, index=False)
     write_metadata_json(split_metadata, split_metadata_path)
+    if sequence_cluster_path is not None:
+        if sequence_cluster_assignments is None:
+            sequence_cluster_path.unlink(missing_ok=True)
+        else:
+            sequence_cluster_assignments.to_csv(
+                sequence_cluster_path,
+                index=False,
+            )

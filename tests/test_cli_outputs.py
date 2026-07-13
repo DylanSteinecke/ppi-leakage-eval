@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -214,6 +215,199 @@ def test_learned_model_reports_matrix_and_solver_performance(
     assert train_metrics.loc[0, "fit_seconds"] > 0.0
     assert train_metrics.loc[0, "solver_iterations"] >= 1
     assert train_metrics.loc[0, "evaluation_seconds"] > 0.0
+
+
+def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
+        tmp_path, ppi_test_data, run_cli):
+    pytest.importorskip("torch")
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "torch_mlp"
+
+    run_cli(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--classifier", "sgd_logistic", "torch_mlp",
+        "--features", "count",
+        "--k", "2",
+        "--num-reruns", "1",
+        "--train-size", "0.50",
+        "--val-size", "0.25",
+        "--seed", "11",
+        "--eval-test-set",
+        "--torch-max-epochs", "5",
+        "--torch-batch-size", "4",
+        "--torch-hidden-dim", "8",
+        "--torch-dropout", "0",
+        "--torch-patience", "1",
+        "--torch-min-delta", "100",
+        "--torch-device", "cpu",
+    )
+
+    assert_exists(
+        run_dir / "train_metrics.csv",
+        run_dir / "val_metrics.csv",
+        run_dir / "test_metrics.csv",
+        run_dir / "train_metrics_summary.csv",
+        run_dir / "val_metrics_summary.csv",
+        run_dir / "test_metrics_summary.csv",
+        run_dir / "predictions.csv",
+        run_dir / "training_history.csv",
+        run_dir / "plots" / "train_metrics_summary.svg",
+        run_dir / "plots" / "val_metrics_summary.svg",
+        run_dir / "plots" / "test_metrics_summary.svg",
+        run_dir / "plots" / "train_val_metrics_summary.svg",
+        run_dir / "plots" / "train_test_metrics_summary.svg",
+        run_dir / "performance.jsonl",
+    )
+    history = pd.read_csv(run_dir / "training_history.csv")
+    train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
+    val_metrics = pd.read_csv(run_dir / "val_metrics.csv")
+    test_metrics = pd.read_csv(run_dir / "test_metrics.csv")
+    predictions = pd.read_csv(run_dir / "predictions.csv")
+    performance = json.loads(
+        (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    torch_metrics = train_metrics[
+        train_metrics["classifier"] == "torch_mlp"
+    ].iloc[0]
+    model_run = next(
+        record
+        for record in performance["model_runs"]
+        if record["classifier"] == "torch_mlp"
+    )
+    training = model_run["training"]
+    best_checkpoint_path = Path(training["best_checkpoint_path"])
+    last_checkpoint_path = Path(training["last_checkpoint_path"])
+
+    assert history["epoch"].tolist() == [1, 2]
+    assert set(history["backend"]) == {"torch"}
+    assert history["validation_loss"].notna().all()
+    assert history["validation_auprc"].notna().all()
+    assert set(history["monitor_metric"]) == {"validation_auprc"}
+    assert history["train_batches"].tolist() == [3, 3]
+    assert set(train_metrics["classifier"]) == {
+        "sgd_logistic",
+        "torch_mlp",
+    }
+    assert torch_metrics["max_iter"] == 5
+    assert set(predictions["classifier"]) == {
+        "sgd_logistic",
+        "torch_mlp",
+    }
+    assert predictions["pred_score"].between(0.0, 1.0).all()
+    assert predictions["decision_threshold"].notna().all()
+    assert set(predictions["threshold_selection"]) == {"validation_f1"}
+    assert model_run["backend"] == "torch"
+    assert training["stopped_early"] is True
+    assert training["best_epoch"] == 1
+    assert training["early_stopping_metric"] == "validation_auprc"
+    assert training["max_dense_batch_rows"] <= 4
+    assert best_checkpoint_path.exists()
+    assert last_checkpoint_path.exists()
+    learned_metrics = pd.concat(
+        [train_metrics, val_metrics, test_metrics],
+        ignore_index=True,
+    )
+    assert set(learned_metrics["threshold_selection"]) == {
+        "validation_f1",
+    }
+    assert set(learned_metrics["threshold_metric"]) == {"f1"}
+    for _, model_metrics in learned_metrics.groupby("model_name"):
+        assert model_metrics["decision_threshold"].nunique() == 1
+        validation_f1 = model_metrics.loc[
+            model_metrics["split"] == "val",
+            "f1",
+        ].iloc[0]
+        assert model_metrics["threshold_metric_value"].tolist() == (
+            pytest.approx([validation_f1] * len(model_metrics))
+        )
+    assert model_run["decision_threshold"]["strategy"] == "validation_f1"
+    assert model_run["decision_threshold"]["metric"] == "f1"
+
+
+def test_torch_mlp_cli_resumes_from_last_checkpoint(
+        tmp_path, ppi_test_data, run_cli):
+    pytest.importorskip("torch")
+    pairs_path, fasta_path = ppi_test_data
+    first_run_dir = tmp_path / "torch_first"
+    resumed_run_dir = tmp_path / "torch_resumed"
+    shared_args = [
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--classifier", "torch_mlp",
+        "--features", "count",
+        "--k", "2",
+        "--num-reruns", "1",
+        "--train-size", "0.50",
+        "--val-size", "0.25",
+        "--split-seed", "13",
+        "--model-seed", "17",
+        "--torch-batch-size", "4",
+        "--torch-hidden-dim", "8",
+        "--torch-dropout", "0",
+        "--torch-patience", "10",
+        "--torch-device", "cpu",
+        "--no-metrics-plots",
+    ]
+    run_cli(
+        *shared_args,
+        "--run-dir", first_run_dir,
+        "--torch-max-epochs", "1",
+    )
+    first_performance = json.loads(
+        (first_run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    first_training = first_performance["model_runs"][0]["training"]
+    last_checkpoint = Path(first_training["last_checkpoint_path"])
+
+    run_cli(
+        *shared_args,
+        "--run-dir", resumed_run_dir,
+        "--torch-max-epochs", "2",
+        "--torch-resume-from", last_checkpoint,
+    )
+
+    history = pd.read_csv(resumed_run_dir / "training_history.csv")
+    resumed_performance = json.loads(
+        (resumed_run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    resumed_training = resumed_performance["model_runs"][0]["training"]
+    assert history["epoch"].tolist() == [1, 2]
+    assert resumed_training["resumed_from"] == str(last_checkpoint)
+    assert resumed_training["resumed_from_epoch"] == 1
+    assert resumed_training["epochs_completed"] == 2
+
+
+def test_split_and_model_seeds_are_independent(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    assignments_by_seed = {}
+    for split_seed in (3, 7):
+        run_dir = tmp_path / f"split_seed_{split_seed}"
+        run_cli(
+            "--pairs", pairs_path,
+            "--fasta", fasta_path,
+            "--run-dir", run_dir,
+            "--classifier", "sgd_logistic",
+            "--features", "count",
+            "--num-reruns", "1",
+            "--train-size", "0.50",
+            "--val-size", "0.25",
+            "--seed", "999",
+            "--split-seed", str(split_seed),
+            "--model-seed", "41",
+            "--no-metrics-plots",
+        )
+        metrics = pd.read_csv(run_dir / "train_metrics.csv")
+        metadata = json.loads(
+            (run_dir / "splits" / "split_metadata.json").read_text(
+                encoding="utf-8"))
+        assignments_by_seed[split_seed] = pd.read_csv(
+            run_dir / "splits" / "split_assignments.csv")
+        assert metrics.loc[0, "split_seed"] == split_seed
+        assert metrics.loc[0, "model_seed"] == 41
+        assert metadata["split_seed"] == split_seed
+        assert metadata["model_seed"] == 41
+
+    assert not assignments_by_seed[3].equals(assignments_by_seed[7])
 
 
 def test_cli_samples_the_whole_cohort_before_splitting(

@@ -55,6 +55,7 @@ def metadata(run_dir, split_strategy="random"):
         "split_name": None,
         "split_col": None,
         "split_seed": 11,
+        "model_seed": 23,
         "target_train_size": 0.7,
         "target_val_size": 0.1,
         "target_test_size": 0.2,
@@ -115,9 +116,18 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     run_dir = benchmark_dir / "random_20260709T000000Z"
     second_run_dir = benchmark_dir / "c3_20260709T000000Z"
 
+    first_metadata = metadata(run_dir, split_strategy="random")
+    first_metadata.update({
+        "sequence_clusters_path": "processed/sequence_clusters.csv",
+        "sequence_clusters_file_sha256": "clusters-sha",
+        "sequence_clusters": {
+            "applied_to_split": False,
+            "n_sequence_clusters": 17,
+        },
+    })
     write_json(
         run_dir / "splits" / "split_metadata.json",
-        metadata(run_dir, split_strategy="random"),
+        first_metadata,
     )
     write_invocations(
         run_dir / "invocations.jsonl",
@@ -180,6 +190,12 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "linear_svm",
     ]
     assert first_manifest_row["diagnostics_n_shared_proteins_train_test"] == 2
+    assert first_manifest_row["model_seed"] == 23
+    assert first_manifest_row["sequence_clusters_file_sha256"] == (
+        "clusters-sha")
+    assert not bool(
+        first_manifest_row["sequence_cluster_grouping_applied"])
+    assert first_manifest_row["n_sequence_clusters"] == 17
     assert (
         first_manifest_row[
             "diagnostics_n_exact_ordered_pair_overlaps_train_val"
@@ -279,6 +295,11 @@ def test_aggregate_cli_plots_current_train_val_grid(
     plot_path = benchmark_dir / "benchmark_train_val_f1.png"
     assert plot_path.exists()
     assert plot_path.stat().st_size > 0
+    from matplotlib import image as matplotlib_image
+
+    plot_pixels = matplotlib_image.imread(plot_path)
+    plot_height, plot_width = plot_pixels.shape[:2]
+    assert plot_height > plot_width
 
 
 def test_example_runners_have_valid_syntax_and_use_installed_commands():
@@ -314,13 +335,20 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert "ppi-prepare biogrid" in yeast_text
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
+    assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
+    assert 'SPLIT_SEEDS="${SPLIT_SEEDS:-0}"' in grid_text
+    assert '--split-seed "$split_seed"' in grid_text
+    assert '--model-seed "$MODEL_SEED"' in grid_text
+    assert "LEARNED_CLASSIFIERS+=(torch_mlp)" in grid_text
 
 
 def test_benchmark_profiles_expand_to_expected_command_grids(tmp_path):
     grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
 
-    def profile_commands(profile):
-        calls_path = tmp_path / f"{profile}_calls.txt"
+    def profile_commands(profile, include_torch=False, split_seeds="0"):
+        suffix = "_torch" if include_torch else ""
+        suffix += "_multi_seed" if " " in split_seeds else ""
+        calls_path = tmp_path / f"{profile}{suffix}_calls.txt"
         out_dir = tmp_path / f"{profile}_results"
         shell_script = r'''
 set -euo pipefail
@@ -328,6 +356,8 @@ CALLS_PATH="$1"
 GRID_PATH="$2"
 OUT_DIR="$3"
 BENCHMARK_PROFILE="$4"
+INCLUDE_TORCH_MLP="$5"
+SPLIT_SEEDS="$6"
 ppi-train() {
     printf '%s\n' "$*" >> "$CALLS_PATH"
 }
@@ -353,6 +383,8 @@ source "$GRID_PATH" --no-metrics-plots
                 str(grid_path),
                 str(out_dir),
                 profile,
+                "1" if include_torch else "0",
+                split_seeds,
             ],
             check=True,
             cwd=REPO_ROOT,
@@ -362,13 +394,36 @@ source "$GRID_PATH" --no-metrics-plots
         return calls_path.read_text(encoding="utf-8").splitlines()
 
     laptop_calls = profile_commands("laptop")
+    laptop_torch_calls = profile_commands("laptop", include_torch=True)
+    laptop_multi_seed_calls = profile_commands(
+        "laptop",
+        split_seeds="3 7",
+    )
     exhaustive_calls = profile_commands("exhaustive")
 
     assert len(laptop_calls) == 12
+    assert len(laptop_multi_seed_calls) == 24
     assert len(exhaustive_calls) == 24
     assert all("--n-split-trials 25" in call for call in laptop_calls)
     assert all("--val-size 0.10" in call for call in laptop_calls)
     assert all("--max-pairs 10000" in call for call in laptop_calls)
+    assert all("--model-seed 0" in call for call in laptop_calls)
+    assert sum(
+        "--split-seed 3" in call
+        for call in laptop_multi_seed_calls
+    ) == 12
+    assert sum(
+        "--split-seed 7" in call
+        for call in laptop_multi_seed_calls
+    ) == 12
+    assert sum(
+        "seed-3_profile-test" in call
+        for call in laptop_multi_seed_calls
+    ) == 12
+    assert sum(
+        "seed-7_profile-test" in call
+        for call in laptop_multi_seed_calls
+    ) == 12
     laptop_learned_calls = [
         call for call in laptop_calls if "--features" in call
     ]
@@ -376,6 +431,11 @@ source "$GRID_PATH" --no-metrics-plots
                for call in laptop_learned_calls)
     assert {call.split("--features ", 1)[1].split(" --classifier", 1)[0]
             for call in laptop_learned_calls} == {"tfidf", "count"}
+    assert all(
+        "--classifier sgd_logistic torch_mlp" in call
+        for call in laptop_torch_calls
+        if "--features" in call
+    )
 
     assert all("--n-split-trials 100" in call for call in exhaustive_calls)
     assert all("--val-size 0.10" in call for call in exhaustive_calls)

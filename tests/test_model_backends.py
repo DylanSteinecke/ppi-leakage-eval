@@ -1,0 +1,311 @@
+import numpy as np
+import pytest
+from scipy.sparse import csr_matrix
+
+from ppi_benchmark.backends import (
+    BackendPrediction,
+    ModelBackend,
+    SklearnBackend,
+    SupervisedSplit,
+    make_model_backend,
+)
+from ppi_benchmark.models import (
+    get_scores_and_predictions,
+    make_classifier,
+)
+from ppi_benchmark.performance import solver_iteration_report
+
+
+def test_sklearn_backend_matches_existing_estimator_path():
+    x_train = np.asarray([
+        [-2.0, -1.0],
+        [-1.0, -2.0],
+        [-1.0, 0.0],
+        [0.0, -1.0],
+        [0.0, 1.0],
+        [1.0, 0.0],
+        [1.0, 2.0],
+        [2.0, 1.0],
+    ])
+    y_train = np.asarray([0, 0, 0, 0, 1, 1, 1, 1])
+    x_eval = np.asarray([[-1.5, -1.5], [0.5, 1.0], [2.0, 2.0]])
+
+    estimator = make_classifier(
+        classifier_name="logistic",
+        max_iter=100,
+        random_state=7,
+    )
+    estimator.fit(x_train, y_train)
+    expected_scores, expected_predictions = get_scores_and_predictions(
+        estimator,
+        x_eval,
+    )
+
+    backend = make_model_backend(
+        classifier_name="logistic",
+        max_iter=100,
+        random_state=7,
+    )
+    fit_result = backend.fit(
+        SupervisedSplit("train", x_train, y_train),
+        validation=SupervisedSplit("val", x_eval, np.asarray([0, 1, 1])),
+    )
+    prediction = backend.predict(x_eval)
+
+    assert isinstance(backend, ModelBackend)
+    assert isinstance(prediction, BackendPrediction)
+    np.testing.assert_allclose(prediction.scores, expected_scores)
+    np.testing.assert_array_equal(
+        prediction.predictions,
+        expected_predictions,
+    )
+    assert prediction.default_threshold == 0.5
+    assert fit_result.fit_seconds >= 0.0
+    assert fit_result.iteration_report == solver_iteration_report(estimator)
+    assert fit_result.training_history == ()
+
+
+class RecordingEstimator:
+    def __init__(self):
+        self.fit_inputs = None
+        self.fit_targets = None
+
+    def fit(self, inputs, targets):
+        self.fit_inputs = inputs
+        self.fit_targets = targets
+        return self
+
+    def predict_proba(self, inputs):
+        positive_scores = np.full(len(inputs), 0.75)
+        return np.column_stack((1.0 - positive_scores, positive_scores))
+
+
+def test_sklearn_backend_fits_only_the_training_split():
+    estimator = RecordingEstimator()
+    backend = SklearnBackend(estimator)
+    x_train = np.asarray([[1.0], [2.0]])
+    y_train = np.asarray([0, 1])
+    validation = SupervisedSplit(
+        "val",
+        np.asarray([[100.0]]),
+        np.asarray([0]),
+    )
+
+    backend.fit(
+        SupervisedSplit("train", x_train, y_train),
+        validation=validation,
+    )
+
+    assert estimator.fit_inputs is x_train
+    assert estimator.fit_targets is y_train
+
+
+def test_unsupported_and_unknown_backends_fail_clearly():
+    with pytest.raises(ValueError, match="supports only.*torch_mlp"):
+        make_model_backend(
+            classifier_name="logistic",
+            max_iter=100,
+            random_state=7,
+            backend_name="torch",
+        )
+    with pytest.raises(ValueError, match="Unknown model backend: jax"):
+        make_model_backend(
+            classifier_name="logistic",
+            max_iter=100,
+            random_state=7,
+            backend_name="jax",
+        )
+
+
+def test_torch_mlp_batches_sparse_densification_and_early_stops(
+        tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    dense_train = np.asarray([
+        [1, 0, 0, 1, 0, 0],
+        [0, 1, 0, 1, 0, 0],
+        [1, 1, 0, 0, 0, 0],
+        [0, 0, 1, 0, 1, 0],
+        [0, 0, 0, 1, 1, 0],
+        [0, 0, 1, 0, 0, 1],
+        [1, 0, 1, 0, 0, 0],
+        [0, 1, 0, 0, 0, 1],
+        [1, 0, 0, 0, 1, 0],
+        [0, 1, 1, 0, 0, 0],
+        [0, 0, 0, 1, 0, 1],
+        [1, 0, 0, 0, 0, 1],
+    ], dtype=np.float32)
+    y_train = np.asarray([0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1])
+    x_train = csr_matrix(dense_train)
+    x_val = csr_matrix(dense_train[:6])
+    y_val = np.asarray([0, 0, 0, 1, 1, 1])
+    best_checkpoint_path = tmp_path / "model.best.pt"
+    last_checkpoint_path = tmp_path / "model.last.pt"
+
+    dense_batch_shapes = []
+    original_toarray = csr_matrix.toarray
+
+    def tracked_toarray(matrix, *args, **kwargs):
+        dense_batch_shapes.append(matrix.shape)
+        return original_toarray(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(csr_matrix, "toarray", tracked_toarray)
+    backend = make_model_backend(
+        classifier_name="torch_mlp",
+        max_iter=10,
+        random_state=7,
+        best_checkpoint_path=best_checkpoint_path,
+        last_checkpoint_path=last_checkpoint_path,
+        backend_options={
+            "batch_size": 3,
+            "hidden_dim": 4,
+            "learning_rate": 1e-2,
+            "weight_decay": 0.0,
+            "dropout": 0.0,
+            "patience": 2,
+            "min_delta": 10.0,
+            "device": "cpu",
+        },
+    )
+
+    fit_result = backend.fit(
+        SupervisedSplit("train", x_train, y_train),
+        validation=SupervisedSplit("val", x_val, y_val),
+    )
+    prediction = backend.predict(x_val)
+
+    assert backend.backend_name == "torch"
+    assert len(fit_result.training_history) == 3
+    assert fit_result.metadata["stopped_early"] is True
+    assert fit_result.metadata["best_epoch"] == 1
+    assert fit_result.metadata["epochs_completed"] == 3
+    assert fit_result.metadata["optimizer_steps"] == 12
+    assert fit_result.metadata["max_dense_batch_rows"] == 3
+    assert fit_result.metadata["early_stopping_metric"] == (
+        "validation_auprc")
+    assert best_checkpoint_path.exists()
+    assert last_checkpoint_path.exists()
+    assert dense_batch_shapes
+    assert max(n_rows for n_rows, _ in dense_batch_shapes) <= 3
+    assert x_train.shape not in dense_batch_shapes
+    assert prediction.scores.shape == (x_val.shape[0],)
+    assert prediction.predictions.shape == (x_val.shape[0],)
+    best_checkpoint = torch.load(
+        best_checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    last_checkpoint = torch.load(
+        last_checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert best_checkpoint["checkpoint_kind"] == "best"
+    assert best_checkpoint["format_version"] == 3
+    assert best_checkpoint["monitor_metric"] == "validation_auprc"
+    assert best_checkpoint["epoch"] == 1
+    assert best_checkpoint["input_dim"] == x_train.shape[1]
+    assert last_checkpoint["checkpoint_kind"] == "last"
+    assert last_checkpoint["data_signature"]["train_inputs"]["format"] == (
+        "csr")
+    assert last_checkpoint["epoch"] == 3
+    assert len(last_checkpoint["history"]) == 3
+
+
+def test_torch_mlp_last_checkpoint_resumes_optimizer_and_rng_state(tmp_path):
+    pytest.importorskip("torch")
+    x_train = csr_matrix(np.asarray([
+        [1, 0, 0, 1],
+        [0, 1, 1, 0],
+        [1, 1, 0, 0],
+        [0, 0, 1, 1],
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [1, 1, 1, 0],
+        [0, 1, 1, 1],
+    ], dtype=np.float32))
+    y_train = np.asarray([0, 0, 0, 0, 1, 1, 1, 1])
+    x_val = x_train[:4]
+    y_val = np.asarray([0, 0, 1, 1])
+    backend_options = {
+        "batch_size": 2,
+        "hidden_dim": 5,
+        "learning_rate": 1e-2,
+        "weight_decay": 0.0,
+        "dropout": 0.2,
+        "patience": 10,
+        "min_delta": 0.0,
+        "device": "cpu",
+    }
+    source_best = tmp_path / "source.best.pt"
+    source_last = tmp_path / "source.last.pt"
+    first_backend = make_model_backend(
+        classifier_name="torch_mlp",
+        max_iter=2,
+        random_state=19,
+        best_checkpoint_path=source_best,
+        last_checkpoint_path=source_last,
+        backend_options=backend_options,
+    )
+    first_result = first_backend.fit(
+        SupervisedSplit("train", x_train, y_train),
+        validation=SupervisedSplit("val", x_val, y_val),
+    )
+
+    resumed_backend = make_model_backend(
+        classifier_name="torch_mlp",
+        max_iter=4,
+        random_state=19,
+        best_checkpoint_path=tmp_path / "resumed.best.pt",
+        last_checkpoint_path=tmp_path / "resumed.last.pt",
+        resume_from=source_last,
+        backend_options=backend_options,
+    )
+    resumed_result = resumed_backend.fit(
+        SupervisedSplit("train", x_train, y_train),
+        validation=SupervisedSplit("val", x_val, y_val),
+    )
+
+    uninterrupted_backend = make_model_backend(
+        classifier_name="torch_mlp",
+        max_iter=4,
+        random_state=19,
+        best_checkpoint_path=tmp_path / "uninterrupted.best.pt",
+        last_checkpoint_path=tmp_path / "uninterrupted.last.pt",
+        backend_options=backend_options,
+    )
+    uninterrupted_result = uninterrupted_backend.fit(
+        SupervisedSplit("train", x_train, y_train),
+        validation=SupervisedSplit("val", x_val, y_val),
+    )
+
+    assert len(first_result.training_history) == 2
+    assert [row["epoch"] for row in resumed_result.training_history] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert resumed_result.metadata["resumed_from_epoch"] == 2
+    assert resumed_result.metadata["optimizer_steps"] == 16
+    assert uninterrupted_result.metadata["optimizer_steps"] == 16
+    np.testing.assert_allclose(
+        resumed_backend.predict(x_val).scores,
+        uninterrupted_backend.predict(x_val).scores,
+        rtol=0.0,
+        atol=1e-7,
+    )
+
+    changed_train = x_train.copy()
+    changed_train[0, 0] = 0.0
+    mismatched_backend = make_model_backend(
+        classifier_name="torch_mlp",
+        max_iter=4,
+        random_state=19,
+        resume_from=source_last,
+        backend_options=backend_options,
+    )
+    with pytest.raises(ValueError, match="data do not match"):
+        mismatched_backend.fit(
+            SupervisedSplit("train", changed_train, y_train),
+            validation=SupervisedSplit("val", x_val, y_val),
+        )

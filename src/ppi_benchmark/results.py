@@ -22,6 +22,10 @@ METRIC_COLUMNS = (
     "auprc",
     "auroc",
 )
+SUMMARY_AUXILIARY_COLUMNS = (
+    "decision_threshold",
+    "threshold_metric_value",
+)
 SUMMARY_GROUP_COLUMNS = (
     "split",
     "model_name",
@@ -31,6 +35,8 @@ SUMMARY_GROUP_COLUMNS = (
     "bm25_k1",
     "bm25_b",
     "max_iter",
+    "threshold_selection",
+    "threshold_metric",
     "split_strategy",
     "split_name",
     "split_seed",
@@ -141,10 +147,12 @@ def summarize_metrics(metrics_path: Path) -> pd.DataFrame:
         for column in SUMMARY_GROUP_COLUMNS
         if column in metrics_df.columns
     ]
-    metric_columns = [
-        column for column in METRIC_COLUMNS if column in metrics_df.columns
+    value_columns = [
+        column
+        for column in METRIC_COLUMNS + SUMMARY_AUXILIARY_COLUMNS
+        if column in metrics_df.columns
     ]
-    if not metric_columns:
+    if not value_columns:
         raise ValueError(
             f"Metrics file contains no supported metric columns: {metrics_path}")
 
@@ -156,9 +164,9 @@ def summarize_metrics(metrics_path: Path) -> pd.DataFrame:
 
     grouped = metrics_df.groupby(group_columns, dropna=False)
     n_runs = grouped.size().rename("n_runs").reset_index()
-    means = grouped[metric_columns].mean().add_suffix("_mean").reset_index()
+    means = grouped[value_columns].mean().add_suffix("_mean").reset_index()
     standard_errors = (
-        grouped[metric_columns]
+        grouped[value_columns]
         .sem(ddof=1)
         .add_suffix("_standard_error")
         .reset_index()

@@ -47,6 +47,7 @@ CLASSIFIER_ORDER = (
     "logistic",
     "linear_svm",
     "sgd_logistic",
+    "torch_mlp",
     "always_positive",
     "always_negative",
 )
@@ -55,6 +56,7 @@ CLASSIFIER_LABELS = {
     "logistic": "Logistic",
     "linear_svm": "Linear SVM",
     "sgd_logistic": "SGD Logistic",
+    "torch_mlp": "Torch MLP",
     "always_positive": "Always Positive",
     "always_negative": "Always Negative",
 }
@@ -523,11 +525,13 @@ def plot_benchmark_train_val_f1(
         for model_name in model_order
     ]
     y_positions = list(range(len(model_order)))
-    figure_height = max(4.5, 0.32 * len(model_order) + 2.4)
+    panel_height = max(3.0, 0.28 * len(model_order) + 1.1)
+    header_height = 0.95
+    figure_height = panel_height * len(strategies) + header_height
     figure, axes = plt.subplots(
-        1,
         len(strategies),
-        figsize=(4.0 * len(strategies) + 2.8, figure_height),
+        1,
+        figsize=(12.0, figure_height),
         sharex=True,
         sharey=True,
         squeeze=False,
@@ -546,12 +550,17 @@ def plot_benchmark_train_val_f1(
             ),
             fontsize=11,
             fontweight="bold",
+            loc="left",
         )
         axis.set_xlim(0.0, 1.0)
         axis.set_xticks(list(GRID_VALUES))
+        axis.tick_params(axis="x", labelbottom=True)
         axis.grid(axis="x", color="#E6E6E6", linewidth=0.8)
         axis.set_axisbelow(True)
         axis.set_xlabel("F1")
+        axis.set_ylim(len(model_order) - 0.5, -0.5)
+        axis.set_yticks(y_positions)
+        axis.set_yticklabels(model_labels, fontsize=8.0)
 
         for y_position, model_name in zip(y_positions, model_order):
             axis.axhline(
@@ -598,12 +607,6 @@ def plot_benchmark_train_val_f1(
                 zorder=4,
             )
 
-    axes[0].set_ylim(len(model_order) - 0.5, -0.5)
-    axes[0].set_yticks(y_positions)
-    axes[0].set_yticklabels(model_labels, fontsize=7.5)
-    for axis in axes[1:]:
-        axis.tick_params(axis="y", labelleft=False)
-
     legend_handles = [
         plt.Line2D(
             [0], [0], marker="o", linestyle="", color=TRAIN_COLOR,
@@ -616,18 +619,20 @@ def plot_benchmark_train_val_f1(
         handles=legend_handles,
         loc="upper right",
         bbox_to_anchor=(0.99, 0.995),
+        ncols=2,
+        frameon=False,
     )
     figure.suptitle(
         "Train vs validation F1 across split strategies",
         fontsize=17,
         fontweight="bold",
         x=0.01,
-        y=0.98,
+        y=0.995,
         ha="left",
     )
     figure.text(
         0.01,
-        0.895,
+        1.0 - 0.72 / figure_height,
         (
             "Marker positions show absolute F1; arrows point from train to "
             "validation, so their direction and length show the "
@@ -636,7 +641,11 @@ def plot_benchmark_train_val_f1(
         fontsize=9.5,
         color="#555555",
     )
-    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.82))
+    plot_top = 1.0 - header_height / figure_height
+    figure.tight_layout(
+        rect=(0.0, 0.0, 1.0, plot_top),
+        h_pad=1.5,
+    )
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(plot_path, dpi=180, bbox_inches="tight")
     plt.close(figure)

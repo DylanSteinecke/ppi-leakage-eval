@@ -11,6 +11,8 @@ in focused helper modules so future pipeline variants can reuse them.
 import argparse
 import logging
 import math
+import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,9 +22,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..backends import (
+    TORCH_BACKEND,
+    SupervisedSplit,
+    backend_name_for_classifier,
+    make_model_backend,
+)
 from ..datasets.common import (
     discover_protein_metadata_path,
     FASTA_ID_FORMAT_CHOICES,
+    file_sha256,
     read_fasta_with_taxa,
 )
 from ..features import (
@@ -32,10 +41,14 @@ from ..features import (
     normalize_feature_types,
 )
 from ..inputs import (
+    C2_SPLIT_STRATEGY,
+    C3_SPLIT_STRATEGY,
     PROVIDED_SPLIT_STRATEGY,
     load_or_make_split,
+    load_sequence_cluster_mapping,
     normalized_split_values,
     prepare_input_data,
+    protein_ids_in_pairs,
     RANDOM_SPLIT_STRATEGY,
     SPLIT_STRATEGY_CHOICES,
     validate_splits,
@@ -44,8 +57,6 @@ from ..models import (
     BASELINE_CLASSIFIER_CHOICES,
     CLASSIFIER_CHOICES,
     get_metrics,
-    get_scores_and_predictions,
-    make_classifier,
 )
 from ..plots import (
     legacy_f1_heatmap_output_paths,
@@ -59,7 +70,6 @@ from ..performance import (
     PerformanceTracker,
     append_performance_report,
     peak_memory_bytes,
-    solver_iteration_report,
 )
 from ..results import (
     append_dataframe,
@@ -82,11 +92,20 @@ from ..splits import (
     invocation_log_entry,
     INVOCATIONS_FILENAME,
     make_split_assignments,
+    SEQUENCE_CLUSTER_ASSIGNMENTS_FILENAME,
     SOURCE_ROW_INDEX_COLUMN,
     SPLIT_ASSIGNMENTS_FILENAME,
     SPLIT_METADATA_FILENAME,
     SPLITS_DIRNAME,
     write_split_artifacts,
+)
+from ..thresholds import (
+    FIXED_THRESHOLD,
+    THRESHOLD_SELECTION_CHOICES,
+    VALIDATION_F1_THRESHOLD,
+    fixed_threshold_selection,
+    predictions_at_threshold,
+    select_validation_f1_threshold,
 )
 
 FEATURELESS_FEATURE = "none"
@@ -94,6 +113,8 @@ LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LOGGER = logging.getLogger(__name__)
 PLOTS_DIRNAME = "plots"
 PREDICTIONS_FILENAME = "predictions.csv"
+TRAINING_HISTORY_FILENAME = "training_history.csv"
+CHECKPOINTS_DIRNAME = "checkpoints"
 TRAIN_METRICS_FILENAME = "train_metrics.csv"
 VAL_METRICS_FILENAME = "val_metrics.csv"
 TEST_METRICS_FILENAME = "test_metrics.csv"
@@ -109,6 +130,26 @@ TRAIN_VAL_F1_HEATMAP_FILENAME = "train_val_f1_heatmap.png"
 TRAIN_TEST_PLOT_FILENAME = "train_test_metrics_summary.svg"
 TRAIN_TEST_PNG_FILENAME = "train_test_metrics_summary.png"
 TRAIN_TEST_F1_HEATMAP_FILENAME = "train_test_f1_heatmap.png"
+TRAINING_HISTORY_COLUMNS = (
+    "execution_id",
+    "model_name",
+    "classifier",
+    "backend",
+    "features",
+    "run_number",
+    "model_seed",
+    "epoch",
+    "train_loss",
+    "validation_loss",
+    "validation_auprc",
+    "monitor_metric",
+    "monitor_value",
+    "improved",
+    "learning_rate",
+    "epoch_seconds",
+    "train_batches",
+    "validation_batches",
+)
 
 
 #######
@@ -142,6 +183,17 @@ def positive_float(value: str) -> float:
     parsed_value = finite_float(value)
     if parsed_value <= 0.0:
         raise argparse.ArgumentTypeError("value must be greater than 0")
+
+    return parsed_value
+
+
+def nonnegative_float(value: str) -> float:
+    """
+    Parse a nonnegative float argparse value.
+    """
+    parsed_value = finite_float(value)
+    if parsed_value < 0.0:
+        raise argparse.ArgumentTypeError("value must be nonnegative")
 
     return parsed_value
 
@@ -223,6 +275,13 @@ def argument_parser() -> argparse.Namespace:
         "--taxon-id",
         default=None,
         help="Optional NCBI taxonomy ID applied to every FASTA record.")
+    input_group.add_argument(
+        "--sequence-clusters",
+        default=None,
+        help=(
+            "Optional CSV with protein_id and cluster_id columns. C2/C3 "
+            "treat each sequence cluster as one atomic homology group."
+        ))
 
     # Whole-cohort sampling args
     sampling_group = parser.add_argument_group("Cohort sampling")
@@ -283,6 +342,14 @@ def argument_parser() -> argparse.Namespace:
         "--classifier", "--classifiers", dest="classifiers",
         choices=CLASSIFIER_CHOICES, nargs="+", default=["logistic"],
         help="One or more classifier model types")
+    model_group.add_argument(
+        "--threshold-selection",
+        choices=THRESHOLD_SELECTION_CHOICES,
+        default=VALIDATION_F1_THRESHOLD,
+        help=(
+            "Select learned-model decision thresholds by validation F1, or "
+            "retain each backend's fixed default threshold."
+        ))
 
     # Training args
     training_group = parser.add_argument_group("Training")
@@ -297,7 +364,15 @@ def argument_parser() -> argparse.Namespace:
         "--eval-test-set", action="store_true",
         help="Evaluate on the test split. In validation runs, omit this to "
             "keep test held out.")
-    training_group.add_argument("--seed", type=int, default=0)
+    training_group.add_argument(
+        "--seed", type=int, default=0,
+        help="Backward-compatible default for split and model seeds")
+    training_group.add_argument(
+        "--split-seed", type=int, default=None,
+        help="Seed controlling generated train/validation/test assignments")
+    training_group.add_argument(
+        "--model-seed", type=int, default=None,
+        help="First model seed; reruns use consecutive values")
     training_group.add_argument(
         "--split-col", default=None,
         help="Optional column with train, validation, and test labels")
@@ -314,6 +389,40 @@ def argument_parser() -> argparse.Namespace:
         "--num-reruns", type=positive_int, default=1,
         help="Number of times to rerun each classifier with consecutive seeds")
 
+    # Torch MLP args
+    torch_group = parser.add_argument_group("Torch MLP")
+    torch_group.add_argument(
+        "--torch-max-epochs", type=positive_int, default=50,
+        help="Maximum epochs for torch_mlp training")
+    torch_group.add_argument(
+        "--torch-batch-size", type=positive_int, default=256,
+        help="Sparse row-batch size for torch_mlp training and prediction")
+    torch_group.add_argument(
+        "--torch-hidden-dim", type=positive_int, default=64,
+        help="Hidden-layer width for torch_mlp")
+    torch_group.add_argument(
+        "--torch-learning-rate", type=positive_float, default=1e-3)
+    torch_group.add_argument(
+        "--torch-weight-decay", type=nonnegative_float, default=1e-4)
+    torch_group.add_argument(
+        "--torch-dropout", type=nonnegative_proportion, default=0.1)
+    torch_group.add_argument(
+        "--torch-patience", type=positive_int, default=5,
+        help="Validation epochs without improvement before early stopping")
+    torch_group.add_argument(
+        "--torch-min-delta", type=nonnegative_float, default=1e-4,
+        help="Minimum validation-AUPRC increase counted as improvement")
+    torch_group.add_argument(
+        "--torch-device", choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="Device for torch_mlp; auto prefers CUDA, then MPS, then CPU")
+    torch_group.add_argument(
+        "--torch-resume-from", default=None,
+        help=(
+            "Resume torch_mlp from a prior *.last.pt checkpoint. The target "
+            "--torch-max-epochs is the total epoch count."
+        ))
+
     args = parser.parse_args()
     if args.split_col and args.split_strategy:
         parser.error("--split-col and --split-strategy cannot both be set.")
@@ -321,6 +430,10 @@ def argument_parser() -> argparse.Namespace:
         parser.error("--split-name can only be used with --split-col.")
     if args.train_size + args.val_size >= 1.0:
         parser.error("--train-size + --val-size must be less than 1.")
+    if args.torch_resume_from and args.num_reruns != 1:
+        parser.error("--torch-resume-from requires --num-reruns 1.")
+    if args.torch_resume_from and "torch_mlp" not in args.classifiers:
+        parser.error("--torch-resume-from requires --classifier torch_mlp.")
 
     if args.split_col:
         args.effective_split_strategy = PROVIDED_SPLIT_STRATEGY
@@ -332,6 +445,10 @@ def argument_parser() -> argparse.Namespace:
     args.split_audit = None
     args.sampling_requested = (
         args.max_pairs is not None or args.sample_fraction is not None)
+    args.split_seed = (
+        args.seed if args.split_seed is None else args.split_seed)
+    args.model_seed = (
+        args.seed if args.model_seed is None else args.model_seed)
 
     try:
         args.features = normalize_feature_types(args.features)
@@ -424,7 +541,10 @@ class OutputPaths:
     plots_dir: Path
     splits_dir: Path
     sampling_dir: Path
+    checkpoints_dir: Path
     selected_examples_path: Path
+    sequence_cluster_assignments_path: Path
+    training_history_path: Path
     predictions_path: Path | None
     train_metrics_path: Path
     val_metrics_path: Path | None
@@ -458,6 +578,29 @@ def make_model_name(feature_name: str, classifier_name: str) -> str:
         model_name = f"{feature_name}__{classifier_name}"
 
     return model_name
+
+
+def safe_artifact_component(value: str) -> str:
+    """Return a path-safe component for model-specific artifacts."""
+    safe_value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return safe_value or "unnamed"
+
+
+def model_checkpoint_paths(
+        checkpoints_dir: Path, execution_id: str, model_name: str,
+        run_number: int,
+    ) -> tuple[Path, Path]:
+    """Return deterministic best/last paths for one model rerun."""
+    execution_component = safe_artifact_component(execution_id)
+    model_component = safe_artifact_component(model_name)
+    checkpoint_prefix = (
+        checkpoints_dir / execution_component
+        / f"{model_component}__run_{run_number}"
+    )
+    return (
+        checkpoint_prefix.with_suffix(".best.pt"),
+        checkpoint_prefix.with_suffix(".last.pt"),
+    )
 
 
 def is_baseline_classifier(classifier_name: str) -> bool:
@@ -530,37 +673,139 @@ def train_and_evaluate_model_run(
         test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
         x_test: Any | None, feature_name: str, classifier_name: str,
         run_number: int,
-        execution_id: str, args: argparse.Namespace
+        execution_id: str, args: argparse.Namespace,
+        best_checkpoint_path: Path | None = None,
+        last_checkpoint_path: Path | None = None,
+        resume_from: Path | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame | None,
-               pd.DataFrame | None, pd.DataFrame | None, dict[str, Any]]:
+               pd.DataFrame | None, pd.DataFrame | None,
+               pd.DataFrame | None, dict[str, Any]]:
     """
     Train and evaluate one model configuration for one run number.
     """
     # Define model metadata
     model_name = make_model_name(feature_name, classifier_name)
     is_baseline = is_baseline_classifier(classifier_name)
-    run_seed = args.seed + run_number - 1
+    run_seed = args.model_seed + run_number - 1
     model_seed = np.nan if is_baseline else run_seed
-    max_iter = np.nan if is_baseline else args.max_iter
+    backend_name = backend_name_for_classifier(classifier_name)
+    backend_max_iter = (
+        args.torch_max_epochs
+        if backend_name == TORCH_BACKEND
+        else args.max_iter
+    )
+    max_iter = np.nan if is_baseline else backend_max_iter
     feature_meta = feature_metadata(feature_name, args)
 
     # Define training labels
     y_train = train_df["label"].to_numpy()
 
-    # Define model
-    model = make_classifier(
+    # Define model backend
+    backend_options = None
+    if backend_name == TORCH_BACKEND:
+        backend_options = {
+            "batch_size": args.torch_batch_size,
+            "hidden_dim": args.torch_hidden_dim,
+            "learning_rate": args.torch_learning_rate,
+            "weight_decay": args.torch_weight_decay,
+            "dropout": args.torch_dropout,
+            "patience": args.torch_patience,
+            "min_delta": args.torch_min_delta,
+            "device": args.torch_device,
+        }
+    backend = make_model_backend(
         classifier_name=classifier_name,
-        max_iter=args.max_iter,
+        max_iter=backend_max_iter,
         random_state=run_seed,
+        backend_name=backend_name,
+        best_checkpoint_path=best_checkpoint_path,
+        last_checkpoint_path=last_checkpoint_path,
+        resume_from=resume_from,
+        backend_options=backend_options,
     )
+    train_split = SupervisedSplit(
+        name="train",
+        inputs=x_train,
+        targets=y_train,
+    )
+    validation_split = None
+    if val_df is not None and x_val is not None:
+        validation_split = SupervisedSplit(
+            name="val",
+            inputs=x_val,
+            targets=val_df["label"].to_numpy(),
+        )
+
     # Fit the model to the training data
     model_run_started_at = perf_counter()
-    fit_started_at = perf_counter()
-    model.fit(x_train, y_train)
-    fit_seconds = perf_counter() - fit_started_at
-    iteration_report = solver_iteration_report(model)
+    fit_result = backend.fit(
+        train=train_split,
+        validation=validation_split,
+    )
+    fit_seconds = fit_result.fit_seconds
+    iteration_report = fit_result.iteration_report
+    training_metadata = fit_result.metadata
     solver_iterations = (
         np.nan if iteration_report is None else iteration_report["maximum"])
+
+    # Select one operating threshold without consulting the test split.
+    prediction_cache = {}
+    threshold_started_at = perf_counter()
+    if val_df is not None and x_val is not None:
+        selection_inputs = x_val
+        selection_split_name = "val"
+    else:
+        selection_inputs = x_train
+        selection_split_name = "train"
+    selection_prediction = backend.predict(selection_inputs)
+    prediction_cache[selection_split_name] = selection_prediction
+    default_threshold = selection_prediction.default_threshold
+    if is_baseline:
+        threshold_selection = fixed_threshold_selection(
+            default_threshold=default_threshold,
+            labels=(
+                val_df["label"].to_numpy()
+                if val_df is not None and x_val is not None
+                else None
+            ),
+            scores=(
+                selection_prediction.scores
+                if val_df is not None and x_val is not None
+                else None
+            ),
+            strategy="fixed_baseline",
+        )
+    elif (
+        args.threshold_selection == VALIDATION_F1_THRESHOLD
+        and val_df is not None
+        and x_val is not None
+    ):
+        threshold_selection = select_validation_f1_threshold(
+            labels=val_df["label"].to_numpy(),
+            scores=selection_prediction.scores,
+            default_threshold=default_threshold,
+        )
+    else:
+        fixed_strategy = (
+            FIXED_THRESHOLD
+            if args.threshold_selection == FIXED_THRESHOLD
+            else "fixed_no_validation"
+        )
+        threshold_selection = fixed_threshold_selection(
+            default_threshold=default_threshold,
+            labels=(
+                val_df["label"].to_numpy()
+                if val_df is not None and x_val is not None
+                else None
+            ),
+            scores=(
+                selection_prediction.scores
+                if val_df is not None and x_val is not None
+                else None
+            ),
+            strategy=fixed_strategy,
+        )
+    threshold_selection_seconds = perf_counter() - threshold_started_at
 
     # Define the evaluate metrics tables
     n_val = 0 if val_df is None else len(val_df)
@@ -573,7 +818,7 @@ def train_and_evaluate_model_run(
         "model_name": model_name,
         "run_number": run_number,
         "model_seed": model_seed,
-        "split_seed": args.seed,
+        "split_seed": args.split_seed,
         "n_train": len(train_df),
         "n_val": n_val,
         "n_test": len(test_df),
@@ -592,7 +837,33 @@ def train_and_evaluate_model_run(
         "discarded_edge_fraction": args.discarded_edge_fraction,
         "fit_seconds": fit_seconds,
         "solver_iterations": solver_iterations,
+        "decision_threshold": threshold_selection.threshold,
+        "default_decision_threshold": (
+            threshold_selection.default_threshold),
+        "threshold_selection": threshold_selection.strategy,
+        "threshold_metric": threshold_selection.metric_name,
+        "threshold_metric_value": (
+            np.nan
+            if threshold_selection.metric_value is None
+            else threshold_selection.metric_value
+        ),
     }
+
+    training_history_df = None
+    if fit_result.training_history:
+        history_metadata = {
+            "execution_id": execution_id,
+            "model_name": model_name,
+            "classifier": classifier_name,
+            "backend": backend.backend_name,
+            "features": feature_meta["features"],
+            "run_number": run_number,
+            "model_seed": model_seed,
+        }
+        training_history_df = pd.DataFrame([
+            {**history_metadata, **history_row}
+            for history_row in fit_result.training_history
+        ]).reindex(columns=TRAINING_HISTORY_COLUMNS)
 
     evaluation_seconds: dict[str, float] = {}
 
@@ -604,7 +875,21 @@ def train_and_evaluate_model_run(
         """
         evaluation_started_at = perf_counter()
         y_true = split_df["label"].to_numpy()
-        y_score, y_pred = get_scores_and_predictions(model, x_split)
+        prediction = prediction_cache.get(split_name)
+        if prediction is None:
+            prediction = backend.predict(x_split)
+            prediction_cache[split_name] = prediction
+        if not np.isclose(
+                prediction.default_threshold,
+                threshold_selection.default_threshold):
+            raise RuntimeError(
+                "Model backend returned inconsistent default thresholds."
+            )
+        y_score = prediction.scores
+        y_pred = predictions_at_threshold(
+            y_score,
+            threshold_selection.threshold,
+        )
         metrics = get_metrics(
             y_true=y_true,
             y_score=y_score,
@@ -653,17 +938,32 @@ def train_and_evaluate_model_run(
         predictions_df.insert(7, "k", feature_meta["k"])
         predictions_df["pred_score"] = y_test_score
         predictions_df["pred_label"] = y_test_pred
+        predictions_df["decision_threshold"] = (
+            threshold_selection.threshold)
+        predictions_df["threshold_selection"] = (
+            threshold_selection.strategy)
 
     model_performance = {
         "model_name": model_name,
         "feature_name": feature_name,
         "classifier": classifier_name,
+        "backend": backend.backend_name,
         "run_number": run_number,
         "model_seed": None if is_baseline else run_seed,
         "fit_seconds": float(fit_seconds),
         "evaluation_seconds": evaluation_seconds,
         "total_seconds": float(perf_counter() - model_run_started_at),
         "solver_iterations": iteration_report,
+        "training": training_metadata,
+        "threshold_selection_seconds": threshold_selection_seconds,
+        "decision_threshold": {
+            "selected": threshold_selection.threshold,
+            "default": threshold_selection.default_threshold,
+            "strategy": threshold_selection.strategy,
+            "metric": threshold_selection.metric_name,
+            "metric_value": threshold_selection.metric_value,
+            "n_candidates": threshold_selection.n_candidates,
+        },
         "peak_memory_bytes_after_run": peak_memory_bytes(),
     }
     return (
@@ -671,6 +971,7 @@ def train_and_evaluate_model_run(
         val_metrics_df,
         test_metrics_df,
         predictions_df,
+        training_history_df,
         model_performance,
     )
 
@@ -690,11 +991,30 @@ def run_model_reruns(
 
     # Re-run the model
     for run_number in range(1, args.num_reruns + 1):
+        if backend_name_for_classifier(classifier_name) == TORCH_BACKEND:
+            best_checkpoint_path, last_checkpoint_path = (
+                model_checkpoint_paths(
+                    checkpoints_dir=output_paths.checkpoints_dir,
+                    execution_id=execution_id,
+                    model_name=model_name,
+                    run_number=run_number,
+                )
+            )
+            resume_from = (
+                None
+                if args.torch_resume_from is None
+                else Path(args.torch_resume_from)
+            )
+        else:
+            best_checkpoint_path = None
+            last_checkpoint_path = None
+            resume_from = None
         (
             train_metrics_df,
             val_metrics_df,
             test_metrics_df,
             predictions_df,
+            training_history_df,
             model_performance,
         ) = (
             train_and_evaluate_model_run(
@@ -709,6 +1029,9 @@ def run_model_reruns(
                 run_number=run_number,
                 execution_id=execution_id,
                 args=args,
+                best_checkpoint_path=best_checkpoint_path,
+                last_checkpoint_path=last_checkpoint_path,
+                resume_from=resume_from,
             )
         )
         model_performance_records.append(model_performance)
@@ -718,6 +1041,7 @@ def run_model_reruns(
             (val_metrics_df, output_paths.val_metrics_path),
             (test_metrics_df, output_paths.test_metrics_path),
             (predictions_df, output_paths.predictions_path),
+            (training_history_df, output_paths.training_history_path),
         )
         for output_df, output_path in output_dfs:
             if output_df is not None and output_path is not None:
@@ -738,17 +1062,21 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     plots_dir = run_dir / PLOTS_DIRNAME
     splits_dir = run_dir / SPLITS_DIRNAME
     sampling_dir = run_dir / SAMPLING_DIRNAME
+    checkpoints_dir = run_dir / CHECKPOINTS_DIRNAME
     run_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
     splits_dir.mkdir(parents=True, exist_ok=True)
 
     all_predictions_path = run_dir / PREDICTIONS_FILENAME
+    training_history_path = run_dir / TRAINING_HISTORY_FILENAME
     train_metrics_path = run_dir / TRAIN_METRICS_FILENAME
     all_val_metrics_path = run_dir / VAL_METRICS_FILENAME
     all_test_metrics_path = run_dir / TEST_METRICS_FILENAME
     split_assignments_path = splits_dir / SPLIT_ASSIGNMENTS_FILENAME
     dropped_pairs_path = splits_dir / DROPPED_PAIRS_FILENAME
     split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
+    sequence_cluster_assignments_path = (
+        splits_dir / SEQUENCE_CLUSTER_ASSIGNMENTS_FILENAME)
     selected_examples_path = sampling_dir / SELECTED_EXAMPLES_FILENAME
     invocations_path = run_dir / INVOCATIONS_FILENAME
     performance_path = run_dir / PERFORMANCE_FILENAME
@@ -802,7 +1130,11 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         plots_dir=plots_dir,
         splits_dir=splits_dir,
         sampling_dir=sampling_dir,
+        checkpoints_dir=checkpoints_dir,
         selected_examples_path=selected_examples_path,
+        sequence_cluster_assignments_path=(
+            sequence_cluster_assignments_path),
+        training_history_path=training_history_path,
         predictions_path=predictions_path,
         train_metrics_path=train_metrics_path,
         val_metrics_path=val_metrics_path,
@@ -841,6 +1173,7 @@ def initialize_output_files(
         run_dir / filename
         for filename in (
             PREDICTIONS_FILENAME,
+            TRAINING_HISTORY_FILENAME,
             TRAIN_METRICS_FILENAME,
             VAL_METRICS_FILENAME,
             TEST_METRICS_FILENAME,
@@ -880,6 +1213,8 @@ def initialize_output_files(
     ]
 
     if not args.append_results:
+        if output_paths.checkpoints_dir.exists():
+            shutil.rmtree(output_paths.checkpoints_dir)
         reset_output_files(
             metric_prediction_paths
             + summary_paths
@@ -1051,6 +1386,24 @@ def log_model_outputs(
         (output_paths.train_val_png_path, "train/validation metric PNG"),
         (output_paths.train_test_plot_path, "train/test metric plot"),
         (output_paths.train_test_png_path, "train/test metric PNG"),
+        (
+            output_paths.training_history_path
+            if output_paths.training_history_path.exists()
+            else None,
+            "training history",
+        ),
+        (
+            output_paths.checkpoints_dir
+            if output_paths.checkpoints_dir.exists()
+            else None,
+            "model checkpoints",
+        ),
+        (
+            output_paths.sequence_cluster_assignments_path
+            if output_paths.sequence_cluster_assignments_path.exists()
+            else None,
+            "sequence-cluster assignments",
+        ),
     )
     artifact_lines = [
         f"Saved {description} to: {path}"
@@ -1109,6 +1462,36 @@ def main() -> None:
             protein_pairs,
             sequences,
         )
+    sequence_cluster_mapping = None
+    sequence_cluster_assignments = None
+    args.sequence_cluster_metadata = None
+    if args.sequence_clusters is not None:
+        with performance.stage("load_sequence_clusters"):
+            sequence_clusters_path = Path(args.sequence_clusters)
+            cluster_grouping_applied = args.effective_split_strategy in {
+                C2_SPLIT_STRATEGY,
+                C3_SPLIT_STRATEGY,
+            }
+            required_proteins = (
+                protein_ids_in_pairs(eligible_protein_pairs)
+                if cluster_grouping_applied
+                else None
+            )
+            (
+                sequence_cluster_mapping,
+                sequence_cluster_assignments,
+                cluster_counts,
+            ) = load_sequence_cluster_mapping(
+                mapping_path=sequence_clusters_path,
+                required_proteins=required_proteins,
+            )
+            args.sequence_cluster_metadata = {
+                "path": str(sequence_clusters_path),
+                "file_size_bytes": sequence_clusters_path.stat().st_size,
+                "file_sha256": file_sha256(sequence_clusters_path),
+                "applied_to_split": cluster_grouping_applied,
+                **cluster_counts,
+            }
 
     # Select the complete benchmark cohort before constructing any split.
     with performance.stage("sample_cohort"):
@@ -1128,7 +1511,11 @@ def main() -> None:
 
     # Split into train/validation/test sets
     with performance.stage("split_cohort"):
-        train_df, val_df, test_df = load_or_make_split(protein_pairs, args)
+        train_df, val_df, test_df = load_or_make_split(
+            protein_pairs,
+            args,
+            protein_to_group=sequence_cluster_mapping,
+        )
         args.has_validation_split = val_df is not None and not val_df.empty
         args.evaluate_test_metrics = (
             args.eval_test_set or not args.has_validation_split)
@@ -1174,6 +1561,8 @@ def main() -> None:
                 split_metadata=split_metadata,
                 output_paths=output_paths,
                 append_results=args.append_results,
+                sequence_cluster_assignments=(
+                    sequence_cluster_assignments),
             )
             initialize_output_files(args, output_paths)
             append_invocation_log(

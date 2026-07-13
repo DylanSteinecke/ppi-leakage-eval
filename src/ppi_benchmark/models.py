@@ -1,9 +1,10 @@
 """
 Model construction, scoring, and metrics for PPI prediction.
 
-This module owns classifier factories, baseline estimators, score extraction,
-and metric calculation. Future additions should include new sklearn models,
-calibration, threshold tuning, neural-model adapters, and expanded metrics.
+This module owns sklearn classifier factories, baseline estimators, score
+extraction, and metric calculation. Framework adapters live in ``backends``.
+Future additions should include new sklearn models, calibration, threshold
+tuning, and expanded metrics.
 """
 
 from typing import Any
@@ -22,7 +23,15 @@ from sklearn.svm import LinearSVC
 
 
 BASELINE_CLASSIFIER_CHOICES = ("always_positive", "always_negative")
-LEARNED_CLASSIFIER_CHOICES = ("logistic", "linear_svm", "sgd_logistic")
+SKLEARN_LEARNED_CLASSIFIER_CHOICES = (
+    "logistic",
+    "linear_svm",
+    "sgd_logistic",
+)
+TORCH_CLASSIFIER_CHOICES = ("torch_mlp",)
+LEARNED_CLASSIFIER_CHOICES = (
+    SKLEARN_LEARNED_CLASSIFIER_CHOICES + TORCH_CLASSIFIER_CHOICES
+)
 CLASSIFIER_CHOICES = LEARNED_CLASSIFIER_CHOICES + BASELINE_CLASSIFIER_CHOICES
 
 
@@ -148,6 +157,18 @@ def get_scores_and_predictions(
         y_score = y_pred.astype(float)
 
     return y_score, y_pred
+
+
+def default_decision_threshold(model: Any) -> float:
+    """Return the estimator's conventional hard-decision threshold."""
+    if hasattr(model, "predict_proba"):
+        threshold = 0.5
+    elif hasattr(model, "decision_function"):
+        threshold = 0.0
+    else:
+        threshold = 0.5
+
+    return threshold
 
 
 def get_metrics(

@@ -43,6 +43,7 @@ MANIFEST_COLUMNS = (
     "actual_val_size",
     "actual_test_size",
     "split_seed",
+    "model_seed",
     "num_reruns",
     "features_run",
     "classifiers_run",
@@ -60,6 +61,10 @@ MANIFEST_COLUMNS = (
     "n_pairs_in_sampled_cohort",
     "sampling_seed",
     "sampling_applied",
+    "sequence_clusters_path",
+    "sequence_clusters_file_sha256",
+    "sequence_cluster_grouping_applied",
+    "n_sequence_clusters",
     "n_dropped_pairs",
     "eval_test_set",
     "has_validation_split",
@@ -87,6 +92,10 @@ SUMMARY_CONTEXT_COLUMNS = (
     "n_pairs_in_sampled_cohort",
     "sampling_seed",
     "sampling_applied",
+    "sequence_clusters_path",
+    "sequence_clusters_file_sha256",
+    "sequence_cluster_grouping_applied",
+    "n_sequence_clusters",
     "n_dropped_pairs",
 )
 DIAGNOSTIC_COLUMNS = (
@@ -281,6 +290,7 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
 
     resolved_args = metadata.get("resolved_args", {})
     sampling = metadata.get("sampling") or {}
+    sequence_clusters = metadata.get("sequence_clusters") or {}
     row = {
         "run_dir": str(run_dir),
         "execution_id": metadata.get("execution_id", ""),
@@ -295,6 +305,7 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         "actual_val_size": metadata.get("actual_val_size", ""),
         "actual_test_size": metadata.get("actual_test_size", ""),
         "split_seed": metadata.get("split_seed", ""),
+        "model_seed": metadata.get("model_seed", ""),
         "num_reruns": resolved_args.get("num_reruns", ""),
         "features_run": csv_value(features_run),
         "classifiers_run": csv_value(classifiers_run),
@@ -314,6 +325,14 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
             "n_pairs_in_sampled_cohort", ""),
         "sampling_seed": sampling.get("seed", ""),
         "sampling_applied": sampling.get("applied", ""),
+        "sequence_clusters_path": metadata.get(
+            "sequence_clusters_path", ""),
+        "sequence_clusters_file_sha256": metadata.get(
+            "sequence_clusters_file_sha256", ""),
+        "sequence_cluster_grouping_applied": sequence_clusters.get(
+            "applied_to_split", ""),
+        "n_sequence_clusters": sequence_clusters.get(
+            "n_sequence_clusters", ""),
         "n_dropped_pairs": metadata.get("n_dropped_pairs", ""),
         "eval_test_set": metadata.get("eval_test_set", ""),
         "has_validation_split": resolved_args.get("has_validation_split", ""),

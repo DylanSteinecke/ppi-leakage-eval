@@ -10,12 +10,21 @@ conda activate ppi
 python -m pip install -e .
 ```
 
+Install the optional Torch backend with:
+
+```bash
+python -m pip install -e '.[torch]'
+```
+
 This provides `ppi-train`, `ppi-prepare`, `ppi-aggregate`, and
 `ppi-make-toy-data`.
 
 The installable implementation lives under `src/ppi_benchmark/`. Command-line
 orchestration is in `cli/`, dataset preparation and source-specific loaders are
-in `datasets/`, and reusable benchmark modules are at the package root.
+in `datasets/`, model-framework adapters are in `backends/`, and reusable
+benchmark modules are at the package root. The runner uses a backend-neutral
+fit/predict contract. Classical classifiers retain the existing sklearn
+factory and scoring path, while `torch_mlp` exercises the batched Torch path.
 
 ## Tests
 Run the lightweight regression suite with:
@@ -65,13 +74,25 @@ The runner profiles are:
 Both profiles include the constant baselines and random/C1/C2/C3 splits. Set
 `MAX_PAIRS` or `N_SPLIT_TRIALS` explicitly to override a profile default. An
 explicitly empty `MAX_PAIRS` uses the entire eligible cohort. `SAMPLING_SEED`
-controls cohort selection independently of the data-split seed. The grid
-defaults to a genuine 80/10/10 train/validation/test split. Test remains held
-out unless `--eval-test-set` is supplied. After aggregation, the current grid
-invocation is summarized in
+controls cohort selection independently of the data-split seed. `SPLIT_SEEDS`
+accepts a quoted, space-separated list and creates a separate run directory for
+every split strategy/seed combination. `MODEL_SEED` controls the first model
+seed; `NUM_RERUNS` advances model seeds within each fixed split. For example:
+
+```bash
+SPLIT_SEEDS="0 1 2 3 4" MODEL_SEED=100 NUM_RERUNS=3 \
+    PREPARE_YEAST_DATA=0 \
+    bash scripts/run_yeast_biogrid_ppi_example.sh
+```
+
+The grid defaults to a genuine 80/10/10 train/validation/test split. Test
+remains held out unless `--eval-test-set` is supplied. After aggregation, the
+current grid invocation is summarized in
 `benchmark_train_val_f1.png`: each split strategy has its own panel, marker
 positions show absolute F1, and the train-to-validation arrow shows the
-generalization gap. To reuse already prepared yeast files, add
+generalization gap. Strategy panels are stacked vertically on one shared F1
+scale, so better or worse performance can be compared by horizontal position.
+To reuse already prepared yeast files, add
 `PREPARE_YEAST_DATA=0` before the command.
 
 For example, run the exhaustive model grid on a bounded cohort with:
@@ -126,6 +147,80 @@ shape/density/storage statistics, and per-model fit/evaluation timings and
 solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
 `evaluation_seconds`, and `solver_iterations` columns.
 
+## Validation-selected thresholds
+
+Learned models select their binary decision threshold by maximizing F1 on the
+validation split. That one threshold is then used for train, validation, and,
+when explicitly enabled, test metrics; test labels are never consulted during
+selection. Baselines retain their fixed behavior. Use
+`--threshold-selection fixed` to retain the backend default of 0.5 for
+probabilities or 0.0 for decision scores.
+
+The selected/default thresholds, selection strategy, and validation F1 are
+recorded in every metric row and in each `performance.jsonl` model record;
+test prediction rows also carry the selected threshold and strategy. Runs
+without a validation split fall back to the fixed backend threshold.
+
+## Batched Torch MLP
+
+`torch_mlp` is a small one-hidden-layer classifier over the same sparse k-mer
+pair matrices used by the sklearn models. It slices sparse rows by batch and
+densifies only the current batch for training, validation, and prediction. The
+default 80/10/10 split therefore supports validation-AUPRC early stopping while
+keeping test held out unless `--eval-test-set` is requested.
+
+```bash
+ppi-train \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --max-pairs 10000 \
+    --features tfidf \
+    --classifier torch_mlp \
+    --torch-max-epochs 50 \
+    --torch-batch-size 256 \
+    --torch-hidden-dim 64 \
+    --torch-patience 5 \
+    --run-dir results/yeast_torch_mlp
+```
+
+Epoch losses, validation AUPRC, and batch counts are written to
+`training_history.csv`. The best-AUPRC weights are restored before benchmark
+evaluation. Each run writes both `*.best.pt` (inference weights) and
+`*.last.pt` (model, optimizer, RNG, history, and early-stopping state) below
+`checkpoints/<execution-id>/`. Per-model performance records report both paths,
+the device, completed epochs, optimizer steps, best epoch, early-stopping
+status, and the largest batch ever densified.
+
+Resume an interrupted run from its last checkpoint by keeping the data, split,
+model seed, and Torch configuration unchanged while increasing the total epoch
+target:
+
+```bash
+ppi-train \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --features tfidf \
+    --classifier torch_mlp \
+    --split-seed 0 \
+    --model-seed 0 \
+    --torch-max-epochs 100 \
+    --torch-resume-from results/yeast_torch_mlp/checkpoints/<execution-id>/tfidf__torch_mlp__run_1.last.pt \
+    --run-dir results/yeast_torch_mlp_resumed
+```
+
+`--torch-max-epochs` is the total target, not the number of additional epochs.
+Resume validates the model seed, training configuration, and exact sparse
+train/validation data signatures before restoring optimizer and RNG state.
+
+To add the model to every feature set in an existing laptop or exhaustive
+benchmark grid without changing that profile's defaults:
+
+```bash
+INCLUDE_TORCH_MLP=1 PREPARE_YEAST_DATA=0 \
+    bash scripts/run_yeast_biogrid_ppi_example.sh \
+    --torch-max-epochs 30 --torch-batch-size 256
+```
+
 ## Leakage-aware splits
 
 Use `--split-strategy c1`, `c2`, or `c3` to select a standard PPI
@@ -143,3 +238,28 @@ runner evaluates 100 deterministic candidate group assignments by default;
 adjust this with `--n-split-trials`.
 Detailed retention, class-balance, degree, overlap, and invariant diagnostics
 are written under `split_audit` in `split_metadata.json`.
+
+For homology-aware C2/C3 splits, provide a precomputed sequence-cluster CSV:
+
+```csv
+protein_id,cluster_id
+P04387,cluster_0001
+P12345,cluster_0001
+Q99999,cluster_0002
+```
+
+```bash
+ppi-train \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --sequence-clusters processed/biogrid_yeast_physical/sequence_clusters.csv \
+    --split-strategy c3 \
+    --run-dir results/yeast_homology_c3
+```
+
+Every eligible cohort protein must have exactly one mapping; coverage is
+validated before optional cohort sampling. C2/C3 then treat each cluster as an
+indivisible group. The normalized mapping is copied to
+`splits/sequence_cluster_assignments.csv`, and its path, hash, counts, and split
+audit are recorded in `split_metadata.json`. The pipeline consumes cluster
+assignments but does not run a clustering tool itself.
