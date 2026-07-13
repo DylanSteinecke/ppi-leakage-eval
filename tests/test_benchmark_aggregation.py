@@ -222,15 +222,30 @@ def test_aggregate_benchmark_results_reads_real_cli_run(
     assert "diagnostics_n_shared_proteins_train_test" in summary_df
 
 
-def test_runner_script_has_valid_syntax_and_benchmark_knobs():
-    runner_path = REPO_ROOT / "scripts" / "run_all_train_test_ppi_pred.sh"
-    subprocess.run(["bash", "-n", str(runner_path)], check=True)
+def test_example_runners_have_valid_syntax_and_use_installed_commands():
+    scripts_dir = REPO_ROOT / "scripts"
+    runner_paths = (
+        scripts_dir / "run_yeast_biogrid_ppi_example.sh",
+        scripts_dir / "run_toy_ppi_example.sh",
+        scripts_dir / "_run_ppi_benchmark_grid.sh",
+    )
+    for runner_path in runner_paths:
+        subprocess.run(["bash", "-n", str(runner_path)], check=True)
 
-    runner_text = runner_path.read_text(encoding="utf-8")
-    assert 'VAL_SIZE="${VAL_SIZE:-0.0}"' in runner_text
-    assert "date -u +%Y-%m-%d_%H-%M-%S" in runner_text
-    assert '--val-size "$VAL_SIZE"' in runner_text
-    assert "scripts/aggregate_benchmark_results.py" in runner_text
-    assert 'YEAST_EXAMPLE="${YEAST_EXAMPLE:-0}"' in runner_text
-    assert "scripts/prepare_ppi_dataset.py biogrid" in runner_text
-    assert '--protein-metadata "$PROTEIN_METADATA"' in runner_text
+    grid_text = (scripts_dir / "_run_ppi_benchmark_grid.sh").read_text(
+        encoding="utf-8"
+    )
+    yeast_text = (scripts_dir / "run_yeast_biogrid_ppi_example.sh").read_text(
+        encoding="utf-8"
+    )
+    toy_text = (scripts_dir / "run_toy_ppi_example.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'VAL_SIZE="${VAL_SIZE:-0.0}"' in grid_text
+    assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
+    assert '--val-size "$VAL_SIZE"' in grid_text
+    assert "ppi-train" in grid_text
+    assert "ppi-aggregate" in grid_text
+    assert "ppi-prepare biogrid" in yeast_text
+    assert "ppi-make-toy-data" in toy_text
+    assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text

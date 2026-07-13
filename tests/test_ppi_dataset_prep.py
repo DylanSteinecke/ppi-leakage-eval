@@ -1,8 +1,8 @@
 import gzip
 import json
 import math
+import shutil
 import subprocess
-import sys
 import zipfile
 from itertools import combinations, product
 from pathlib import Path
@@ -28,7 +28,7 @@ from ppi_benchmark.datasets.common import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PREP_SCRIPT = REPO_ROOT / "scripts" / "prepare_ppi_dataset.py"
+PREP_COMMAND = "ppi-prepare"
 
 
 def write_text(path, text):
@@ -54,7 +54,13 @@ def run_prep_cli(*args, check=True):
     """
     Run the dataset-prep CLI in a subprocess.
     """
-    command = [sys.executable, str(PREP_SCRIPT), *map(str, args)]
+    prep_command = shutil.which(PREP_COMMAND)
+    if prep_command is None:
+        raise AssertionError(
+            "ppi-prepare is not installed. Run `python -m pip install -e .` "
+            "before running the test suite."
+        )
+    command = [prep_command, *map(str, args)]
     completed_process = subprocess.run(
         command,
         cwd=REPO_ROOT,

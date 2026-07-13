@@ -16,8 +16,8 @@ when they are useful for auditability, grouping, or cross-run comparison.
 ## When Adding or Changing a CLI Flag
 
 - Update `argument_parser()` in `src/ppi_benchmark/cli/train.py`.
-- Decide whether the flag should also be exposed through
-  `scripts/run_all_train_test_ppi_pred.sh` as an environment variable.
+- Decide whether the flag should also be exposed through the relevant example
+  runner under `scripts/` as an environment variable.
 - Confirm the flag appears correctly in `resolved_args` inside
   `split_metadata.json`.
 - Add or update top-level `split_metadata.json` fields only if the flag is
@@ -36,7 +36,7 @@ should remain curated.
 
 ## When Adding a Runner Environment Variable
 
-- Update `scripts/run_all_train_test_ppi_pred.sh`.
+- Update the relevant example runner under `scripts/`.
 - Keep env vars documented near the top of the script.
 - Forward the value to the Python CLI if it changes model, split, output, or
   aggregation behavior.
@@ -59,7 +59,7 @@ Current runner env vars include:
 - `EXECUTION_ID`
 - `RUN_STAMP`
 - `AGGREGATE_RESULTS`
-- `YEAST_EXAMPLE`
+- `GENERATE_TOY_DATA`
 - `YEAST_DATASET_NAME`
 - `PREPARE_YEAST_DATA`
 - `BIOGRID_ARCHIVE`
@@ -77,7 +77,7 @@ Current runner env vars include:
 - Add metadata fields if the strategy has strategy-specific diagnostics.
 - Add or update split diagnostics if the strategy changes leakage assumptions.
 - Add tests for generated splits, validation splits, and failure cases.
-- Add the strategy to `scripts/run_all_train_test_ppi_pred.sh` only if it
+- Add the strategy to `scripts/_run_ppi_benchmark_grid.sh` only if it
   should be part of the default benchmark grid.
 
 ## When Adding a Split Diagnostic
@@ -165,12 +165,12 @@ should not fail runs unless a future explicit validation mode is added.
 - Ensure aggregation reads from `split_metadata.json` or `invocations.jsonl`,
   not from a second source of truth.
 - Add tests for aggregation output columns.
-- Confirm `scripts/run_all_train_test_ppi_pred.sh` still calls aggregation
+- Confirm `scripts/_run_ppi_benchmark_grid.sh` still calls aggregation
   correctly when `AGGREGATE_RESULTS=1`.
 
 ## When Changing the Shell Runner
 
-- Update `scripts/run_all_train_test_ppi_pred.sh`.
+- Update `scripts/_run_ppi_benchmark_grid.sh`.
 - Keep environment variables documented near the top of the script.
 - Ensure extra user args still pass through to the Python CLI.
 - Ensure run directories remain stable and timestamped.

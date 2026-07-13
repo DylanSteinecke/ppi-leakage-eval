@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -7,8 +8,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS_DIR = REPO_ROOT / "scripts"
-TRAIN_SCRIPT = SCRIPTS_DIR / "train_test_ppi_pred.py"
+TRAIN_COMMAND = "ppi-train"
 
 
 @pytest.fixture
@@ -48,7 +48,13 @@ def run_cli(tmp_path):
     def _run_cli(*args, check=True):
         env = os.environ.copy()
         env["MPLCONFIGDIR"] = str(tmp_path / "mplconfig")
-        command = [sys.executable, str(TRAIN_SCRIPT), *map(str, args)]
+        train_command = shutil.which(TRAIN_COMMAND)
+        if train_command is None:
+            raise AssertionError(
+                "ppi-train is not installed. Run `python -m pip install -e .` "
+                "before running the test suite."
+            )
+        command = [train_command, *map(str, args)]
         completed_process = subprocess.run(
             command,
             cwd=REPO_ROOT,

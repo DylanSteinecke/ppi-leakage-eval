@@ -1103,5 +1103,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-    # python scripts/make_toy_data.py

@@ -11,9 +11,7 @@ python -m pip install -e .
 ```
 
 This provides `ppi-train`, `ppi-prepare`, `ppi-aggregate`, and
-`ppi-make-toy-data`. Existing commands such as
-`python scripts/train_test_ppi_pred.py` remain supported as compatibility
-entry points.
+`ppi-make-toy-data`.
 
 The installable implementation lives under `src/ppi_benchmark/`. Command-line
 orchestration is in `cli/`, dataset preparation and source-specific loaders are
@@ -29,6 +27,17 @@ python -m pytest
 For connected-change checklists, see
 [`docs/change_checklists.md`](docs/change_checklists.md).
 
+## Run the toy PPI example
+
+The toy runner generates a synthetic dataset, then runs the benchmark grid:
+
+```bash
+conda activate ppi
+bash scripts/run_toy_ppi_example.sh --no-metrics-plots
+```
+
+Set `GENERATE_TOY_DATA=0` to reuse the existing files under `processed/`.
+
 ## Run the yeast BioGRID example
 
 The local UniProt FASTA uses headers such as `sp|P04387|GAL80_YEAST`, while
@@ -38,7 +47,7 @@ small sparse benchmark:
 
 ```bash
 conda activate ppi
-YEAST_EXAMPLE=1 bash scripts/run_all_train_test_ppi_pred.sh --no-metrics-plots
+bash scripts/run_yeast_biogrid_ppi_example.sh --no-metrics-plots
 ```
 
 Prepared data are written under `processed/biogrid_yeast_physical/` as

@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -8,11 +9,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
-LEGACY_SCRIPTS = (
-    "train_test_ppi_pred.py",
-    "prepare_ppi_dataset.py",
-    "aggregate_benchmark_results.py",
-    "make_toy_data.py",
+CLI_COMMANDS = (
+    "ppi-train",
+    "ppi-prepare",
+    "ppi-aggregate",
+    "ppi-make-toy-data",
 )
 CLI_MODULES = (
     "ppi_benchmark.cli.train",
@@ -22,10 +23,14 @@ CLI_MODULES = (
 )
 
 
-@pytest.mark.parametrize("script_name", LEGACY_SCRIPTS)
-def test_legacy_script_entry_points_still_work(script_name):
+@pytest.mark.parametrize("command", CLI_COMMANDS)
+def test_installed_cli_entry_points_work(command):
+    command_path = shutil.which(command)
+    assert command_path is not None, (
+        f"{command} is not installed; run `python -m pip install -e .` first."
+    )
     completed_process = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / script_name), "--help"],
+        [command_path, "--help"],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
