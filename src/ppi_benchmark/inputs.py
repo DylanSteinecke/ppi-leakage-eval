@@ -286,15 +286,7 @@ def load_split_column(
     """
     Load train/validation/test labels from a provided split column.
     """
-    if split_col not in pairs.columns:
-        raise ValueError(f"split_col '{split_col}' is not in pairs.csv.")
-
-    split_values = pairs[split_col].astype(str).str.strip().str.lower()
-    unexpected_values = sorted(set(split_values) - EXPECTED_SPLIT_VALUES)
-    if unexpected_values:
-        raise ValueError(
-            f"split_col must contain only 'train', 'val', and 'test'. "
-            f"Found: {unexpected_values}")
+    split_values = normalized_split_values(pairs, split_col)
 
     train_df = pairs[split_values == TRAIN_SPLIT].copy()
     val_df = pairs[split_values == VAL_SPLIT].copy()
@@ -309,6 +301,27 @@ def load_split_column(
         val_df = None
 
     return train_df, val_df, test_df
+
+
+def normalized_split_values(
+        pairs: pd.DataFrame, split_col: str,
+    ) -> pd.Series:
+    """
+    Validate and normalize a provided split column.
+
+    This helper can run before cohort sampling so invalid values cannot be
+    hidden merely because their rows were not selected.
+    """
+    if split_col not in pairs.columns:
+        raise ValueError(f"split_col '{split_col}' is not in pairs.csv.")
+
+    split_values = pairs[split_col].astype(str).str.strip().str.lower()
+    unexpected_values = sorted(set(split_values) - EXPECTED_SPLIT_VALUES)
+    if unexpected_values:
+        raise ValueError(
+            f"split_col must contain only 'train', 'val', and 'test'. "
+            f"Found: {unexpected_values}")
+    return split_values
 
 
 def log_split_summary(

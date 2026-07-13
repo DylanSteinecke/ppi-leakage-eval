@@ -54,6 +54,9 @@ MANIFEST_COLUMNS = (
     "n_test",
     "n_input_pairs_before_filtering",
     "n_pairs_after_filtering",
+    "n_pairs_in_sampled_cohort",
+    "sampling_seed",
+    "sampling_applied",
     "n_dropped_pairs",
     "eval_test_set",
     "has_validation_split",
@@ -76,6 +79,9 @@ SUMMARY_CONTEXT_COLUMNS = (
     "n_invocations",
     "n_input_pairs_before_filtering",
     "n_pairs_after_filtering",
+    "n_pairs_in_sampled_cohort",
+    "sampling_seed",
+    "sampling_applied",
     "n_dropped_pairs",
 )
 DIAGNOSTIC_COLUMNS = (
@@ -256,6 +262,7 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         classifiers_run = fallback_arg_values(metadata, "classifiers")
 
     resolved_args = metadata.get("resolved_args", {})
+    sampling = metadata.get("sampling") or {}
     row = {
         "run_dir": str(run_dir),
         "execution_id": metadata.get("execution_id", ""),
@@ -285,6 +292,10 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         "n_input_pairs_before_filtering": metadata.get(
             "n_input_pairs_before_filtering", ""),
         "n_pairs_after_filtering": metadata.get("n_pairs_after_filtering", ""),
+        "n_pairs_in_sampled_cohort": metadata.get(
+            "n_pairs_in_sampled_cohort", ""),
+        "sampling_seed": sampling.get("seed", ""),
+        "sampling_applied": sampling.get("applied", ""),
         "n_dropped_pairs": metadata.get("n_dropped_pairs", ""),
         "eval_test_set": metadata.get("eval_test_set", ""),
         "has_validation_split": resolved_args.get("has_validation_split", ""),

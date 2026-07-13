@@ -33,6 +33,7 @@ from ..features import (
 from ..inputs import (
     PROVIDED_SPLIT_STRATEGY,
     load_or_make_split,
+    normalized_split_values,
     prepare_input_data,
     PROTEIN_DISJOINT_SPLIT_STRATEGIES,
     RANDOM_SPLIT_STRATEGY,
@@ -58,6 +59,13 @@ from ..results import (
     reset_output_file,
     summarize_metrics,
     write_dataframe_threadsafe,
+)
+from ..sampling import (
+    SAMPLING_DIRNAME,
+    SELECTED_EXAMPLES_FILENAME,
+    SamplingSpec,
+    select_examples,
+    write_selection_manifest,
 )
 from ..splits import (
     add_source_row_index,
@@ -209,6 +217,25 @@ def argument_parser() -> argparse.Namespace:
         default=None,
         help="Optional NCBI taxonomy ID applied to every FASTA record.")
 
+    # Whole-cohort sampling args
+    sampling_group = parser.add_argument_group("Cohort sampling")
+    sampling_size_group = sampling_group.add_mutually_exclusive_group()
+    sampling_size_group.add_argument(
+        "--max-pairs", type=positive_int, default=None,
+        help=(
+            "Maximum number of eligible pairs retained before splitting. "
+            "Sampling is deterministic and stratified by label."
+        ))
+    sampling_size_group.add_argument(
+        "--sample-fraction", type=proportion, default=None,
+        help=(
+            "Fraction of eligible pairs retained before splitting. Sampling "
+            "is deterministic and stratified by label."
+        ))
+    sampling_group.add_argument(
+        "--sampling-seed", type=int, default=0,
+        help="Seed for cohort sampling, independent of the split seed.")
+
     # Output data args
     output_group = parser.add_argument_group("Outputs")
     output_group.add_argument(
@@ -301,6 +328,8 @@ def argument_parser() -> argparse.Namespace:
     args.n_discarded_edges = 0
     args.discarded_edge_fraction = 0.0
     args.split_audit = None
+    args.sampling_requested = (
+        args.max_pairs is not None or args.sample_fraction is not None)
 
     try:
         args.features = normalize_feature_types(args.features)
@@ -320,6 +349,67 @@ def configure_logging(args: argparse.Namespace) -> None:
     )
 
 
+def sample_ppi_cohort(
+        protein_pairs: pd.DataFrame, args: argparse.Namespace,
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, dict[str, Any]]:
+    """
+    Select the whole PPI cohort before constructing benchmark splits.
+
+    Labels are always strata. For provided splits, the normalized split value
+    is included as a joint stratum so every split/class combination is retained.
+    """
+    sampling_strata = pd.DataFrame({
+        "label": protein_pairs["label"].to_numpy(),
+    })
+    if args.split_col:
+        sampling_strata.insert(
+            0,
+            "split",
+            normalized_split_values(protein_pairs, args.split_col).to_numpy(),
+        )
+        minimum_per_stratum = 1
+    else:
+        n_requested_splits = 3 if args.val_size > 0.0 else 2
+        minimum_per_stratum = n_requested_splits
+
+    sampling_result = select_examples(
+        example_ids=protein_pairs[SOURCE_ROW_INDEX_COLUMN],
+        spec=SamplingSpec(
+            max_examples=args.max_pairs,
+            fraction=args.sample_fraction,
+            seed=args.sampling_seed,
+            minimum_per_stratum=minimum_per_stratum,
+        ),
+        strata=sampling_strata,
+    )
+    selected_pairs = protein_pairs.iloc[
+        sampling_result.selected_positions
+    ].copy()
+
+    selection_manifest = None
+    if args.sampling_requested:
+        manifest_columns = [SOURCE_ROW_INDEX_COLUMN]
+        if "pair_id" in selected_pairs.columns:
+            manifest_columns.append("pair_id")
+        selection_manifest = selected_pairs[manifest_columns].copy()
+        selection_manifest.insert(
+            1,
+            "sampling_rank",
+            sampling_result.sampling_ranks,
+        )
+        for column in sampling_strata.columns:
+            values = sampling_strata.iloc[
+                sampling_result.selected_positions
+            ][column].to_numpy()
+            selection_manifest[column] = values
+        selection_manifest = selection_manifest.sort_values(
+            SOURCE_ROW_INDEX_COLUMN,
+        ).reset_index(drop=True)
+
+    selected_pairs = selected_pairs.reset_index(drop=True)
+    return selected_pairs, selection_manifest, sampling_result.metadata
+
+
 ####################
 # Pipeline helpers #
 ####################
@@ -331,6 +421,8 @@ class OutputPaths:
     run_dir: Path
     plots_dir: Path
     splits_dir: Path
+    sampling_dir: Path
+    selected_examples_path: Path
     predictions_path: Path | None
     train_metrics_path: Path
     val_metrics_path: Path | None
@@ -604,6 +696,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     run_dir = Path(args.run_dir)
     plots_dir = run_dir / PLOTS_DIRNAME
     splits_dir = run_dir / SPLITS_DIRNAME
+    sampling_dir = run_dir / SAMPLING_DIRNAME
     run_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
     splits_dir.mkdir(parents=True, exist_ok=True)
@@ -615,6 +708,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     split_assignments_path = splits_dir / SPLIT_ASSIGNMENTS_FILENAME
     dropped_pairs_path = splits_dir / DROPPED_PAIRS_FILENAME
     split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
+    selected_examples_path = sampling_dir / SELECTED_EXAMPLES_FILENAME
     invocations_path = run_dir / INVOCATIONS_FILENAME
     train_summary_path = run_dir / TRAIN_SUMMARY_FILENAME
     all_val_summary_path = run_dir / VAL_SUMMARY_FILENAME
@@ -665,6 +759,8 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         run_dir=run_dir,
         plots_dir=plots_dir,
         splits_dir=splits_dir,
+        sampling_dir=sampling_dir,
+        selected_examples_path=selected_examples_path,
         predictions_path=predictions_path,
         train_metrics_path=train_metrics_path,
         val_metrics_path=val_metrics_path,
@@ -959,9 +1055,24 @@ def main() -> None:
         taxon_id=args.taxon_id,
     )
     sequences = fasta_data.sequences
-    protein_pairs, dropped_pairs = prepare_input_data(
+    eligible_protein_pairs, dropped_pairs = prepare_input_data(
         protein_pairs,
         sequences,
+    )
+
+    # Select the complete benchmark cohort before constructing any split.
+    (
+        protein_pairs,
+        selection_manifest,
+        sampling_metadata,
+    ) = sample_ppi_cohort(eligible_protein_pairs, args)
+    LOGGER.info(
+        "Cohort sampling: eligible pairs=%s; selected pairs=%s; "
+        "excluded pairs=%s; applied=%s",
+        sampling_metadata["n_eligible"],
+        sampling_metadata["n_selected"],
+        sampling_metadata["n_excluded"],
+        sampling_metadata["applied"],
     )
 
     # Split into train/validation/test sets
@@ -974,6 +1085,10 @@ def main() -> None:
     # Prepare to run the models
     execution_id = args.execution_id or uuid.uuid4().hex
     output_paths = prepare_outputs(args)
+    sampling_metadata["selected_examples_path"] = (
+        str(output_paths.selected_examples_path)
+        if selection_manifest is not None else None
+    )
     split_assignments = make_split_assignments(
         train_df=train_df,
         val_df=val_df,
@@ -989,10 +1104,17 @@ def main() -> None:
         test_df=test_df,
         execution_id=execution_id,
         n_input_pairs_before_filtering=n_input_pairs_before_filtering,
+        eligible_protein_pairs=eligible_protein_pairs,
+        sampling_metadata=sampling_metadata,
         protein_taxa=fasta_data.taxon_ids,
         protein_metadata_path=protein_metadata_path,
     )
     try:
+        write_selection_manifest(
+            selection_manifest=selection_manifest,
+            output_path=output_paths.selected_examples_path,
+            append_results=args.append_results,
+        )
         write_split_artifacts(
             split_assignments=split_assignments,
             dropped_pairs=dropped_pairs,

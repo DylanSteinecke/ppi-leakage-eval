@@ -18,6 +18,8 @@ K="${K:-3}"
 GENERATE_TOY_DATA="${GENERATE_TOY_DATA:-1}"
 
 if [[ "$GENERATE_TOY_DATA" == "1" ]]; then
+    mkdir -p "$(dirname "$PAIRS")" "$(dirname "$FASTA")" \
+        "$(dirname "$PROTEIN_METADATA")"
     ppi-make-toy-data \
         --pairs-out "$PAIRS" \
         --fasta-out "$FASTA" \

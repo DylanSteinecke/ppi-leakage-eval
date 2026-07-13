@@ -266,6 +266,8 @@ def compute_split_metadata(
         dropped_pairs: pd.DataFrame, train_df: pd.DataFrame,
         val_df: pd.DataFrame | None, test_df: pd.DataFrame,
         execution_id: str, n_input_pairs_before_filtering: int,
+        eligible_protein_pairs: pd.DataFrame | None = None,
+        sampling_metadata: dict[str, Any] | None = None,
         protein_taxa: dict[str, str] | None = None,
         protein_metadata_path: str | Path | None = None,
     ) -> dict[str, Any]:
@@ -281,7 +283,10 @@ def compute_split_metadata(
     actual_test_size = len(test_df) / n_split_pairs
     target_test_size = 1.0 - args.train_size - args.val_size
 
-    total_proteins = protein_ids_in_pairs(protein_pairs)
+    if eligible_protein_pairs is None:
+        eligible_protein_pairs = protein_pairs
+    eligible_proteins = protein_ids_in_pairs(eligible_protein_pairs)
+    cohort_proteins = protein_ids_in_pairs(protein_pairs)
     train_proteins = split_protein_ids(train_df)
     val_proteins = split_protein_ids(val_df)
     test_proteins = split_protein_ids(test_df)
@@ -312,8 +317,10 @@ def compute_split_metadata(
         "pairs_file_sha256": file_sha256(pairs_path),
         "fasta_file_sha256": file_sha256(fasta_path),
         "n_input_pairs_before_filtering": n_input_pairs_before_filtering,
-        "n_pairs_after_filtering": len(protein_pairs),
+        "n_pairs_after_filtering": len(eligible_protein_pairs),
+        "n_pairs_in_sampled_cohort": len(protein_pairs),
         "n_dropped_pairs": len(dropped_pairs),
+        "sampling": sampling_metadata,
         "split_strategy": args.effective_split_strategy,
         "split_name": args.split_name,
         "split_col": args.split_col,
@@ -328,11 +335,14 @@ def compute_split_metadata(
         "actual_train_size": actual_train_size,
         "actual_val_size": actual_val_size,
         "actual_test_size": actual_test_size,
-        "label_counts_total_after_filtering": label_counts(protein_pairs),
+        "label_counts_total_after_filtering": label_counts(
+            eligible_protein_pairs),
+        "label_counts_sampled_cohort": label_counts(protein_pairs),
         "label_counts_train": label_counts(train_df),
         "label_counts_val": label_counts(val_df),
         "label_counts_test": label_counts(test_df),
-        "n_unique_proteins_total_after_filtering": len(total_proteins),
+        "n_unique_proteins_total_after_filtering": len(eligible_proteins),
+        "n_unique_proteins_sampled_cohort": len(cohort_proteins),
         "n_unique_proteins_train": len(train_proteins),
         "n_unique_proteins_val": len(val_proteins),
         "n_unique_proteins_test": len(test_proteins),

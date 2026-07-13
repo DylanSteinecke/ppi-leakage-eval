@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Prepare and benchmark the local yeast BioGRID data:
-# bash scripts/run_yeast_biogrid_ppi_example.sh --no-metrics-plots
+# MAX_PAIRS=10000 bash scripts/run_yeast_biogrid_ppi_example.sh \
+#     --no-metrics-plots
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -16,6 +17,9 @@ OUT_DIR="${OUT_DIR:-results/${YEAST_DATASET_NAME}_example}"
 NUM_RERUNS="${NUM_RERUNS:-1}"
 MAX_ITER="${MAX_ITER:-100}"
 K="${K:-2}"
+MAX_PAIRS="${MAX_PAIRS:-10000}"
+SAMPLING_SEED="${SAMPLING_SEED:-17}"
+N_SPLIT_TRIALS="${N_SPLIT_TRIALS:-25}"
 
 BIOGRID_ARCHIVE="${BIOGRID_ARCHIVE:-input/BIOGRID-ORGANISM-LATEST.tab3.zip}"
 BIOGRID_ARCHIVE_MEMBER="${BIOGRID_ARCHIVE_MEMBER:-BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-5.0.259.tab3.txt}"

@@ -11,6 +11,9 @@ PROTEIN_METADATA="${PROTEIN_METADATA:-}"
 NUM_RERUNS="${NUM_RERUNS:?Set NUM_RERUNS before sourcing _run_ppi_benchmark_grid.sh}"
 MAX_ITER="${MAX_ITER:?Set MAX_ITER before sourcing _run_ppi_benchmark_grid.sh}"
 K="${K:?Set K before sourcing _run_ppi_benchmark_grid.sh}"
+MAX_PAIRS="${MAX_PAIRS:-}"
+SAMPLING_SEED="${SAMPLING_SEED:-0}"
+N_SPLIT_TRIALS="${N_SPLIT_TRIALS:-100}"
 TRAIN_SIZE="${TRAIN_SIZE:-0.80}"
 VAL_SIZE="${VAL_SIZE:-0.0}"
 EXECUTION_ID="${EXECUTION_ID:-all_models_$(date -u +%Y-%m-%d_%H-%M-%S)}"
@@ -45,6 +48,14 @@ if [[ -n "$PROTEIN_METADATA" ]]; then
     PROTEIN_METADATA_ARGS=(--protein-metadata "$PROTEIN_METADATA")
 fi
 
+COHORT_SAMPLING_ARGS=()
+if [[ -n "$MAX_PAIRS" ]]; then
+    COHORT_SAMPLING_ARGS=(
+        --max-pairs "$MAX_PAIRS"
+        --sampling-seed "$SAMPLING_SEED"
+    )
+fi
+
 mkdir -p "$OUT_DIR"
 
 for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
@@ -57,6 +68,7 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
             --pairs "$PAIRS" \
             --fasta "$FASTA" \
             "${PROTEIN_METADATA_ARGS[@]}" \
+            "${COHORT_SAMPLING_ARGS[@]}" \
             --run-dir "$RUN_DIR" \
             --num-reruns "$NUM_RERUNS" \
             --max-iter "$MAX_ITER" \
@@ -64,6 +76,7 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
             --train-size "$TRAIN_SIZE" \
             --val-size "$VAL_SIZE" \
             --split-strategy "$split_strategy" \
+            --n-split-trials "$N_SPLIT_TRIALS" \
             --execution-id "$STRATEGY_EXECUTION_ID" \
             "$@" \
             "${USER_ARGS[@]}"

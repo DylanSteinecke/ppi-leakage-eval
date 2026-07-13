@@ -134,6 +134,118 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
     assert "source_row_index" in predictions.columns[:6]
 
 
+def test_cli_samples_the_whole_cohort_before_splitting(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "sampled_run"
+
+    run_cli(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--max-pairs", "12",
+        "--sampling-seed", "17",
+        "--no-metrics-plots",
+    )
+
+    selection_path = run_dir / "sampling" / "selected_examples.csv"
+    assert selection_path.exists()
+    selection = pd.read_csv(selection_path)
+    assignments = pd.read_csv(run_dir / "splits" / "split_assignments.csv")
+    metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"))
+
+    assert len(selection) == 12
+    assert len(assignments) == 12
+    assert selection.columns.tolist() == [
+        "source_row_index",
+        "sampling_rank",
+        "pair_id",
+        "label",
+    ]
+    assert selection["label"].value_counts().to_dict() == {0: 6, 1: 6}
+    assert metadata["n_pairs_after_filtering"] == 24
+    assert metadata["n_pairs_in_sampled_cohort"] == 12
+    assert metadata["sampling"]["applied"] is True
+    assert metadata["sampling"]["seed"] == 17
+    assert metadata["sampling"]["n_excluded"] == 12
+    assert metadata["sampling"]["selected_examples_path"] == str(
+        selection_path)
+
+
+def test_cli_sampling_append_requires_the_same_selection(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "sample_append"
+    common_args = [
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--max-pairs", "12",
+        "--sampling-seed", "17",
+        "--no-metrics-plots",
+    ]
+
+    run_cli(*common_args)
+    run_cli(*common_args, "--append-results")
+    changed_selection = common_args.copy()
+    changed_selection[changed_selection.index("--sampling-seed") + 1] = "18"
+    completed_process = run_cli(
+        *changed_selection,
+        "--append-results",
+        check=False,
+    )
+
+    assert completed_process.returncode != 0
+    assert "selected_examples.csv does not match" in completed_process.stderr
+
+
+def test_cli_rejects_two_sampling_size_options(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    completed_process = run_cli(
+        *base_cli_args(pairs_path, fasta_path, tmp_path / "run"),
+        "--max-pairs", "12",
+        "--sample-fraction", "0.5",
+        check=False,
+    )
+
+    assert completed_process.returncode != 0
+    assert "not allowed with argument" in completed_process.stderr
+
+
+def test_provided_split_sampling_preserves_every_split_and_label(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    pairs = pd.read_csv(pairs_path)
+    pairs["provided_split"] = ["train"] * 8 + ["val"] * 8 + ["test"] * 8
+    provided_pairs_path = tmp_path / "provided_pairs.csv"
+    pairs.to_csv(provided_pairs_path, index=False)
+    run_dir = tmp_path / "provided_sample"
+
+    run_cli(
+        *base_cli_args(provided_pairs_path, fasta_path, run_dir),
+        "--split-col", "provided_split",
+        "--max-pairs", "12",
+        "--sampling-seed", "4",
+        "--no-metrics-plots",
+    )
+
+    selection = pd.read_csv(
+        run_dir / "sampling" / "selected_examples.csv")
+    assignments = pd.read_csv(
+        run_dir / "splits" / "split_assignments.csv")
+    joint_counts = selection.groupby(["split", "label"]).size()
+
+    assert set(joint_counts.index) == {
+        (split_name, label)
+        for split_name in ("train", "val", "test")
+        for label in (0, 1)
+    }
+    assert assignments.groupby("split").size().to_dict() == {
+        "test": 4,
+        "train": 4,
+        "val": 4,
+    }
+
+
 def test_validation_without_eval_test_set_writes_only_train_val_outputs(
         tmp_path, ppi_test_data, run_cli):
     pairs_path, fasta_path = ppi_test_data
@@ -500,6 +612,8 @@ def test_c3_metadata_reports_zero_shared_proteins_and_split_audit(
         "--train-size", "0.7",
         "--seed", "11",
         "--split-strategy", "c3",
+        "--max-pairs", "40",
+        "--sampling-seed", "5",
         "--n-split-trials", "20",
         "--no-metrics-plots",
     )
@@ -513,3 +627,5 @@ def test_c3_metadata_reports_zero_shared_proteins_and_split_audit(
     assert metadata["split_audit"]["mode"] == "c3"
     assert metadata["split_audit"]["all_invariants_passed"] is True
     assert metadata["n_discarded_edges"] > 0
+    assert metadata["n_pairs_after_filtering"] == 66
+    assert metadata["n_pairs_in_sampled_cohort"] == 40

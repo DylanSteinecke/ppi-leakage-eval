@@ -70,6 +70,7 @@ HARD_NEGATIVE_RELATION = "hard_negative"
 BACKGROUND_RELATION = "background_negative"
 COMPONENT_PROFILE_CHOICES = ("balanced", "giant", "many_small")
 EXPECTED_LABEL_VALUES = {0, 1}
+SYNTHETIC_TAXON_ID = "1"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -476,12 +477,13 @@ def protein_metadata_rows(
         protein_records: dict[str, ProteinRecord],
     ) -> list[dict[str, int | str | bool]]:
     """
-    Return protein metadata rows for optional inspection.
+    Return training-compatible metadata rows for synthetic proteins.
     """
     rows = []
     for record in protein_records.values():
         rows.append({
             "protein_id": record.protein_id,
+            "taxon_id": SYNTHETIC_TAXON_ID,
             "component_id": record.component_id,
             "family_id": record.family_id,
             "domains": ";".join(record.domains),

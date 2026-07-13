@@ -7,10 +7,13 @@ import pytest
 
 from ppi_benchmark.cli.make_toy_data import (
     PairCandidate,
+    ProteinRecord,
     positive_float,
+    protein_metadata_rows,
     probability,
     weighted_sample_without_replacement,
 )
+from ppi_benchmark.datasets.common import read_protein_taxa
 from ppi_benchmark.results import summarize_metrics
 
 
@@ -55,3 +58,21 @@ def test_weighted_sampling_is_reproducible_without_replacement():
 
     assert first_sample == second_sample
     assert len(set(first_sample)) == 20
+
+
+def test_toy_protein_metadata_is_compatible_with_training(tmp_path):
+    record = ProteinRecord(
+        protein_id="P0",
+        component_id=0,
+        family_id=0,
+        domains=("KINASE",),
+        is_hub=False,
+        sequence="ACDE",
+    )
+    metadata_path = tmp_path / "toy_protein_metadata.csv"
+    pd.DataFrame(protein_metadata_rows({record.protein_id: record})).to_csv(
+        metadata_path,
+        index=False,
+    )
+
+    assert read_protein_taxa(metadata_path) == {"P0": "1"}

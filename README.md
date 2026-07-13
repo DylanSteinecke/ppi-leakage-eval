@@ -43,12 +43,19 @@ Set `GENERATE_TOY_DATA=0` to reuse the existing files under `processed/`.
 The local UniProt FASTA uses headers such as `sp|P04387|GAL80_YEAST`, while
 BioGRID stores the matching accession as `P04387`. The example runner prepares
 the current local files, samples negatives within the yeast taxon, and runs a
-small sparse benchmark:
+laptop-sized sparse benchmark. By default, it selects a deterministic,
+label-stratified cohort of at most 10,000 pairs before creating each split:
 
 ```bash
 conda activate ppi
-bash scripts/run_yeast_biogrid_ppi_example.sh --no-metrics-plots
+MAX_PAIRS=10000 bash scripts/run_yeast_biogrid_ppi_example.sh \
+    --no-metrics-plots
 ```
+
+Set `MAX_PAIRS` to a different compute budget, or to an empty string to use the
+entire eligible cohort. `SAMPLING_SEED` controls cohort selection independently
+of the train/test split seed. To reuse already prepared yeast files, add
+`PREPARE_YEAST_DATA=0` before the command.
 
 Prepared data are written under `processed/biogrid_yeast_physical/` as
 `pairs.csv`, `proteins.fasta`, `protein_metadata.csv`, and
@@ -61,6 +68,30 @@ The loader reads the large archive in chunks. Sampled negatives are unobserved
 protein pairs from taxonomy-pair strata represented by positives, not
 experimentally confirmed non-interactions. The archive member includes a
 BioGRID release number and must be updated when the `LATEST` download changes.
+
+## Sample a whole benchmark cohort
+
+`ppi-train` can select a deterministic subset after input validation and before
+random or C1/C2/C3 split construction:
+
+```bash
+ppi-train \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --max-pairs 10000 \
+    --sampling-seed 17 \
+    --split-strategy c3 \
+    --train-size 0.8 \
+    --features tfidf \
+    --classifier logistic \
+    --max-iter 100 \
+    --run-dir results/yeast_c3_sample
+```
+
+Use `--sample-fraction` instead of `--max-pairs` for a proportional cohort.
+The selected source rows and deterministic ranks are written to
+`sampling/selected_examples.csv`; audit details are stored under `sampling` in
+`splits/split_metadata.json`.
 
 ## Leakage-aware splits
 

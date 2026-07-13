@@ -242,6 +242,10 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
         encoding="utf-8"
     )
     assert 'VAL_SIZE="${VAL_SIZE:-0.0}"' in grid_text
+    assert 'MAX_PAIRS="${MAX_PAIRS:-}"' in grid_text
+    assert '--max-pairs "$MAX_PAIRS"' in grid_text
+    assert 'MAX_PAIRS="${MAX_PAIRS:-10000}"' in yeast_text
+    assert 'N_SPLIT_TRIALS="${N_SPLIT_TRIALS:-25}"' in yeast_text
     assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
     assert '--val-size "$VAL_SIZE"' in grid_text
     assert "ppi-train" in grid_text
