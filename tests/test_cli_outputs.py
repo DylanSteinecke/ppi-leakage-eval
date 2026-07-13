@@ -49,6 +49,7 @@ def base_cli_args(pairs_path, fasta_path, run_dir):
         "--num-reruns", "1",
         "--max-iter", "100",
         "--train-size", "0.50",
+        "--val-size", "0.0",
         "--seed", "11",
     ]
 
@@ -67,20 +68,6 @@ def test_cli_without_run_dir_fails_clearly(ppi_test_data, run_cli):
 
     assert completed_process.returncode != 0
     assert "--run-dir" in completed_process.stderr
-
-
-def test_c_splits_reject_validation_size(tmp_path, ppi_test_data, run_cli):
-    pairs_path, fasta_path = ppi_test_data
-    completed_process = run_cli(
-        *base_cli_args(pairs_path, fasta_path, tmp_path / "run"),
-        "--split-strategy", "c3",
-        "--val-size", "0.2",
-        "--no-metrics-plots",
-        check=False,
-    )
-
-    assert completed_process.returncode != 0
-    assert "require --val-size 0" in completed_process.stderr
 
 
 @pytest.mark.parametrize("removed_flag", REMOVED_OUTPUT_FLAGS)
@@ -130,7 +117,6 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
         run_dir / "plots" / "train_val_metrics_summary.svg",
         run_dir / "splits" / "split_diagnostics.json",
     )
-
     predictions = pd.read_csv(run_dir / "predictions.csv", nrows=0)
     assert "source_row_index" in predictions.columns[:6]
     performance = json.loads(
@@ -150,6 +136,53 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
         "summarize_results",
         "plot_results",
     } <= set(performance["stages_seconds"])
+
+
+def test_default_generated_split_is_true_train_val_test(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "generated_val_run"
+
+    run_cli(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--classifier", "always_positive",
+        "--num-reruns", "1",
+        "--max-iter", "100",
+        "--seed", "11",
+    )
+
+    assert_exists(
+        run_dir / "train_metrics.csv",
+        run_dir / "val_metrics.csv",
+        run_dir / "train_metrics_summary.csv",
+        run_dir / "val_metrics_summary.csv",
+        run_dir / "plots" / "train_metrics_summary.svg",
+        run_dir / "plots" / "val_metrics_summary.svg",
+        run_dir / "plots" / "train_val_metrics_summary.svg",
+        run_dir / "plots" / "train_val_metrics_summary.png",
+    )
+    assert_not_written(
+        run_dir / "test_metrics.csv",
+        run_dir / "test_metrics_summary.csv",
+        run_dir / "predictions.csv",
+        run_dir / "plots" / "test_metrics_summary.svg",
+        run_dir / "plots" / "train_test_metrics_summary.svg",
+    )
+    assignments = pd.read_csv(
+        run_dir / "splits" / "split_assignments.csv")
+    assert set(assignments["split"]) == {"train", "val", "test"}
+
+    metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"))
+    assert metadata["target_train_size"] == pytest.approx(0.8)
+    assert metadata["target_val_size"] == pytest.approx(0.1)
+    assert metadata["target_test_size"] == pytest.approx(0.1)
+    assert metadata["n_val"] > 0
+    assert metadata["n_test"] > 0
+    assert metadata["actual_test_size"] > 0.0
 
 
 def test_learned_model_reports_matrix_and_solver_performance(
@@ -633,7 +666,7 @@ def test_dropped_pairs_and_metadata_are_written_for_missing_fasta_proteins(
     }
 
 
-def test_c3_metadata_reports_zero_shared_proteins_and_split_audit(
+def test_c3_three_way_metadata_reports_pairwise_disjoint_proteins(
         tmp_path, run_cli):
     run_dir = tmp_path / "c3_metadata"
     pair_rows = ["pair_id,protein_a,protein_b,label"]
@@ -659,11 +692,10 @@ def test_c3_metadata_reports_zero_shared_proteins_and_split_audit(
         "--classifier", "always_positive",
         "--num-reruns", "1",
         "--train-size", "0.7",
+        "--val-size", "0.15",
         "--seed", "11",
         "--split-strategy", "c3",
-        "--max-pairs", "40",
-        "--sampling-seed", "5",
-        "--n-split-trials", "20",
+        "--n-split-trials", "50",
         "--no-metrics-plots",
     )
 
@@ -672,9 +704,13 @@ def test_c3_metadata_reports_zero_shared_proteins_and_split_audit(
             encoding="utf-8"))
     diagnostics = metadata["diagnostics"]
 
+    assert diagnostics["n_shared_proteins_train_val"] == 0
     assert diagnostics["n_shared_proteins_train_test"] == 0
+    assert diagnostics["n_shared_proteins_val_test"] == 0
+    assert metadata["n_val"] > 0
+    assert metadata["n_test"] > 0
     assert metadata["split_audit"]["mode"] == "c3"
     assert metadata["split_audit"]["all_invariants_passed"] is True
     assert metadata["n_discarded_edges"] > 0
     assert metadata["n_pairs_after_filtering"] == 66
-    assert metadata["n_pairs_in_sampled_cohort"] == 40
+    assert metadata["n_pairs_in_sampled_cohort"] == 66

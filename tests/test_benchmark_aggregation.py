@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from ppi_benchmark.cli.aggregate import aggregate_benchmark_results
+from ppi_benchmark.cli.aggregate import (
+    aggregate_benchmark_results,
+    main as aggregate_main,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +209,7 @@ def test_aggregate_benchmark_results_reads_real_cli_run(
         "--num-reruns", "1",
         "--max-iter", "100",
         "--train-size", "0.50",
+        "--val-size", "0.0",
         "--seed", "11",
         "--no-metrics-plots",
     )
@@ -220,6 +224,61 @@ def test_aggregate_benchmark_results_reads_real_cli_run(
         "always_positive",
     ]
     assert "diagnostics_n_shared_proteins_train_test" in summary_df
+
+
+def test_aggregate_cli_plots_current_train_val_grid(
+        tmp_path, monkeypatch):
+    benchmark_dir = tmp_path / "benchmark"
+    for strategy_index, strategy in enumerate(("random", "c1", "c2", "c3")):
+        run_dir = benchmark_dir / f"{strategy}_current"
+        run_metadata = metadata(run_dir, split_strategy=strategy)
+        run_metadata["execution_id"] = f"current_grid__{strategy}"
+        write_json(
+            run_dir / "splits" / "split_metadata.json",
+            run_metadata,
+        )
+        train_row = summary_row("train")
+        val_row = summary_row("val")
+        train_row["f1_mean"] = 0.80 - strategy_index * 0.02
+        val_row["f1_mean"] = 0.74 - strategy_index * 0.04
+        pd.DataFrame([train_row]).to_csv(
+            run_dir / "train_metrics_summary.csv",
+            index=False,
+        )
+        pd.DataFrame([val_row]).to_csv(
+            run_dir / "val_metrics_summary.csv",
+            index=False,
+        )
+
+    old_run_dir = benchmark_dir / "random_old"
+    old_metadata = metadata(old_run_dir, split_strategy="random")
+    old_metadata["execution_id"] = "old_grid__random"
+    write_json(
+        old_run_dir / "splits" / "split_metadata.json",
+        old_metadata,
+    )
+    pd.DataFrame([summary_row("train")]).to_csv(
+        old_run_dir / "train_metrics_summary.csv",
+        index=False,
+    )
+    pd.DataFrame([summary_row("val")]).to_csv(
+        old_run_dir / "val_metrics_summary.csv",
+        index=False,
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ppi-aggregate",
+            "--benchmark-dir", str(benchmark_dir),
+            "--plot-execution-id-prefix", "current_grid__",
+        ],
+    )
+    aggregate_main()
+
+    plot_path = benchmark_dir / "benchmark_train_val_f1.png"
+    assert plot_path.exists()
+    assert plot_path.stat().st_size > 0
 
 
 def test_example_runners_have_valid_syntax_and_use_installed_commands():
@@ -241,7 +300,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     toy_text = (scripts_dir / "run_toy_ppi_example.sh").read_text(
         encoding="utf-8"
     )
-    assert 'VAL_SIZE="${VAL_SIZE:-0.0}"' in grid_text
+    assert 'VAL_SIZE="${VAL_SIZE:-0.10}"' in grid_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in grid_text
     assert '--max-pairs "$MAX_PAIRS"' in grid_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-laptop}"' in yeast_text
@@ -249,6 +308,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert 'Unknown BENCHMARK_PROFILE' in grid_text
     assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
     assert '--val-size "$VAL_SIZE"' in grid_text
+    assert '--plot-execution-id-prefix "${EXECUTION_ID}__"' in grid_text
     assert "ppi-train" in grid_text
     assert "ppi-aggregate" in grid_text
     assert "ppi-prepare biogrid" in yeast_text
@@ -307,6 +367,7 @@ source "$GRID_PATH" --no-metrics-plots
     assert len(laptop_calls) == 12
     assert len(exhaustive_calls) == 24
     assert all("--n-split-trials 25" in call for call in laptop_calls)
+    assert all("--val-size 0.10" in call for call in laptop_calls)
     assert all("--max-pairs 10000" in call for call in laptop_calls)
     laptop_learned_calls = [
         call for call in laptop_calls if "--features" in call
@@ -317,6 +378,7 @@ source "$GRID_PATH" --no-metrics-plots
             for call in laptop_learned_calls} == {"tfidf", "count"}
 
     assert all("--n-split-trials 100" in call for call in exhaustive_calls)
+    assert all("--val-size 0.10" in call for call in exhaustive_calls)
     assert all("--max-pairs" not in call for call in exhaustive_calls)
     assert sum(
         "--features tfidf bm25 count binary "

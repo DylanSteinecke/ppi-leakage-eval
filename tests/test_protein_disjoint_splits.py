@@ -3,7 +3,10 @@ import json
 import pandas as pd
 import pytest
 
-from ppi_benchmark.splitters.protein_disjoint import split_pairs
+from ppi_benchmark.splitters.protein_disjoint import (
+    split_pairs,
+    split_pairs_three_way,
+)
 
 
 def complete_graph_pairs(n_proteins=14):
@@ -195,3 +198,103 @@ def test_audit_contains_requested_split_quality_sections():
         "invariant_checks",
         "selection_score",
     } <= set(result.audit)
+
+
+def test_three_way_c1_is_edge_disjoint_with_all_endpoints_seen_in_train():
+    pairs = complete_graph_pairs()
+    duplicate = pairs.iloc[[0]].copy()
+    duplicate[["protein_a", "protein_b"]] = duplicate[
+        ["protein_b", "protein_a"]].to_numpy()
+    pairs = pd.concat([pairs, duplicate], ignore_index=True)
+
+    result = split_pairs_three_way(
+        pairs,
+        mode="c1",
+        val_size=0.1,
+        test_size=0.1,
+        seed=3,
+        n_trials=40,
+    )
+
+    train_pairs = unordered_pairs(result.train)
+    val_pairs = unordered_pairs(result.val)
+    test_pairs = unordered_pairs(result.test)
+    assert train_pairs.isdisjoint(val_pairs)
+    assert train_pairs.isdisjoint(test_pairs)
+    assert val_pairs.isdisjoint(test_pairs)
+    assert proteins(result.val) <= proteins(result.train)
+    assert proteins(result.test) <= proteins(result.train)
+    assert result.dropped.empty
+    assert result.audit["all_invariants_passed"] is True
+
+
+def test_three_way_c2_uses_distinct_validation_and_test_novel_proteins():
+    result = split_pairs_three_way(
+        complete_graph_pairs(),
+        mode="c2",
+        val_size=0.1,
+        test_size=0.1,
+        seed=4,
+        n_trials=40,
+    )
+    train_proteins = proteins(result.train)
+    val_novel_proteins = proteins(result.val) - train_proteins
+    test_novel_proteins = proteins(result.test) - train_proteins
+
+    assert val_novel_proteins
+    assert test_novel_proteins
+    assert val_novel_proteins.isdisjoint(test_novel_proteins)
+    assert all(
+        (protein_a in train_proteins) ^ (protein_b in train_proteins)
+        for protein_a, protein_b in zip(
+            result.val["protein_a"], result.val["protein_b"])
+    )
+    assert all(
+        (protein_a in train_proteins) ^ (protein_b in train_proteins)
+        for protein_a, protein_b in zip(
+            result.test["protein_a"], result.test["protein_b"])
+    )
+    assert result.audit["all_invariants_passed"] is True
+
+
+def test_three_way_c3_has_pairwise_disjoint_proteins():
+    result = split_pairs_three_way(
+        complete_graph_pairs(),
+        mode="c3",
+        val_size=0.1,
+        test_size=0.1,
+        seed=5,
+        n_trials=60,
+    )
+    train_proteins = proteins(result.train)
+    val_proteins = proteins(result.val)
+    test_proteins = proteins(result.test)
+
+    assert train_proteins.isdisjoint(val_proteins)
+    assert train_proteins.isdisjoint(test_proteins)
+    assert val_proteins.isdisjoint(test_proteins)
+    assert result.audit["n_shared_groups_train_val"] == 0
+    assert result.audit["n_shared_groups_train_test"] == 0
+    assert result.audit["n_shared_groups_val_test"] == 0
+    assert result.audit["all_invariants_passed"] is True
+
+
+@pytest.mark.parametrize("mode", ["c1", "c2", "c3"])
+def test_three_way_split_is_deterministic(mode):
+    kwargs = {
+        "mode": mode,
+        "val_size": 0.1,
+        "test_size": 0.1,
+        "seed": 17,
+        "n_trials": 40,
+    }
+
+    first = split_pairs_three_way(complete_graph_pairs(), **kwargs)
+    second = split_pairs_three_way(complete_graph_pairs(), **kwargs)
+
+    pd.testing.assert_frame_equal(first.train, second.train)
+    pd.testing.assert_frame_equal(first.val, second.val)
+    pd.testing.assert_frame_equal(first.test, second.test)
+    pd.testing.assert_frame_equal(first.dropped, second.dropped)
+    assert first.audit == second.audit
+    json.dumps(first.audit)

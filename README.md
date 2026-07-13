@@ -33,7 +33,7 @@ The toy runner generates a synthetic dataset, then runs the benchmark grid:
 
 ```bash
 conda activate ppi
-bash scripts/run_toy_ppi_example.sh --no-metrics-plots
+bash scripts/run_toy_ppi_example.sh
 ```
 
 The toy runner defaults to the `exhaustive` profile. Set
@@ -51,8 +51,7 @@ each split:
 
 ```bash
 conda activate ppi
-BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh \
-    --no-metrics-plots
+BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh
 ```
 
 The runner profiles are:
@@ -66,14 +65,20 @@ The runner profiles are:
 Both profiles include the constant baselines and random/C1/C2/C3 splits. Set
 `MAX_PAIRS` or `N_SPLIT_TRIALS` explicitly to override a profile default. An
 explicitly empty `MAX_PAIRS` uses the entire eligible cohort. `SAMPLING_SEED`
-controls cohort selection independently of the train/test split seed. To reuse
-already prepared yeast files, add `PREPARE_YEAST_DATA=0` before the command.
+controls cohort selection independently of the data-split seed. The grid
+defaults to a genuine 80/10/10 train/validation/test split. Test remains held
+out unless `--eval-test-set` is supplied. After aggregation, the current grid
+invocation is summarized in
+`benchmark_train_val_f1.png`: each split strategy has its own panel, marker
+positions show absolute F1, and the train-to-validation arrow shows the
+generalization gap. To reuse already prepared yeast files, add
+`PREPARE_YEAST_DATA=0` before the command.
 
 For example, run the exhaustive model grid on a bounded cohort with:
 
 ```bash
 BENCHMARK_PROFILE=exhaustive MAX_PAIRS=50000 PREPARE_YEAST_DATA=0 \
-    bash scripts/run_yeast_biogrid_ppi_example.sh --no-metrics-plots
+    bash scripts/run_yeast_biogrid_ppi_example.sh
 ```
 
 Prepared data are written under `processed/biogrid_yeast_physical/` as
@@ -101,6 +106,7 @@ ppi-train \
     --sampling-seed 17 \
     --split-strategy c3 \
     --train-size 0.8 \
+    --val-size 0.1 \
     --features tfidf \
     --classifier logistic \
     --max-iter 100 \
@@ -125,12 +131,15 @@ solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
 Use `--split-strategy c1`, `c2`, or `c3` to select a standard PPI
 generalization regime:
 
-- `c1` holds out edges while keeping every test protein represented in train.
-- `c2` gives each test edge one train group and one held-out group.
-- `c3` separates train and test protein groups completely.
+- `c1` holds out edges while keeping every held-out protein represented in
+  train.
+- `c2` gives each held-out edge one train group and one held-out group.
+- `c3` separates train and held-out protein groups completely.
 
-C2 and C3 discard edges that do not match the selected regime. The runner
-evaluates 100 deterministic candidate group assignments by default; adjust
-this with `--n-split-trials`. These modes currently require `--val-size 0`.
+C2 and C3 discard edges that do not match the selected regime. For three-way
+splits, validation and test receive distinct novel protein groups under C2,
+while all three splits receive mutually disjoint protein groups under C3. The
+runner evaluates 100 deterministic candidate group assignments by default;
+adjust this with `--n-split-trials`.
 Detailed retention, class-balance, degree, overlap, and invariant diagnostics
 are written under `split_audit` in `split_metadata.json`.

@@ -15,7 +15,7 @@ K="${K:?Set K before sourcing _run_ppi_benchmark_grid.sh}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"
 SAMPLING_SEED="${SAMPLING_SEED:-0}"
 TRAIN_SIZE="${TRAIN_SIZE:-0.80}"
-VAL_SIZE="${VAL_SIZE:-0.0}"
+VAL_SIZE="${VAL_SIZE:-0.10}"
 EXECUTION_ID="${EXECUTION_ID:-${BENCHMARK_PROFILE}_models_$(date -u +%Y-%m-%d_%H-%M-%S)}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
@@ -90,6 +90,7 @@ mkdir -p "$OUT_DIR"
 echo "Benchmark profile: $BENCHMARK_PROFILE"
 echo "Feature sets: ${FEATURE_SETS[*]}"
 echo "Learned classifiers: ${LEARNED_CLASSIFIERS[*]}"
+echo "Split fractions: train=$TRAIN_SIZE, val=$VAL_SIZE, test=remainder"
 
 for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     STRATEGY_EXECUTION_ID="${EXECUTION_ID}__${split_strategy}"
@@ -129,17 +130,22 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
     echo "Finished strategy: $split_strategy"
     echo "Execution ID: $STRATEGY_EXECUTION_ID"
     echo "Run directory: $RUN_DIR"
-    echo "Metrics: $RUN_DIR/train_metrics.csv"
+    echo "Metrics: $RUN_DIR/train_metrics.csv, $RUN_DIR/val_metrics.csv"
+    echo "Split assignments (including held-out test): $RUN_DIR/splits/split_assignments.csv"
     echo "Summaries: $RUN_DIR/*_metrics_summary.csv"
     echo "Plots: $RUN_DIR/plots/"
     echo "Performance: $RUN_DIR/performance.jsonl"
-    echo "Predictions, when test is evaluated: $RUN_DIR/predictions.csv"
 done
 
 if [[ "$AGGREGATE_RESULTS" == "1" ]]; then
-    ppi-aggregate --benchmark-dir "$OUT_DIR"
+    ppi-aggregate \
+        --benchmark-dir "$OUT_DIR" \
+        --plot-execution-id-prefix "${EXECUTION_ID}__"
     echo "Benchmark manifest: $OUT_DIR/benchmark_manifest.csv"
     echo "Benchmark summary: $OUT_DIR/benchmark_summary.csv"
+    if [[ -f "$OUT_DIR/benchmark_train_val_f1.png" ]]; then
+        echo "Train/validation F1 plot: $OUT_DIR/benchmark_train_val_f1.png"
+    fi
 fi
 
 echo "Finished all runs for all split strategies."

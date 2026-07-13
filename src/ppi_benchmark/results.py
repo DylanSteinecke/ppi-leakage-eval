@@ -36,6 +36,7 @@ SUMMARY_GROUP_COLUMNS = (
     "split_seed",
     "target_train_size",
     "target_val_size",
+    "target_test_size",
     "actual_train_size",
     "actual_val_size",
     "actual_test_size",

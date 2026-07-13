@@ -65,6 +65,7 @@ SPLIT_STRATEGY_LABELS = {
     "c3": "C3 Protein-Disjoint Split",
     "provided_column": "Provided Split",
 }
+SPLIT_STRATEGY_ORDER = ("random", "c1", "c2", "c3", "provided_column")
 
 
 ################
@@ -438,6 +439,209 @@ def finite_or_none(value: object) -> float | None:
         finite_value = numeric_value if math.isfinite(numeric_value) else None
 
     return finite_value
+
+
+def plot_benchmark_train_val_f1(
+        summary: pd.DataFrame | str | Path,
+        plot_path: str | Path,
+        execution_id_prefix: str | None = None,
+    ) -> bool:
+    """
+    Plot train/validation F1 dumbbells across all available split strategies.
+
+    Absolute F1 values are shown by the two marker positions. The connecting
+    arrow exposes the validation-minus-train generalization gap without
+    requiring a second figure.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_path = Path(plot_path)
+    if plot_path.suffix.lower() != ".png":
+        raise ValueError("benchmark train/validation plot must end with '.png'.")
+
+    if isinstance(summary, pd.DataFrame):
+        summary_df = summary.copy()
+    else:
+        summary_df = pd.read_csv(summary)
+
+    required_columns = {
+        "summary_split",
+        "split_strategy",
+        "model_name",
+        "f1_mean",
+    }
+    missing_columns = required_columns - set(summary_df.columns)
+    if missing_columns:
+        return False
+
+    if execution_id_prefix is not None:
+        if "execution_id" not in summary_df.columns:
+            return False
+        execution_ids = summary_df["execution_id"].fillna("").astype(str)
+        summary_df = summary_df[
+            execution_ids.str.startswith(execution_id_prefix)
+        ]
+
+    summary_df = summary_df[
+        summary_df["summary_split"].isin(("train", "val"))
+    ].copy()
+    if summary_df.empty:
+        return False
+
+    plot_df = summary_df.pivot_table(
+        index=["split_strategy", "model_name"],
+        columns="summary_split",
+        values="f1_mean",
+        aggfunc="mean",
+    ).reset_index()
+    if "train" not in plot_df.columns or "val" not in plot_df.columns:
+        return False
+    plot_df = plot_df.dropna(subset=["train", "val"])
+    if plot_df.empty:
+        return False
+
+    observed_strategies = set(plot_df["split_strategy"].astype(str))
+    strategies = [
+        strategy
+        for strategy in SPLIT_STRATEGY_ORDER
+        if strategy in observed_strategies
+    ]
+    strategies.extend(sorted(observed_strategies - set(strategies)))
+
+    model_order = (
+        plot_df.groupby("model_name", sort=False)["val"]
+        .mean()
+        .sort_values(ascending=False)
+        .index.astype(str)
+        .tolist()
+    )
+    model_labels = [
+        model_name.replace("__", " / ").replace("_", " ")
+        for model_name in model_order
+    ]
+    y_positions = list(range(len(model_order)))
+    figure_height = max(4.5, 0.32 * len(model_order) + 2.4)
+    figure, axes = plt.subplots(
+        1,
+        len(strategies),
+        figsize=(4.0 * len(strategies) + 2.8, figure_height),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+    axes = axes.ravel()
+
+    for axis, strategy in zip(axes, strategies):
+        strategy_df = (
+            plot_df[plot_df["split_strategy"].astype(str) == strategy]
+            .set_index("model_name")
+        )
+        axis.set_title(
+            SPLIT_STRATEGY_LABELS.get(
+                strategy,
+                strategy.replace("_", " ").title(),
+            ),
+            fontsize=11,
+            fontweight="bold",
+        )
+        axis.set_xlim(0.0, 1.0)
+        axis.set_xticks(list(GRID_VALUES))
+        axis.grid(axis="x", color="#E6E6E6", linewidth=0.8)
+        axis.set_axisbelow(True)
+        axis.set_xlabel("F1")
+
+        for y_position, model_name in zip(y_positions, model_order):
+            axis.axhline(
+                y_position,
+                color="#F3F3F3",
+                linewidth=0.7,
+                zorder=0,
+            )
+            if model_name not in strategy_df.index:
+                continue
+            row = strategy_df.loc[model_name]
+            train_f1 = float(row["train"])
+            val_f1 = float(row["val"])
+            axis.annotate(
+                "",
+                xy=(val_f1, y_position),
+                xytext=(train_f1, y_position),
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": COMPARISON_LINE,
+                    "lw": 1.5,
+                    "shrinkA": 5.0,
+                    "shrinkB": 5.0,
+                    "mutation_scale": 9.0,
+                },
+                zorder=1,
+            )
+            axis.scatter(
+                train_f1,
+                y_position,
+                color=TRAIN_COLOR,
+                edgecolor=TRAIN_STROKE,
+                linewidth=0.7,
+                s=35,
+                zorder=3,
+            )
+            axis.scatter(
+                val_f1,
+                y_position,
+                color=TEST_COLOR,
+                edgecolor=TEST_STROKE,
+                linewidth=0.7,
+                s=31,
+                zorder=4,
+            )
+
+    axes[0].set_ylim(len(model_order) - 0.5, -0.5)
+    axes[0].set_yticks(y_positions)
+    axes[0].set_yticklabels(model_labels, fontsize=7.5)
+    for axis in axes[1:]:
+        axis.tick_params(axis="y", labelleft=False)
+
+    legend_handles = [
+        plt.Line2D(
+            [0], [0], marker="o", linestyle="", color=TRAIN_COLOR,
+            label="Train"),
+        plt.Line2D(
+            [0], [0], marker="o", linestyle="", color=TEST_COLOR,
+            label="Validation"),
+    ]
+    figure.legend(
+        handles=legend_handles,
+        loc="upper right",
+        bbox_to_anchor=(0.99, 0.995),
+    )
+    figure.suptitle(
+        "Train vs validation F1 across split strategies",
+        fontsize=17,
+        fontweight="bold",
+        x=0.01,
+        y=0.98,
+        ha="left",
+    )
+    figure.text(
+        0.01,
+        0.895,
+        (
+            "Marker positions show absolute F1; arrows point from train to "
+            "validation, so their direction and length show the "
+            "generalization gap."
+        ),
+        fontsize=9.5,
+        color="#555555",
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.82))
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(plot_path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+    return True
 
 
 def estimate_to_x(value: float, plot_x: float) -> float:

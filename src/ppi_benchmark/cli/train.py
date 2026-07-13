@@ -36,7 +36,6 @@ from ..inputs import (
     load_or_make_split,
     normalized_split_values,
     prepare_input_data,
-    PROTEIN_DISJOINT_SPLIT_STRATEGIES,
     RANDOM_SPLIT_STRATEGY,
     SPLIT_STRATEGY_CHOICES,
     validate_splits,
@@ -292,7 +291,7 @@ def argument_parser() -> argparse.Namespace:
         "--train-size", type=proportion, default=0.80,
         help="Fraction of pairs assigned to the training set")
     training_group.add_argument(
-        "--val-size", type=nonnegative_proportion, default=0.0,
+        "--val-size", type=nonnegative_proportion, default=0.10,
         help="Fraction of pairs assigned to the validation set")
     training_group.add_argument(
         "--eval-test-set", action="store_true",
@@ -328,11 +327,6 @@ def argument_parser() -> argparse.Namespace:
     else:
         args.effective_split_strategy = (
             args.split_strategy or RANDOM_SPLIT_STRATEGY)
-    if (
-            args.effective_split_strategy in PROTEIN_DISJOINT_SPLIT_STRATEGIES
-            and args.val_size > 0.0
-            ):
-        parser.error("C1/C2/C3 split strategies require --val-size 0.")
     args.n_discarded_edges = 0
     args.discarded_edge_fraction = 0.0
     args.split_audit = None
@@ -590,6 +584,7 @@ def train_and_evaluate_model_run(
         "split_name": args.split_name,
         "target_train_size": args.train_size,
         "target_val_size": args.val_size,
+        "target_test_size": 1.0 - args.train_size - args.val_size,
         "actual_train_size": actual_train_size,
         "actual_val_size": actual_val_size,
         "actual_test_size": actual_test_size,

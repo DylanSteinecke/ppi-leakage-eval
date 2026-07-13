@@ -28,6 +28,19 @@ class SplitResult:
 
 
 @dataclass(frozen=True)
+class ThreeWaySplitResult:
+    """
+    Selected train/validation/test tables and split audit information.
+    """
+
+    train: pd.DataFrame
+    val: pd.DataFrame
+    test: pd.DataFrame
+    dropped: pd.DataFrame
+    audit: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _PairArrays:
     """
     Integer-coded pair data reused across candidate trials.
@@ -53,6 +66,20 @@ class _Candidate:
     test_mask: np.ndarray
     dropped_mask: np.ndarray
     heldout_groups: frozenset[int]
+    score: tuple[int, float, float, float]
+
+
+@dataclass(frozen=True)
+class _ThreeWayCandidate:
+    """
+    One valid three-way candidate and its ordered optimization score.
+    """
+
+    train_mask: np.ndarray
+    val_mask: np.ndarray
+    test_mask: np.ndarray
+    dropped_mask: np.ndarray
+    group_partitions: np.ndarray | None
     score: tuple[int, float, float, float]
 
 
@@ -260,6 +287,65 @@ def _candidate_score(
     )
 
 
+def _three_way_candidate_score(
+        arrays: _PairArrays, train_mask: np.ndarray, val_mask: np.ndarray,
+        test_mask: np.ndarray, val_size: float, test_size: float,
+    ) -> tuple[int, float, float, float]:
+    """
+    Return a lexicographic score for a retained three-way partition.
+    """
+    masks = (train_mask, val_mask, test_mask)
+    n_retained = sum(int(mask.sum()) for mask in masks)
+    actual_val_size = int(val_mask.sum()) / n_retained
+    actual_test_size = int(test_mask.sum()) / n_retained
+    size_error = (
+        abs(actual_val_size - val_size)
+        + abs(actual_test_size - test_size)
+    )
+
+    n_labels = len(arrays.label_values)
+    input_rates = np.bincount(
+        arrays.labels,
+        minlength=n_labels,
+    ) / len(arrays.labels)
+    label_balance_error = 0.0
+    for mask in masks:
+        split_rates = np.bincount(
+            arrays.labels[mask],
+            minlength=n_labels,
+        ) / int(mask.sum())
+        label_balance_error += float(
+            np.abs(split_rates - input_rates).sum())
+
+    degree_distance = (
+        _degree_distribution_distance(arrays, train_mask, val_mask)
+        + _degree_distribution_distance(arrays, train_mask, test_mask)
+    )
+
+    return (
+        n_retained,
+        -size_error,
+        -label_balance_error,
+        -degree_distance,
+    )
+
+
+def _masks_contain_all_labels(
+        arrays: _PairArrays, masks: tuple[np.ndarray, ...],
+    ) -> bool:
+    """
+    Return whether every mask contains every input label.
+    """
+    n_labels = len(arrays.label_values)
+    return all(
+        bool((np.bincount(
+            arrays.labels[mask],
+            minlength=n_labels,
+        ) > 0).all())
+        for mask in masks
+    )
+
+
 def _edge_units(arrays: _PairArrays) -> _EdgeUnits:
     """
     Group duplicate unordered protein pairs into indivisible C1 edge units.
@@ -403,6 +489,192 @@ def _make_group_candidate(
     )
 
 
+def _make_three_way_c1_candidate(
+        arrays: _PairArrays, edge_units: _EdgeUnits,
+        val_size: float, test_size: float,
+        rng: np.random.Generator,
+    ) -> _ThreeWayCandidate | None:
+    """
+    Split a C1 heldout edge set into validation and test edge units.
+    """
+    combined_heldout_size = val_size + test_size
+    two_way_candidate = _make_c1_candidate(
+        arrays=arrays,
+        edge_units=edge_units,
+        test_size=combined_heldout_size,
+        rng=rng,
+    )
+    if two_way_candidate is None:
+        return None
+
+    heldout_units = np.unique(
+        edge_units.row_codes[two_way_candidate.test_mask])
+    if len(heldout_units) < 2:
+        return None
+    shuffled_units = rng.permutation(heldout_units)
+    shuffled_sizes = edge_units.sizes[shuffled_units]
+    target_val_edges = (
+        int(two_way_candidate.test_mask.sum())
+        * val_size
+        / combined_heldout_size
+    )
+    cumulative_sizes = np.cumsum(shuffled_sizes)
+    n_val_units = int(np.argmin(
+        np.abs(cumulative_sizes - target_val_edges),
+    )) + 1
+    n_val_units = min(max(1, n_val_units), len(heldout_units) - 1)
+
+    val_units = np.zeros(len(edge_units.sizes), dtype=bool)
+    val_units[shuffled_units[:n_val_units]] = True
+    val_mask = (
+        two_way_candidate.test_mask
+        & val_units[edge_units.row_codes]
+    )
+    test_mask = two_way_candidate.test_mask & ~val_mask
+    train_mask = two_way_candidate.train_mask
+    dropped_mask = two_way_candidate.dropped_mask
+    masks = (train_mask, val_mask, test_mask)
+    if (
+            not all(mask.any() for mask in masks)
+            or not _masks_contain_all_labels(arrays, masks)
+            ):
+        return None
+
+    return _ThreeWayCandidate(
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+        dropped_mask=dropped_mask,
+        group_partitions=None,
+        score=_three_way_candidate_score(
+            arrays,
+            train_mask,
+            val_mask,
+            test_mask,
+            val_size,
+            test_size,
+        ),
+    )
+
+
+def _three_way_group_weights(
+        mode: Literal["c2", "c3"], train_size: float,
+        val_size: float, test_size: float,
+    ) -> np.ndarray:
+    """
+    Estimate group weights yielding requested retained edge fractions.
+    """
+    if mode == "c2":
+        weights = np.array([
+            1.0,
+            val_size / (2.0 * train_size),
+            test_size / (2.0 * train_size),
+        ])
+    else:
+        weights = np.sqrt(np.array([train_size, val_size, test_size]))
+
+    return weights / weights.sum()
+
+
+def _three_way_group_counts(
+        n_groups: int, weights: np.ndarray,
+    ) -> np.ndarray:
+    """
+    Convert group weights to positive integer train/val/test counts.
+    """
+    raw_counts = weights * n_groups
+    counts = np.maximum(1, np.floor(raw_counts).astype(int))
+    while int(counts.sum()) > n_groups:
+        removable = np.where(counts > 1)[0]
+        if not len(removable):
+            raise ValueError("Three-way splitting requires at least 3 groups.")
+        excess = counts[removable] - raw_counts[removable]
+        counts[removable[int(np.argmax(excess))]] -= 1
+    while int(counts.sum()) < n_groups:
+        deficit = raw_counts - counts
+        counts[int(np.argmax(deficit))] += 1
+
+    return counts
+
+
+def _make_three_way_group_candidate(
+        arrays: _PairArrays, mode: Literal["c2", "c3"],
+        val_size: float, test_size: float,
+        rng: np.random.Generator,
+    ) -> _ThreeWayCandidate | None:
+    """
+    Make one C2/C3 candidate from atomic train/val/test group assignments.
+    """
+    train_size = 1.0 - val_size - test_size
+    group_counts = _three_way_group_counts(
+        arrays.n_groups,
+        _three_way_group_weights(
+            mode,
+            train_size,
+            val_size,
+            test_size,
+        ),
+    )
+    shuffled_groups = rng.permutation(arrays.n_groups)
+    group_partitions = np.empty(arrays.n_groups, dtype=np.int8)
+    train_end = int(group_counts[0])
+    val_end = train_end + int(group_counts[1])
+    group_partitions[shuffled_groups[:train_end]] = 0
+    group_partitions[shuffled_groups[train_end:val_end]] = 1
+    group_partitions[shuffled_groups[val_end:]] = 2
+
+    partition_a = group_partitions[arrays.group_a]
+    partition_b = group_partitions[arrays.group_b]
+    train_mask = (partition_a == 0) & (partition_b == 0)
+    if mode == "c2":
+        val_mask = (
+            ((partition_a == 0) & (partition_b == 1))
+            | ((partition_a == 1) & (partition_b == 0))
+        )
+        test_mask = (
+            ((partition_a == 0) & (partition_b == 2))
+            | ((partition_a == 2) & (partition_b == 0))
+        )
+        represented_train_groups = np.zeros(arrays.n_groups, dtype=bool)
+        represented_train_groups[arrays.group_a[train_mask]] = True
+        represented_train_groups[arrays.group_b[train_mask]] = True
+        heldout_mask = val_mask | test_mask
+        heldout_train_groups = np.where(
+            partition_a[heldout_mask] == 0,
+            arrays.group_a[heldout_mask],
+            arrays.group_b[heldout_mask],
+        )
+        if not represented_train_groups[heldout_train_groups].all():
+            return None
+    else:
+        val_mask = (partition_a == 1) & (partition_b == 1)
+        test_mask = (partition_a == 2) & (partition_b == 2)
+
+    dropped_mask = ~(train_mask | val_mask | test_mask)
+    masks = (train_mask, val_mask, test_mask)
+    if (
+            not all(mask.any() for mask in masks)
+            or not _masks_contain_all_labels(arrays, masks)
+            ):
+        return None
+
+    return _ThreeWayCandidate(
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+        dropped_mask=dropped_mask,
+        group_partitions=group_partitions,
+        score=_three_way_candidate_score(
+            arrays,
+            train_mask,
+            val_mask,
+            test_mask,
+            val_size,
+            test_size,
+        ),
+    )
+
+
 def _class_summary(
         arrays: _PairArrays, mask: np.ndarray,
     ) -> dict[str, dict[str, int | float]]:
@@ -538,6 +810,233 @@ def _invariant_checks(
             })
 
     return checks
+
+
+def _unordered_edge_set(
+        arrays: _PairArrays, mask: np.ndarray,
+    ) -> set[tuple[int, int]]:
+    """
+    Return encoded unordered protein pairs selected by a mask.
+    """
+    return {
+        tuple(sorted((int(protein_a), int(protein_b))))
+        for protein_a, protein_b in zip(
+            arrays.protein_a[mask],
+            arrays.protein_b[mask],
+        )
+    }
+
+
+def _three_way_invariant_checks(
+        arrays: _PairArrays, candidate: _ThreeWayCandidate,
+        mode: SplitMode,
+    ) -> dict[str, bool]:
+    """
+    Evaluate mode-specific invariants for a train/validation/test candidate.
+    """
+    train_mask = candidate.train_mask
+    val_mask = candidate.val_mask
+    test_mask = candidate.test_mask
+    dropped_mask = candidate.dropped_mask
+    masks = (train_mask, val_mask, test_mask, dropped_mask)
+    checks = {
+        "train_val_test_nonempty": bool(
+            train_mask.any() and val_mask.any() and test_mask.any()),
+        "masks_do_not_overlap": bool(
+            all(
+                not (left_mask & right_mask).any()
+                for left_index, left_mask in enumerate(masks[:-1])
+                for right_mask in masks[left_index + 1:]
+            )
+        ),
+        "all_edges_accounted_for": bool(
+            (train_mask | val_mask | test_mask | dropped_mask).all()),
+        "all_splits_contain_all_labels": _masks_contain_all_labels(
+            arrays,
+            (train_mask, val_mask, test_mask),
+        ),
+    }
+
+    if mode == "c1":
+        train_proteins = _protein_set(arrays, train_mask)
+        val_proteins = _protein_set(arrays, val_mask)
+        test_proteins = _protein_set(arrays, test_mask)
+        train_pairs = _unordered_edge_set(arrays, train_mask)
+        val_pairs = _unordered_edge_set(arrays, val_mask)
+        test_pairs = _unordered_edge_set(arrays, test_mask)
+        checks.update({
+            "unordered_edges_are_pairwise_disjoint": bool(
+                train_pairs.isdisjoint(val_pairs)
+                and train_pairs.isdisjoint(test_pairs)
+                and val_pairs.isdisjoint(test_pairs)
+            ),
+            "all_val_proteins_appear_in_train": (
+                val_proteins <= train_proteins),
+            "all_test_proteins_appear_in_train": (
+                test_proteins <= train_proteins),
+            "no_edges_dropped": not dropped_mask.any(),
+        })
+        return checks
+
+    assert candidate.group_partitions is not None
+    partition_a = candidate.group_partitions[arrays.group_a]
+    partition_b = candidate.group_partitions[arrays.group_b]
+    checks["train_edges_have_two_train_groups"] = bool(
+        ((partition_a[train_mask] == 0)
+         & (partition_b[train_mask] == 0)).all())
+    if mode == "c2":
+        checks.update({
+            "val_edges_have_one_train_and_one_val_group": bool(
+                (((partition_a[val_mask] == 0)
+                  & (partition_b[val_mask] == 1))
+                 | ((partition_a[val_mask] == 1)
+                    & (partition_b[val_mask] == 0))).all()
+            ),
+            "test_edges_have_one_train_and_one_test_group": bool(
+                (((partition_a[test_mask] == 0)
+                  & (partition_b[test_mask] == 2))
+                 | ((partition_a[test_mask] == 2)
+                    & (partition_b[test_mask] == 0))).all()
+            ),
+            "dropped_edges_are_outside_c2_definitions": bool(
+                (~(
+                    ((partition_a[dropped_mask] == 0)
+                     & (partition_b[dropped_mask] == 0))
+                    | ((partition_a[dropped_mask] == 0)
+                       & (partition_b[dropped_mask] == 1))
+                    | ((partition_a[dropped_mask] == 1)
+                       & (partition_b[dropped_mask] == 0))
+                    | ((partition_a[dropped_mask] == 0)
+                       & (partition_b[dropped_mask] == 2))
+                    | ((partition_a[dropped_mask] == 2)
+                       & (partition_b[dropped_mask] == 0))
+                )).all()
+            ),
+        })
+    else:
+        checks.update({
+            "val_edges_have_two_val_groups": bool(
+                ((partition_a[val_mask] == 1)
+                 & (partition_b[val_mask] == 1)).all()),
+            "test_edges_have_two_test_groups": bool(
+                ((partition_a[test_mask] == 2)
+                 & (partition_b[test_mask] == 2)).all()),
+            "dropped_edges_cross_group_partitions": bool(
+                (partition_a[dropped_mask]
+                 != partition_b[dropped_mask]).all()),
+        })
+
+    return checks
+
+
+def _three_way_audit(
+        arrays: _PairArrays, candidate: _ThreeWayCandidate,
+        mode: SplitMode, val_size: float, test_size: float,
+        seed: int, n_trials: int,
+    ) -> dict[str, Any]:
+    """
+    Build a JSON-serializable report for a three-way split candidate.
+    """
+    split_masks = {
+        "train": candidate.train_mask,
+        "val": candidate.val_mask,
+        "test": candidate.test_mask,
+    }
+    retained_mask = (
+        candidate.train_mask | candidate.val_mask | candidate.test_mask)
+    n_input = len(arrays.labels)
+    n_retained = int(retained_mask.sum())
+    split_proteins = {
+        split_name: _protein_set(arrays, mask)
+        for split_name, mask in split_masks.items()
+    }
+    split_groups = {
+        split_name: _group_set(arrays, mask)
+        for split_name, mask in split_masks.items()
+    }
+    checks = _three_way_invariant_checks(arrays, candidate, mode)
+
+    audit = {
+        "mode": mode,
+        "seed": seed,
+        "n_trials": n_trials,
+        "requested_train_size": 1.0 - val_size - test_size,
+        "requested_val_size": val_size,
+        "requested_test_size": test_size,
+        "actual_train_size": float(
+            candidate.train_mask.sum() / n_retained),
+        "actual_val_size": float(candidate.val_mask.sum() / n_retained),
+        "actual_test_size": float(candidate.test_mask.sum() / n_retained),
+        "n_input_edges": n_input,
+        "n_train_edges": int(candidate.train_mask.sum()),
+        "n_val_edges": int(candidate.val_mask.sum()),
+        "n_test_edges": int(candidate.test_mask.sum()),
+        "n_retained_edges": n_retained,
+        "n_dropped_edges": int(candidate.dropped_mask.sum()),
+        "retained_edge_fraction": float(n_retained / n_input),
+        "dropped_edge_fraction": float(
+            candidate.dropped_mask.sum() / n_input),
+        "n_proteins_input": arrays.n_proteins,
+        "n_groups_input": arrays.n_groups,
+        "class_distribution": {
+            "input": _class_summary(
+                arrays,
+                np.ones(n_input, dtype=bool),
+            ),
+            **{
+                split_name: _class_summary(arrays, mask)
+                for split_name, mask in split_masks.items()
+            },
+        },
+        "degree_statistics": {
+            "input": _degree_summary(
+                arrays,
+                np.ones(n_input, dtype=bool),
+            ),
+            **{
+                split_name: _degree_summary(arrays, mask)
+                for split_name, mask in split_masks.items()
+            },
+            "train_val_distance": _degree_distribution_distance(
+                arrays,
+                candidate.train_mask,
+                candidate.val_mask,
+            ),
+            "train_test_distance": _degree_distribution_distance(
+                arrays,
+                candidate.train_mask,
+                candidate.test_mask,
+            ),
+        },
+        "selection_score": {
+            "retained_edges": candidate.score[0],
+            "val_test_size_error": -candidate.score[1],
+            "label_balance_error": -candidate.score[2],
+            "degree_distribution_distance": -candidate.score[3],
+        },
+        "invariant_checks": checks,
+        "all_invariants_passed": all(checks.values()),
+    }
+    for split_name in split_masks:
+        audit[f"n_proteins_{split_name}"] = len(
+            split_proteins[split_name])
+        audit[f"n_groups_{split_name}"] = len(split_groups[split_name])
+    for left_name, right_name in (
+            ("train", "val"), ("train", "test"), ("val", "test")):
+        audit[f"n_shared_proteins_{left_name}_{right_name}"] = len(
+            split_proteins[left_name] & split_proteins[right_name])
+        audit[f"n_shared_groups_{left_name}_{right_name}"] = len(
+            split_groups[left_name] & split_groups[right_name])
+    if candidate.group_partitions is not None:
+        partition_counts = np.bincount(
+            candidate.group_partitions,
+            minlength=3,
+        )
+        audit["n_assigned_train_groups"] = int(partition_counts[0])
+        audit["n_assigned_val_groups"] = int(partition_counts[1])
+        audit["n_assigned_test_groups"] = int(partition_counts[2])
+
+    return audit
 
 
 def _make_audit(
@@ -685,6 +1184,96 @@ def split_pairs(
 
     return SplitResult(
         train=pairs.loc[best_candidate.train_mask].copy(),
+        test=pairs.loc[best_candidate.test_mask].copy(),
+        dropped=pairs.loc[best_candidate.dropped_mask].copy(),
+        audit=audit,
+    )
+
+
+def split_pairs_three_way(
+        pairs: pd.DataFrame, mode: SplitMode,
+        val_size: float = 0.1, test_size: float = 0.1,
+        protein_to_group: dict[Hashable, Hashable] | None = None,
+        seed: int = 0, n_trials: int = 100,
+    ) -> ThreeWaySplitResult:
+    """
+    Split PPI pairs into train/validation/test under a C1, C2, or C3 regime.
+
+    C1 uses pairwise-disjoint edge units and requires every validation/test
+    endpoint in train. C2 assigns separate validation- and test-novel protein
+    groups, with retained heldout edges joining those groups to train groups.
+    C3 assigns mutually disjoint protein groups to all three splits.
+    """
+    if not 0.0 < val_size < 1.0:
+        raise ValueError("val_size must be greater than 0 and less than 1.")
+    if not 0.0 < test_size < 1.0:
+        raise ValueError("test_size must be greater than 0 and less than 1.")
+    if val_size + test_size >= 1.0:
+        raise ValueError("val_size + test_size must be less than 1.")
+    _validate_inputs(
+        pairs=pairs,
+        mode=mode,
+        test_size=val_size + test_size,
+        protein_to_group=protein_to_group,
+        n_trials=n_trials,
+    )
+    group_mapping = protein_to_group if mode in {"c2", "c3"} else None
+    arrays = _encode_pairs(pairs, group_mapping)
+    if mode in {"c2", "c3"} and arrays.n_groups < 3:
+        raise ValueError(
+            f"{mode.upper()} three-way splitting requires at least "
+            "three protein groups.")
+
+    edge_units = _edge_units(arrays) if mode == "c1" else None
+    best_candidate = None
+    for trial in range(n_trials):
+        rng = np.random.default_rng(seed + trial)
+        if mode == "c1":
+            assert edge_units is not None
+            candidate = _make_three_way_c1_candidate(
+                arrays=arrays,
+                edge_units=edge_units,
+                val_size=val_size,
+                test_size=test_size,
+                rng=rng,
+            )
+        else:
+            candidate = _make_three_way_group_candidate(
+                arrays=arrays,
+                mode=mode,
+                val_size=val_size,
+                test_size=test_size,
+                rng=rng,
+            )
+        if candidate is not None and (
+                best_candidate is None
+                or candidate.score > best_candidate.score
+            ):
+            best_candidate = candidate
+
+    if best_candidate is None:
+        raise ValueError(
+            f"Could not produce a valid three-way {mode.upper()} split after "
+            f"{n_trials} trial(s). Try more data, a different seed, "
+            "different split sizes, or more trials.")
+
+    audit = _three_way_audit(
+        arrays=arrays,
+        candidate=best_candidate,
+        mode=mode,
+        val_size=val_size,
+        test_size=test_size,
+        seed=seed,
+        n_trials=n_trials,
+    )
+    if not audit["all_invariants_passed"]:
+        raise RuntimeError(
+            f"Internal three-way {mode.upper()} split invariant validation "
+            "failed.")
+
+    return ThreeWaySplitResult(
+        train=pairs.loc[best_candidate.train_mask].copy(),
+        val=pairs.loc[best_candidate.val_mask].copy(),
         test=pairs.loc[best_candidate.test_mask].copy(),
         dropped=pairs.loc[best_candidate.dropped_mask].copy(),
         audit=audit,

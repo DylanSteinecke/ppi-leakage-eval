@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # Prepare and benchmark the local yeast BioGRID data:
-# BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh \
-#     --no-metrics-plots
+# BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

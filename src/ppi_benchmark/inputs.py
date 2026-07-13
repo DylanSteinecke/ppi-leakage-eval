@@ -13,7 +13,10 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from .datasets.common import normalize_labels
-from .splitters import split_pairs as split_protein_disjoint_pairs
+from .splitters import (
+    split_pairs as split_protein_disjoint_pairs,
+    split_pairs_three_way as split_protein_disjoint_pairs_three_way,
+)
 
 
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
@@ -374,15 +377,27 @@ def load_or_make_split(
 
     # Create a C1/C2/C3 protein-disjoint split
     elif args.effective_split_strategy in PROTEIN_DISJOINT_SPLIT_STRATEGIES:
-        split_result = split_protein_disjoint_pairs(
-            pairs,
-            mode=args.effective_split_strategy,
-            test_size=1.0 - args.train_size,
-            seed=args.seed,
-            n_trials=args.n_split_trials,
-        )
+        test_size = 1.0 - args.train_size - args.val_size
+        if args.val_size > 0.0:
+            split_result = split_protein_disjoint_pairs_three_way(
+                pairs,
+                mode=args.effective_split_strategy,
+                val_size=args.val_size,
+                test_size=test_size,
+                seed=args.seed,
+                n_trials=args.n_split_trials,
+            )
+            val_df = split_result.val
+        else:
+            split_result = split_protein_disjoint_pairs(
+                pairs,
+                mode=args.effective_split_strategy,
+                test_size=test_size,
+                seed=args.seed,
+                n_trials=args.n_split_trials,
+            )
+            val_df = None
         train_df = split_result.train
-        val_df = None
         test_df = split_result.test
         args.split_audit = split_result.audit
         args.n_discarded_edges = len(split_result.dropped)

@@ -16,11 +16,14 @@ from typing import Any
 
 import pandas as pd
 
+from ..plots import plot_benchmark_train_val_f1
+
 
 METADATA_RELATIVE_PATH = Path("splits") / "split_metadata.json"
 INVOCATIONS_FILENAME = "invocations.jsonl"
 MANIFEST_FILENAME = "benchmark_manifest.csv"
 SUMMARY_FILENAME = "benchmark_summary.csv"
+TRAIN_VAL_F1_PLOT_FILENAME = "benchmark_train_val_f1.png"
 SUMMARY_FILES = (
     ("train", "train_metrics_summary.csv"),
     ("val", "val_metrics_summary.csv"),
@@ -68,6 +71,8 @@ SUMMARY_CONTEXT_COLUMNS = (
     "run_dir",
     "execution_id",
     "timestamp_utc",
+    "split_strategy",
+    "split_name",
     "pairs",
     "fasta",
     "pairs_file_sha256",
@@ -127,6 +132,19 @@ def parse_args() -> argparse.Namespace:
         "--summary-out",
         default=None,
         help="Optional output path for the combined metrics summary CSV.",
+    )
+    parser.add_argument(
+        "--train-val-plot-out",
+        default=None,
+        help="Optional output path for the benchmark train/validation F1 PNG.",
+    )
+    parser.add_argument(
+        "--plot-execution-id-prefix",
+        default=None,
+        help=(
+            "Only include execution IDs with this prefix in the benchmark "
+            "train/validation plot. CSV aggregation is unchanged."
+        ),
     )
 
     return parser.parse_args()
@@ -426,8 +444,22 @@ def main() -> None:
         Path(args.benchmark_dir) / MANIFEST_FILENAME)
     summary_out = args.summary_out or (
         Path(args.benchmark_dir) / SUMMARY_FILENAME)
+    train_val_plot_out = args.train_val_plot_out or (
+        Path(args.benchmark_dir) / TRAIN_VAL_F1_PLOT_FILENAME)
+    train_val_plot_out = Path(train_val_plot_out)
+    if train_val_plot_out.exists():
+        train_val_plot_out.unlink()
     print(f"Wrote {len(manifest_df)} run rows to {manifest_out}")
     print(f"Wrote {len(summary_df)} summary rows to {summary_out}")
+    plot_written = plot_benchmark_train_val_f1(
+        summary=summary_df,
+        plot_path=train_val_plot_out,
+        execution_id_prefix=args.plot_execution_id_prefix,
+    )
+    if plot_written:
+        print(f"Wrote train/validation F1 plot to {train_val_plot_out}")
+    else:
+        print("Skipped train/validation F1 plot: matching summaries not found")
 
 
 if __name__ == "__main__":
