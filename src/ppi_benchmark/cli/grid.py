@@ -114,6 +114,7 @@ class BenchmarkGridConfig:
     feature_sets: tuple[tuple[str, ...], ...]
     baseline_classifiers: tuple[str, ...]
     learned_classifiers: tuple[str, ...]
+    include_sgd: bool
     include_torch_mlp: bool
     include_plm: bool
     plm_model: str
@@ -175,8 +176,8 @@ class BenchmarkGridConfig:
             raise ValueError(
                 f"Unknown classifiers: {sorted(unknown_classifiers)}"
             )
-        if not self.baseline_classifiers or not self.learned_classifiers:
-            raise ValueError("Baseline and learned classifier lists must not be empty.")
+        if not self.baseline_classifiers:
+            raise ValueError("The baseline classifier list must not be empty.")
         if len(set(all_classifiers)) != len(all_classifiers):
             raise ValueError("Classifier lists cannot contain duplicates.")
         invalid_baselines = {
@@ -200,6 +201,12 @@ class BenchmarkGridConfig:
                 f"{sorted(learned_baselines)}"
             )
         torch_requested = "torch_mlp" in self.learned_classifiers
+        sgd_requested = "sgd_logistic" in self.learned_classifiers
+        if self.include_sgd != sgd_requested:
+            raise ValueError(
+                "include_sgd must match whether sgd_logistic is in "
+                "learned_classifiers."
+            )
         if self.include_torch_mlp != torch_requested:
             raise ValueError(
                 "include_torch_mlp must match whether torch_mlp is in "
@@ -212,6 +219,11 @@ class BenchmarkGridConfig:
             )
         if plm_requested and not self.plm_revision:
             raise ValueError("PLM grids require an immutable plm_revision.")
+        if plm_requested and not self.learned_classifiers:
+            raise ValueError(
+                "PLM features require at least one learned classifier. "
+                "Enable SGD or another learned backend."
+            )
         _validate_extra_train_args(self.train_args)
 
     @property
@@ -314,6 +326,10 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int, default=None)
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument(
+        "--include-sgd", action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument(
         "--include-torch-mlp", action=argparse.BooleanOptionalAction,
         default=None,
     )
@@ -384,7 +400,8 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         "protein_metadata", "sequence_clusters", "max_pairs",
         "full_cohort", "sampling_seed", "train_size", "val_size",
         "split_strategies", "split_seeds", "model_seeds",
-        "n_split_trials", "max_iter", "k", "include_torch_mlp",
+        "n_split_trials", "max_iter", "k", "include_sgd",
+        "include_torch_mlp",
         "include_plm", "plm_model", "plm_revision",
         "embedding_cache_dir", "aggregate_results", "feature_sets",
         "baseline_classifiers", "learned_classifiers", "train_args",
@@ -421,6 +438,22 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
             "learned_classifiers", profile.learned_classifiers
         )
     )
+    if args.include_sgd is not None:
+        include_sgd = args.include_sgd
+    elif "include_sgd" in config_values:
+        include_sgd = bool(config_values["include_sgd"])
+    else:
+        include_sgd = "sgd_logistic" in learned_classifiers
+    if include_sgd and "sgd_logistic" not in learned_classifiers:
+        learned_classifiers = (*learned_classifiers, "sgd_logistic")
+    elif not include_sgd:
+        learned_classifiers = tuple(
+            classifier
+            for classifier in learned_classifiers
+            if classifier != "sgd_logistic"
+        )
+    include_sgd = "sgd_logistic" in learned_classifiers
+
     if args.include_torch_mlp is not None:
         include_torch_mlp = args.include_torch_mlp
     elif "include_torch_mlp" in config_values:
@@ -527,6 +560,7 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
                 )
             ),
             learned_classifiers=learned_classifiers,
+            include_sgd=include_sgd,
             include_torch_mlp=include_torch_mlp,
             include_plm=include_plm,
             plm_model=str(_value(
@@ -606,6 +640,8 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
             ))
 
             for feature_set in config.feature_sets:
+                if not config.learned_classifiers:
+                    continue
                 configuration_name = _feature_name(feature_set)
                 run_dir = split_root / configuration_name
                 feature_args = [

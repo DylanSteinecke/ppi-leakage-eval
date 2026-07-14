@@ -8,10 +8,22 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_COMMAND = "ppi-train"
+TEST_THREAD_ENV = {
+    "MPLBACKEND": "Agg",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+# Tiny test workloads are faster and more reproducible without a large BLAS
+# thread pool. Set these before test modules import NumPy/scikit-learn.
+for variable, value in TEST_THREAD_ENV.items():
+    os.environ.setdefault(variable, value)
 
 
-@pytest.fixture
-def tiny_esm_model(tmp_path):
+@pytest.fixture(scope="session")
+def tiny_esm_model(tmp_path_factory):
     """Write a network-free tiny ESM model and tokenizer."""
     transformers = pytest.importorskip("transformers")
     vocab = [
@@ -19,7 +31,7 @@ def tiny_esm_model(tmp_path):
         "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M",
         "N", "P", "Q", "R", "S", "T", "V", "W", "Y", "X", "<mask>",
     ]
-    model_dir = tmp_path / "tiny_esm"
+    model_dir = tmp_path_factory.mktemp("models") / "tiny_esm"
     model_dir.mkdir()
     vocab_path = model_dir / "vocab.txt"
     vocab_path.write_text("\n".join(vocab) + "\n", encoding="utf-8")
@@ -74,14 +86,42 @@ def ppi_test_data(tmp_path):
     return pairs_path, fasta_path
 
 
+@pytest.fixture(scope="session")
+def test_process_environment(tmp_path_factory):
+    """Return deterministic environment overrides shared by test processes."""
+    environment = dict(TEST_THREAD_ENV)
+    environment["MPLCONFIGDIR"] = str(
+        tmp_path_factory.mktemp("matplotlib-config")
+    )
+    environment["PYTHONHASHSEED"] = "0"
+    return environment
+
+
 @pytest.fixture
-def run_cli(tmp_path):
+def run_train(monkeypatch, test_process_environment):
+    """Run the training application in-process for fast workflow tests."""
+    from ppi_benchmark.cli.train import main
+
+    for variable, value in test_process_environment.items():
+        monkeypatch.setenv(variable, value)
+
+    def _run_train(*args):
+        main([*map(str, args)])
+
+    return _run_train
+
+
+@pytest.fixture
+def run_cli(test_process_environment):
     """
-    Return a helper that runs the training CLI inside this Python environment.
+    Return a helper that runs the installed CLI in a separate Python process.
+
+    Use this only when process isolation or actual console behavior is part of
+    the contract. Most workflow tests should use ``run_train`` instead.
     """
     def _run_cli(*args, check=True):
         env = os.environ.copy()
-        env["MPLCONFIGDIR"] = str(tmp_path / "mplconfig")
+        env.update(test_process_environment)
         train_command = shutil.which(TRAIN_COMMAND)
         if train_command is None:
             raise AssertionError(

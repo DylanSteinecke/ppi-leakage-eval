@@ -19,13 +19,15 @@ Always use the project’s `ppi` conda environment:
 ```bash
 conda activate ppi
 python -m pip install -e '.[dev]'
+python -m pytest -q -m 'not slow'
 python -m pytest -q
 ruff check src tests
 BENCHMARK_PROFILE=laptop bash scripts/run_toy_ppi_example.sh
 ```
 
 Install `.[torch]` only for Torch backends and `.[plm]` for Hugging Face PLM
-work. `python -m pytest -q tests/test_sampling.py` runs a focused test file.
+work. The `not slow` selection is the fast inner loop; run the unfiltered suite
+before review. `python -m pytest -q tests/test_sampling.py` runs one test file.
 The laptop toy workflow is the preferred end-to-end smoke test.
 
 ## Coding Style & Naming Conventions

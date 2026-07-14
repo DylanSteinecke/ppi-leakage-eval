@@ -15,6 +15,7 @@ import math
 import re
 import shutil
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -257,9 +258,15 @@ def non_empty_string(value: str) -> str:
     return parsed_value
 
 
-def argument_parser() -> argparse.Namespace:
+def argument_parser(
+        argv: Sequence[str] | None = None,
+    ) -> argparse.Namespace:
     """
     Argument parser for protein-protein interaction prediction.
+
+    ``argv`` is injectable so parser and end-to-end orchestration tests do not
+    need to start a new Python process. Console entry points continue to parse
+    ``sys.argv`` when it is omitted.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -510,7 +517,7 @@ def argument_parser() -> argparse.Namespace:
             "--torch-max-epochs is the total epoch count."
         ))
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.split_col and args.split_strategy:
         parser.error("--split-col and --split-strategy cannot both be set.")
     if args.split_name and not args.split_col:
@@ -1611,13 +1618,13 @@ def log_model_outputs(
     LOGGER.info(f"\n{log_message}")
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """
     Run the full CLI pipeline.
     """
     performance = PerformanceTracker()
     with performance.stage("argument_parsing"):
-        args = argument_parser()
+        args = argument_parser(argv)
         configure_logging(args)
 
     # Load and process input data

@@ -1,15 +1,13 @@
 import gzip
 import json
 import math
-import shutil
-import subprocess
 import zipfile
 from itertools import combinations, product
-from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from ppi_benchmark.cli.prepare import main as prepare_main
 from ppi_benchmark.datasets.common import (
     apply_id_mapping_to_pairs,
     canonicalize_filter_and_assign,
@@ -25,10 +23,6 @@ from ppi_benchmark.datasets.common import (
     validate_negative_ratio,
     write_fasta,
 )
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PREP_COMMAND = "ppi-prepare"
 
 
 def write_text(path, text):
@@ -50,33 +44,9 @@ def write_test_fasta(path, protein_ids):
     )
 
 
-def run_prep_cli(*args, check=True):
-    """
-    Run the dataset-prep CLI in a subprocess.
-    """
-    prep_command = shutil.which(PREP_COMMAND)
-    if prep_command is None:
-        raise AssertionError(
-            "ppi-prepare is not installed. Run `python -m pip install -e .` "
-            "before running the test suite."
-        )
-    command = [prep_command, *map(str, args)]
-    completed_process = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if check and completed_process.returncode != 0:
-        raise AssertionError(
-            "Command failed:\n"
-            f"{' '.join(command)}\n"
-            f"STDOUT:\n{completed_process.stdout}\n"
-            f"STDERR:\n{completed_process.stderr}"
-        )
-
-    return completed_process
+def run_prep_cli(*args):
+    """Run the dataset-preparation application in-process."""
+    prepare_main([*map(str, args)])
 
 
 def pair_frame(rows):
@@ -761,11 +731,10 @@ def test_generic_edges_output_dir_overwrite_rules(tmp_path):
     run_prep_cli(*common_args)
     sentinel_path = out_dir / "overwrite_demo" / "keep_me.txt"
     write_text(sentinel_path, "do not delete\n")
-    failed_process = run_prep_cli(*common_args, check=False)
+    with pytest.raises(SystemExit, match="Output directory already exists"):
+        run_prep_cli(*common_args)
     run_prep_cli(*common_args, "--overwrite")
 
-    assert failed_process.returncode != 0
-    assert "Output directory already exists" in failed_process.stderr
     assert sentinel_path.exists()
 
 
@@ -779,18 +748,16 @@ def test_generic_edges_rejects_single_class_output_without_creating_dir(
     write_text(positives_path, "protein_a\tprotein_b\nA\tB\n")
     write_text(negatives_path, "protein_a\tprotein_b\nX\tY\n")
 
-    completed_process = run_prep_cli(
-        "generic_edges",
-        "--dataset-name", "invalid_single_class",
-        "--positive-pairs", positives_path,
-        "--negative-pairs", negatives_path,
-        "--fasta", fasta_path,
-        "--out-dir", out_dir,
-        check=False,
-    )
+    with pytest.raises(SystemExit, match="must contain both labels"):
+        run_prep_cli(
+            "generic_edges",
+            "--dataset-name", "invalid_single_class",
+            "--positive-pairs", positives_path,
+            "--negative-pairs", negatives_path,
+            "--fasta", fasta_path,
+            "--out-dir", out_dir,
+        )
 
-    assert completed_process.returncode != 0
-    assert "must contain both labels" in completed_process.stderr
     assert not (out_dir / "invalid_single_class").exists()
 
 
@@ -1069,41 +1036,39 @@ def test_biogrid_id_map_args_fail_clearly(tmp_path):
     write_text(interactions_path, "Interactor A\tInteractor B\nA\tB\nC\tD\n")
     write_text(id_map_path, "raw_id\tcanonical_id\nA\tA\nB\tB\n")
 
-    missing_map_col_process = run_prep_cli(
-        "biogrid",
-        "--dataset-name", "missing_mapping_args",
-        "--interactions", interactions_path,
-        "--fasta", fasta_path,
-        "--out-dir", out_dir,
-        "--protein-a-col", "Interactor A",
-        "--protein-b-col", "Interactor B",
-        "--id-map", id_map_path,
-        "--sample-negatives",
-        check=False,
-    )
-    stray_map_col_process = run_prep_cli(
-        "biogrid",
-        "--dataset-name", "stray_mapping_args",
-        "--interactions", interactions_path,
-        "--fasta", fasta_path,
-        "--out-dir", out_dir,
-        "--protein-a-col", "Interactor A",
-        "--protein-b-col", "Interactor B",
-        "--map-from-col", "raw_id",
-        "--sample-negatives",
-        check=False,
-    )
-
-    assert missing_map_col_process.returncode != 0
-    assert (
-        "--id-map requires --map-from-col and --map-to-col"
-        in missing_map_col_process.stderr
-    )
-    assert stray_map_col_process.returncode != 0
-    assert (
-        "--map-from-col and --map-to-col can only be used with --id-map"
-        in stray_map_col_process.stderr
-    )
+    with pytest.raises(
+            SystemExit,
+            match="--id-map requires --map-from-col and --map-to-col",
+        ):
+        run_prep_cli(
+            "biogrid",
+            "--dataset-name", "missing_mapping_args",
+            "--interactions", interactions_path,
+            "--fasta", fasta_path,
+            "--out-dir", out_dir,
+            "--protein-a-col", "Interactor A",
+            "--protein-b-col", "Interactor B",
+            "--id-map", id_map_path,
+            "--sample-negatives",
+        )
+    with pytest.raises(
+            SystemExit,
+            match=(
+                "--map-from-col and --map-to-col can only be used with "
+                "--id-map"
+            ),
+        ):
+        run_prep_cli(
+            "biogrid",
+            "--dataset-name", "stray_mapping_args",
+            "--interactions", interactions_path,
+            "--fasta", fasta_path,
+            "--out-dir", out_dir,
+            "--protein-a-col", "Interactor A",
+            "--protein-b-col", "Interactor B",
+            "--map-from-col", "raw_id",
+            "--sample-negatives",
+        )
 
 
 def test_biogrid_fails_when_id_columns_cannot_be_inferred(tmp_path):
@@ -1116,18 +1081,16 @@ def test_biogrid_fails_when_id_columns_cannot_be_inferred(tmp_path):
         "Left\tRight\nA\tB\nC\tD\n",
     )
 
-    completed_process = run_prep_cli(
-        "biogrid",
-        "--dataset-name", "biogrid_model_organism",
-        "--interactions", interactions_path,
-        "--fasta", fasta_path,
-        "--out-dir", out_dir,
-        "--sample-negatives",
-        check=False,
-    )
+    with pytest.raises(SystemExit, match="Pass --protein-a-col explicitly"):
+        run_prep_cli(
+            "biogrid",
+            "--dataset-name", "biogrid_model_organism",
+            "--interactions", interactions_path,
+            "--fasta", fasta_path,
+            "--out-dir", out_dir,
+            "--sample-negatives",
+        )
 
-    assert completed_process.returncode != 0
-    assert "Pass --protein-a-col explicitly" in completed_process.stderr
 
 
 def test_biogrid_fails_on_ambiguous_multi_id_values(tmp_path):
@@ -1140,17 +1103,14 @@ def test_biogrid_fails_on_ambiguous_multi_id_values(tmp_path):
         "Interactor A\tInteractor B\nA|ALT\tB\nC\tD\n",
     )
 
-    completed_process = run_prep_cli(
-        "biogrid",
-        "--dataset-name", "biogrid_model_organism",
-        "--interactions", interactions_path,
-        "--fasta", fasta_path,
-        "--out-dir", out_dir,
-        "--protein-a-col", "Interactor A",
-        "--protein-b-col", "Interactor B",
-        "--sample-negatives",
-        check=False,
-    )
-
-    assert completed_process.returncode != 0
-    assert "ambiguous multi-ID values" in completed_process.stderr
+    with pytest.raises(SystemExit, match="ambiguous multi-ID values"):
+        run_prep_cli(
+            "biogrid",
+            "--dataset-name", "biogrid_model_organism",
+            "--interactions", interactions_path,
+            "--fasta", fasta_path,
+            "--out-dir", out_dir,
+            "--protein-a-col", "Interactor A",
+            "--protein-b-col", "Interactor B",
+            "--sample-negatives",
+        )

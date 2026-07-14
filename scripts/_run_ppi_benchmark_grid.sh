@@ -20,12 +20,88 @@ K="${K:-3}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 RUN_NAME="${RUN_NAME:-${BENCHMARK_PROFILE}_${RUN_STAMP}}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
+INCLUDE_SGD="${INCLUDE_SGD:-1}"
 INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"
 INCLUDE_PLM="${INCLUDE_PLM:-0}"
+INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"
 PLM_MODEL="${PLM_MODEL:-facebook/esm2_t6_8M_UR50D}"
 PLM_REVISION="${PLM_REVISION:-}"
 EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-}"
-USER_ARGS=("$@")
+PLM_POOLING="${PLM_POOLING:-mean}"
+PLM_DEVICE="${PLM_DEVICE:-cpu}"
+PLM_PRECISION="${PLM_PRECISION:-float32}"
+PLM_MAX_LENGTH="${PLM_MAX_LENGTH:-1024}"
+PLM_TRUNCATION_POLICY="${PLM_TRUNCATION_POLICY:-truncate}"
+PLM_MAX_BATCH_TOKENS="${PLM_MAX_BATCH_TOKENS:-1024}"
+PLM_MAX_BATCH_SEQUENCES="${PLM_MAX_BATCH_SEQUENCES:-8}"
+
+PASSTHROUGH_ARGS=()
+while (($#)); do
+    case "$1" in
+        --include-low-resource-esm2)
+            INCLUDE_LOW_RESOURCE_ESM2=1
+            ;;
+        --no-include-low-resource-esm2)
+            INCLUDE_LOW_RESOURCE_ESM2=0
+            ;;
+        --include-plm)
+            INCLUDE_PLM=1
+            ;;
+        --no-include-plm)
+            INCLUDE_PLM=0
+            ;;
+        --include-sgd|--sgd)
+            INCLUDE_SGD=1
+            ;;
+        --no-include-sgd|--no-sgd)
+            INCLUDE_SGD=0
+            ;;
+        --include-torch-mlp)
+            INCLUDE_TORCH_MLP=1
+            ;;
+        --no-include-torch-mlp)
+            INCLUDE_TORCH_MLP=0
+            ;;
+        --)
+            shift
+            PASSTHROUGH_ARGS+=("$@")
+            break
+            ;;
+        *)
+            PASSTHROUGH_ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
+
+LOW_RESOURCE_ESM2_ARGS=()
+case "$INCLUDE_LOW_RESOURCE_ESM2" in
+    1)
+        INCLUDE_PLM=1
+        if [[ -z "$PLM_REVISION" \
+                && "$PLM_MODEL" == "facebook/esm2_t6_8M_UR50D" ]]; then
+            PLM_REVISION="c731040fcd8d73dceaa04b0a8e6329b345b0f5df"
+        fi
+        if [[ -z "$EMBEDDING_CACHE_DIR" ]]; then
+            EMBEDDING_CACHE_DIR="results/embedding_cache"
+        fi
+        LOW_RESOURCE_ESM2_ARGS=(
+            --plm-pooling "$PLM_POOLING"
+            --plm-device "$PLM_DEVICE"
+            --plm-precision "$PLM_PRECISION"
+            --plm-max-length "$PLM_MAX_LENGTH"
+            --plm-truncation-policy "$PLM_TRUNCATION_POLICY"
+            --plm-max-batch-tokens "$PLM_MAX_BATCH_TOKENS"
+            --plm-max-batch-sequences "$PLM_MAX_BATCH_SEQUENCES"
+        )
+        ;;
+    0) ;;
+    *)
+        echo "INCLUDE_LOW_RESOURCE_ESM2 must be 0 or 1." >&2
+        return 2
+        ;;
+esac
+USER_ARGS=("${LOW_RESOURCE_ESM2_ARGS[@]}" "${PASSTHROUGH_ARGS[@]}")
 
 read -r -a SPLIT_STRATEGY_VALUES <<< "$SPLIT_STRATEGIES"
 read -r -a SPLIT_SEED_VALUES <<< "$SPLIT_SEEDS"
@@ -120,6 +196,14 @@ case "$INCLUDE_TORCH_MLP" in
         return 2
         ;;
 esac
+case "$INCLUDE_SGD" in
+    1) GRID_ARGS+=(--include-sgd) ;;
+    0) GRID_ARGS+=(--no-include-sgd) ;;
+    *)
+        echo "INCLUDE_SGD must be 0 or 1." >&2
+        return 2
+        ;;
+esac
 case "$INCLUDE_PLM" in
     1)
         if [[ -z "$PLM_REVISION" ]]; then
@@ -146,5 +230,8 @@ echo "Benchmark profile: $BENCHMARK_PROFILE"
 echo "Split fractions: train=$TRAIN_SIZE, val=$VAL_SIZE, test=remainder"
 echo "Split seeds: ${SPLIT_SEED_VALUES[*]}"
 echo "Model seeds: ${MODEL_SEED_VALUES[*]}"
+if [[ "$INCLUDE_LOW_RESOURCE_ESM2" == "1" ]]; then
+    echo "Low-resource ESM-2: enabled (device=$PLM_DEVICE, token budget=$PLM_MAX_BATCH_TOKENS)"
+fi
 
 ppi-grid "${GRID_ARGS[@]}" -- "${USER_ARGS[@]}"

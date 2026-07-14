@@ -41,7 +41,7 @@ def test_sequence_cluster_loader_normalizes_and_rejects_duplicate_proteins(
 
 
 def test_c3_cli_uses_sequence_clusters_as_atomic_homology_groups(
-        tmp_path, run_cli):
+        tmp_path, run_train):
     n_proteins = 18
     pairs_path = tmp_path / "pairs.csv"
     fasta_path = tmp_path / "proteins.fasta"
@@ -75,7 +75,7 @@ def test_c3_cli_uses_sequence_clusters_as_atomic_homology_groups(
     })
     cluster_rows.to_csv(clusters_path, index=False)
 
-    run_cli(
+    run_train(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--sequence-clusters", clusters_path,
@@ -118,7 +118,7 @@ def test_c3_cli_uses_sequence_clusters_as_atomic_homology_groups(
 
 
 def test_c2_c3_cluster_mapping_must_cover_the_pre_sampling_cohort(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     pairs = pd.read_csv(pairs_path)
     protein_ids = sorted(
@@ -133,17 +133,14 @@ def test_c2_c3_cluster_mapping_must_cover_the_pre_sampling_cohort(
         ],
     }).to_csv(clusters_path, index=False)
 
-    completed_process = run_cli(
-        "--pairs", pairs_path,
-        "--fasta", fasta_path,
-        "--sequence-clusters", clusters_path,
-        "--max-pairs", "12",
-        "--run-dir", tmp_path / "missing_cluster",
-        "--classifier", "always_positive",
-        "--split-strategy", "c3",
-        "--no-metrics-plots",
-        check=False,
-    )
-
-    assert completed_process.returncode != 0
-    assert "must map every eligible protein" in completed_process.stderr
+    with pytest.raises(ValueError, match="must map every eligible protein"):
+        run_train(
+            "--pairs", pairs_path,
+            "--fasta", fasta_path,
+            "--sequence-clusters", clusters_path,
+            "--max-pairs", "12",
+            "--run-dir", tmp_path / "missing_cluster",
+            "--classifier", "always_positive",
+            "--split-strategy", "c3",
+            "--no-metrics-plots",
+        )

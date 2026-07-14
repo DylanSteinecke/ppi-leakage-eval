@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from ppi_benchmark.cli.aggregate import (
     aggregate_benchmark_results,
@@ -223,6 +224,7 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     assert set(summary_df["task"]) == {"ppi"}
 
 
+@pytest.mark.integration
 def test_aggregate_benchmark_results_reads_real_cli_run(
         tmp_path, ppi_test_data, run_cli):
     pairs_path, fasta_path = ppi_test_data
@@ -347,19 +349,40 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
     assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
+    assert 'INCLUDE_SGD="${INCLUDE_SGD:-1}"' in grid_text
     assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
+    assert (
+        'INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"'
+        in grid_text
+    )
     assert 'PLM_REVISION="${PLM_REVISION:-}"' in grid_text
     assert 'SPLIT_SEEDS="${SPLIT_SEEDS:-0}"' in grid_text
     assert '--split-seeds "${SPLIT_SEED_VALUES[@]}"' in grid_text
     assert '--model-seeds "${MODEL_SEED_VALUES[@]}"' in grid_text
     assert "--include-torch-mlp" in grid_text
+    assert "--include-low-resource-esm2" in yeast_text
+    assert "--include-low-resource-esm2" in toy_text
 
 
 def test_benchmark_shell_wrapper_forwards_one_grid_command(tmp_path):
     grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
 
-    def wrapper_command(profile, include_torch=False, include_plm=False):
-        suffix = f"_{int(include_torch)}_{int(include_plm)}"
+    def wrapper_command(
+            profile, include_torch=False, include_plm=False,
+            include_low_resource_esm2=False,
+            plm_revision="0123456789abcdef0123456789abcdef01234567",
+            embedding_cache_dir=None,
+            runner_args=(),
+        ):
+        suffix = (
+            f"_{int(include_torch)}_{int(include_plm)}"
+            f"_{int(include_low_resource_esm2)}"
+        )
+        if runner_args:
+            suffix += "_" + "_".join(
+                argument.lstrip("-").replace("-", "_")
+                for argument in runner_args
+            )
         calls_path = tmp_path / f"{profile}{suffix}_calls.txt"
         out_dir = tmp_path / f"{profile}_results"
         shell_script = r'''
@@ -370,8 +393,9 @@ OUT_DIR="$3"
 BENCHMARK_PROFILE="$4"
 INCLUDE_TORCH_MLP="$5"
 INCLUDE_PLM="$6"
-PLM_REVISION="0123456789abcdef0123456789abcdef01234567"
-EMBEDDING_CACHE_DIR="$7"
+INCLUDE_LOW_RESOURCE_ESM2="$7"
+PLM_REVISION="$8"
+EMBEDDING_CACHE_DIR="$9"
 ppi-grid() {
     printf '%s\n' "$*" >> "$CALLS_PATH"
 }
@@ -383,7 +407,8 @@ MAX_ITER=100
 K=2
 RUN_STAMP="profile-test"
 AGGREGATE_RESULTS=0
-source "$GRID_PATH" --no-metrics-plots
+shift 9
+source "$GRID_PATH" --no-metrics-plots "$@"
 '''
         subprocess.run(
             [
@@ -397,7 +422,14 @@ source "$GRID_PATH" --no-metrics-plots
                 profile,
                 "1" if include_torch else "0",
                 "1" if include_plm else "0",
-                str(tmp_path / "shared_embeddings"),
+                "1" if include_low_resource_esm2 else "0",
+                plm_revision,
+                str(
+                    tmp_path / "shared_embeddings"
+                    if embedding_cache_dir is None
+                    else embedding_cache_dir
+                ),
+                *runner_args,
             ],
             check=True,
             cwd=REPO_ROOT,
@@ -411,6 +443,17 @@ source "$GRID_PATH" --no-metrics-plots
     laptop_call = wrapper_command("laptop")
     laptop_torch_call = wrapper_command("laptop", include_torch=True)
     laptop_plm_call = wrapper_command("laptop", include_plm=True)
+    laptop_esm2_call = wrapper_command(
+        "laptop",
+        include_low_resource_esm2=False,
+        plm_revision="",
+        embedding_cache_dir="",
+        runner_args=("--include-low-resource-esm2",),
+    )
+    laptop_no_sgd_call = wrapper_command(
+        "laptop",
+        runner_args=("--no-sgd",),
+    )
     exhaustive_call = wrapper_command("exhaustive")
 
     assert "--profile laptop" in laptop_call
@@ -421,9 +464,24 @@ source "$GRID_PATH" --no-metrics-plots
     assert "--no-aggregate-results" in laptop_call
     assert "--no-metrics-plots" in laptop_call
     assert "--no-include-torch-mlp" in laptop_call
+    assert "--include-sgd" in laptop_call
+    assert "--no-include-sgd" in laptop_no_sgd_call
     assert "--include-torch-mlp" in laptop_torch_call
     assert "--include-plm" in laptop_plm_call
     assert "--plm-model facebook/esm2_t6_8M_UR50D" in laptop_plm_call
     assert "--plm-revision 0123456789abcdef" in laptop_plm_call
     assert "--embedding-cache-dir" in laptop_plm_call
+    assert "--include-plm" in laptop_esm2_call
+    assert (
+        "--plm-revision c731040fcd8d73dceaa04b0a8e6329b345b0f5df"
+        in laptop_esm2_call
+    )
+    assert "--embedding-cache-dir results/embedding_cache" in laptop_esm2_call
+    assert "--plm-pooling mean" in laptop_esm2_call
+    assert "--plm-device cpu" in laptop_esm2_call
+    assert "--plm-precision float32" in laptop_esm2_call
+    assert "--plm-max-length 1024" in laptop_esm2_call
+    assert "--plm-truncation-policy truncate" in laptop_esm2_call
+    assert "--plm-max-batch-tokens 1024" in laptop_esm2_call
+    assert "--plm-max-batch-sequences 8" in laptop_esm2_call
     assert "--profile exhaustive" in exhaustive_call

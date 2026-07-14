@@ -5,6 +5,7 @@ Prepare raw PPI datasets into canonical pipeline inputs.
 """
 
 import argparse
+from collections.abc import Sequence
 
 from ..datasets import biogrid, generic_edges
 
@@ -29,12 +30,12 @@ def argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """
     Run the selected dataset-preparation loader.
     """
     parser = argument_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         args.func(args)
     except ValueError as exc:

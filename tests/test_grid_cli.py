@@ -85,6 +85,7 @@ def test_profile_and_optional_model_expansion(tmp_path):
     assert exhaustive.max_pairs is None
     assert len(build_run_specs(laptop_plm)) == 16
     assert laptop_plm.max_pairs == 10_000
+    assert laptop_plm.include_sgd is True
     assert "torch_mlp" in laptop_plm.learned_classifiers
     plm_specs = [
         spec
@@ -94,6 +95,31 @@ def test_profile_and_optional_model_expansion(tmp_path):
     assert len(plm_specs) == 4
     assert all("--plm-revision" in spec.train_args for spec in plm_specs)
     assert all("--embedding-cache-dir" in spec.train_args for spec in plm_specs)
+
+
+def test_sgd_model_family_can_be_disabled_independently(tmp_path):
+    baseline_only = grid_config(
+        tmp_path,
+        "--profile", "laptop",
+        "--split-strategies", "random",
+        "--no-include-sgd",
+        "--no-aggregate-results",
+    )
+
+    specs = build_run_specs(baseline_only)
+
+    assert baseline_only.include_sgd is False
+    assert baseline_only.learned_classifiers == ()
+    assert [spec.configuration_name for spec in specs] == ["baselines"]
+
+    with pytest.raises(SystemExit):
+        grid_config(
+            tmp_path,
+            "--profile", "laptop",
+            "--no-include-sgd",
+            "--include-plm",
+            "--plm-revision", "0123456789abcdef",
+        )
 
 
 def test_toml_config_and_cli_overrides_are_resolved(tmp_path):

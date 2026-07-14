@@ -5,6 +5,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from ppi_benchmark.cli.train import argument_parser, configure_logging
+
 
 REMOVED_OUTPUT_FLAGS = [
     "--pred-out",
@@ -41,7 +43,7 @@ def assert_not_written(*paths):
 
 def base_cli_args(pairs_path, fasta_path, run_dir):
     """
-    Return fast CLI args shared by subprocess regression tests.
+    Return fast CLI args shared by workflow regression tests.
     """
     args = [
         "--pairs", pairs_path,
@@ -58,38 +60,46 @@ def base_cli_args(pairs_path, fasta_path, run_dir):
     return args
 
 
-def test_cli_without_run_dir_fails_clearly(ppi_test_data, run_cli):
+def parse_cli_args(*args):
+    """Parse CLI arguments without starting a Python subprocess."""
+    return argument_parser([*map(str, args)])
+
+
+def test_cli_without_run_dir_fails_clearly(ppi_test_data, capsys):
     pairs_path, fasta_path = ppi_test_data
 
-    completed_process = run_cli(
-        "--pairs", pairs_path,
-        "--fasta", fasta_path,
-        "--classifier", "always_positive",
-        check=False,
-    )
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            "--pairs", pairs_path,
+            "--fasta", fasta_path,
+            "--classifier", "always_positive",
+        )
 
-    assert completed_process.returncode != 0
-    assert "--run-dir" in completed_process.stderr
+    assert error.value.code == 2
+    assert "--run-dir" in capsys.readouterr().err
 
 
-def test_cli_help_shows_canonical_seed_flags_only(run_cli):
-    completed_process = run_cli("--help")
+def test_cli_help_shows_canonical_seed_flags_only(capsys):
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args("--help")
+    stdout = capsys.readouterr().out
 
-    assert "--split-seed" in completed_process.stdout
-    assert "--model-seeds" in completed_process.stdout
-    assert "--num-reruns" not in completed_process.stdout
-    assert "--model-seed MODEL_SEED" not in completed_process.stdout
-    assert "--append-results" not in completed_process.stdout
-    assert "--execution-id" not in completed_process.stdout
-    assert "--classifiers" not in completed_process.stdout
+    assert error.value.code == 0
+    assert "--split-seed" in stdout
+    assert "--model-seeds" in stdout
+    assert "--num-reruns" not in stdout
+    assert "--model-seed MODEL_SEED" not in stdout
+    assert "--append-results" not in stdout
+    assert "--execution-id" not in stdout
+    assert "--classifiers" not in stdout
 
 
 def test_explicit_model_seeds_control_every_fit(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "explicit_model_seeds"
 
-    run_cli(
+    run_train(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", run_dir,
@@ -113,10 +123,10 @@ def test_explicit_model_seeds_control_every_fit(
 
 
 def test_legacy_seed_flags_remain_accepted_with_warning(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, caplog):
     pairs_path, fasta_path = ppi_test_data
 
-    completed_process = run_cli(
+    args = parse_cli_args(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", tmp_path / "legacy_seeds",
@@ -126,37 +136,39 @@ def test_legacy_seed_flags_remain_accepted_with_warning(
         "--num-reruns", "1",
         "--no-metrics-plots",
     )
+    with caplog.at_level("WARNING"):
+        configure_logging(args)
 
-    assert "Deprecated CLI: --seed is deprecated" in completed_process.stderr
+    assert "Deprecated CLI: --seed is deprecated" in caplog.text
     assert "--model-seed/--num-reruns are deprecated" in (
-        completed_process.stderr
+        caplog.text
     )
 
 
 @pytest.mark.parametrize("removed_flag", REMOVED_OUTPUT_FLAGS)
 def test_removed_output_flags_are_not_accepted(
-        tmp_path, ppi_test_data, run_cli, removed_flag):
+        tmp_path, ppi_test_data, capsys, removed_flag):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "run"
 
-    completed_process = run_cli(
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        removed_flag,
-        tmp_path / "old_output.csv",
-        "--no-metrics-plots",
-        check=False,
-    )
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            *base_cli_args(pairs_path, fasta_path, run_dir),
+            removed_flag,
+            tmp_path / "old_output.csv",
+            "--no-metrics-plots",
+        )
 
-    assert completed_process.returncode != 0
-    assert "unrecognized arguments" in completed_process.stderr
+    assert error.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_cli_with_run_dir_writes_no_validation_outputs(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "run"
 
-    run_cli(*base_cli_args(pairs_path, fasta_path, run_dir))
+    run_train(*base_cli_args(pairs_path, fasta_path, run_dir))
 
     assert_exists(
         run_dir / "train_metrics.csv",
@@ -213,11 +225,11 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
 
 
 def test_default_generated_split_is_true_train_val_test(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "generated_val_run"
 
-    run_cli(
+    run_train(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", run_dir,
@@ -225,6 +237,7 @@ def test_default_generated_split_is_true_train_val_test(
         "--max-iter", "100",
         "--split-seed", "11",
         "--model-seeds", "11",
+        "--no-metrics-plots",
     )
 
     assert_exists(
@@ -232,10 +245,6 @@ def test_default_generated_split_is_true_train_val_test(
         run_dir / "val_metrics.csv",
         run_dir / "train_metrics_summary.csv",
         run_dir / "val_metrics_summary.csv",
-        run_dir / "plots" / "train_metrics_summary.svg",
-        run_dir / "plots" / "val_metrics_summary.svg",
-        run_dir / "plots" / "train_val_metrics_summary.svg",
-        run_dir / "plots" / "train_val_metrics_summary.png",
     )
     assert_not_written(
         run_dir / "test_metrics.csv",
@@ -267,11 +276,11 @@ def test_default_generated_split_is_true_train_val_test(
 
 
 def test_learned_model_reports_matrix_and_solver_performance(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "learned_performance"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--classifier", "sgd_logistic",
         "--features", "count",
@@ -298,12 +307,12 @@ def test_learned_model_reports_matrix_and_solver_performance(
 
 
 def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pytest.importorskip("torch")
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "torch_mlp"
 
-    run_cli(
+    run_train(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", run_dir,
@@ -322,6 +331,7 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
         "--torch-patience", "1",
         "--torch-min-delta", "100",
         "--torch-device", "cpu",
+        "--no-metrics-plots",
     )
 
     assert_exists(
@@ -333,11 +343,6 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
         run_dir / "test_metrics_summary.csv",
         run_dir / "predictions.csv",
         run_dir / "training_history.csv",
-        run_dir / "plots" / "train_metrics_summary.svg",
-        run_dir / "plots" / "val_metrics_summary.svg",
-        run_dir / "plots" / "test_metrics_summary.svg",
-        run_dir / "plots" / "train_val_metrics_summary.svg",
-        run_dir / "plots" / "train_test_metrics_summary.svg",
         run_dir / "performance.jsonl",
     )
     history = pd.read_csv(run_dir / "training_history.csv")
@@ -412,8 +417,10 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
     assert model_run["decision_threshold"]["metric"] == "f1"
 
 
+@pytest.mark.integration
+@pytest.mark.slow
 def test_torch_mlp_cli_resumes_from_last_checkpoint(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_cli, capsys):
     pytest.importorskip("torch")
     pairs_path, fasta_path = ppi_test_data
     first_run_dir = tmp_path / "torch_first"
@@ -468,21 +475,23 @@ def test_torch_mlp_cli_resumes_from_last_checkpoint(
     assert hashlib.sha256(last_checkpoint.read_bytes()).hexdigest() == (
         source_checkpoint_sha256)
 
-    rejected = run_cli(
-        *shared_args,
-        "--run-dir", first_run_dir,
-        "--torch-max-epochs", "2",
-        "--torch-resume-from", last_checkpoint,
-        check=False,
-    )
-    assert rejected.returncode != 0
-    assert "must be outside --run-dir" in rejected.stderr
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            *shared_args,
+            "--run-dir", first_run_dir,
+            "--torch-max-epochs", "2",
+            "--torch-resume-from", last_checkpoint,
+        )
+    assert error.value.code == 2
+    assert "must be outside --run-dir" in capsys.readouterr().err
     assert hashlib.sha256(last_checkpoint.read_bytes()).hexdigest() == (
         source_checkpoint_sha256)
 
 
+@pytest.mark.integration
+@pytest.mark.slow
 def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
-        tmp_path, ppi_test_data, tiny_esm_model, run_cli):
+        tmp_path, ppi_test_data, tiny_esm_model, run_cli, run_train):
     pytest.importorskip("torch")
     pairs_path, fasta_path = ppi_test_data
     cache_dir = tmp_path / "embedding_cache"
@@ -578,7 +587,7 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
         run_dir = tmp_path / f"heldout_labels_{name}"
         provided_args = list(common_args)
         provided_args[1] = input_pairs
-        run_cli(
+        run_train(
             *provided_args,
             "--run-dir", run_dir,
             "--split-col", "heldout_split",
@@ -605,12 +614,12 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
 
 
 def test_split_and_model_seeds_are_independent(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     assignments_by_seed = {}
     for split_seed in (3, 7):
         run_dir = tmp_path / f"split_seed_{split_seed}"
-        run_cli(
+        run_train(
             "--pairs", pairs_path,
             "--fasta", fasta_path,
             "--run-dir", run_dir,
@@ -637,11 +646,11 @@ def test_split_and_model_seeds_are_independent(
 
 
 def test_cli_samples_the_whole_cohort_before_splitting(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "sampled_run"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--max-pairs", "12",
         "--sampling-seed", "17",
@@ -675,7 +684,7 @@ def test_cli_samples_the_whole_cohort_before_splitting(
 
 
 def test_cli_sampling_append_requires_the_same_selection(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "sample_append"
     common_args = [
@@ -685,36 +694,33 @@ def test_cli_sampling_append_requires_the_same_selection(
         "--no-metrics-plots",
     ]
 
-    run_cli(*common_args)
-    run_cli(*common_args, "--append-results")
+    run_train(*common_args)
+    run_train(*common_args, "--append-results")
     changed_selection = common_args.copy()
     changed_selection[changed_selection.index("--sampling-seed") + 1] = "18"
-    completed_process = run_cli(
-        *changed_selection,
-        "--append-results",
-        check=False,
-    )
-
-    assert completed_process.returncode != 0
-    assert "selected_examples.csv does not match" in completed_process.stderr
+    with pytest.raises(
+            SystemExit,
+            match=r"selected_examples\.csv does not match",
+        ):
+        run_train(*changed_selection, "--append-results")
 
 
 def test_cli_rejects_two_sampling_size_options(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, capsys):
     pairs_path, fasta_path = ppi_test_data
-    completed_process = run_cli(
-        *base_cli_args(pairs_path, fasta_path, tmp_path / "run"),
-        "--max-pairs", "12",
-        "--sample-fraction", "0.5",
-        check=False,
-    )
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            *base_cli_args(pairs_path, fasta_path, tmp_path / "run"),
+            "--max-pairs", "12",
+            "--sample-fraction", "0.5",
+        )
 
-    assert completed_process.returncode != 0
-    assert "not allowed with argument" in completed_process.stderr
+    assert error.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
 
 
 def test_provided_split_sampling_preserves_every_split_and_label(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     pairs = pd.read_csv(pairs_path)
     pairs["provided_split"] = ["train"] * 8 + ["val"] * 8 + ["test"] * 8
@@ -722,7 +728,7 @@ def test_provided_split_sampling_preserves_every_split_and_label(
     pairs.to_csv(provided_pairs_path, index=False)
     run_dir = tmp_path / "provided_sample"
 
-    run_cli(
+    run_train(
         *base_cli_args(provided_pairs_path, fasta_path, run_dir),
         "--split-col", "provided_split",
         "--max-pairs", "12",
@@ -749,13 +755,14 @@ def test_provided_split_sampling_preserves_every_split_and_label(
 
 
 def test_validation_without_eval_test_set_writes_only_train_val_outputs(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "val_run"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--val-size", "0.25",
+        "--no-metrics-plots",
     )
 
     assert_exists(
@@ -763,11 +770,6 @@ def test_validation_without_eval_test_set_writes_only_train_val_outputs(
         run_dir / "val_metrics.csv",
         run_dir / "train_metrics_summary.csv",
         run_dir / "val_metrics_summary.csv",
-        run_dir / "plots" / "train_metrics_summary.svg",
-        run_dir / "plots" / "val_metrics_summary.svg",
-        run_dir / "plots" / "train_val_metrics_summary.svg",
-        run_dir / "plots" / "train_val_metrics_summary.png",
-        run_dir / "plots" / "train_val_f1_heatmap.png",
     )
     assert_not_written(
         run_dir / "test_metrics.csv",
@@ -790,11 +792,11 @@ def test_validation_without_eval_test_set_writes_only_train_val_outputs(
 
 
 def test_validation_with_eval_test_set_writes_train_val_test_outputs(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "val_test_run"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--val-size", "0.25",
         "--eval-test-set",
@@ -822,7 +824,7 @@ def test_validation_with_eval_test_set_writes_train_val_test_outputs(
 
 
 def test_append_results_requires_identical_split(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "append_run"
     common_args = [
@@ -830,33 +832,28 @@ def test_append_results_requires_identical_split(
         "--no-metrics-plots",
     ]
 
-    run_cli(*common_args)
-    run_cli(*common_args, "--append-results")
+    run_train(*common_args)
+    run_train(*common_args, "--append-results")
     summary_path = run_dir / "train_metrics_summary.csv"
     summary_before_failure = summary_path.read_bytes()
 
     changed_split = common_args.copy()
     changed_split[changed_split.index("--split-seed") + 1] = "12"
-    completed_process = run_cli(
-        *changed_split,
-        "--append-results",
-        check=False,
-    )
+    with pytest.raises(SystemExit, match="different split"):
+        run_train(*changed_split, "--append-results")
 
-    assert completed_process.returncode != 0
-    assert "different split" in completed_process.stderr
     assert summary_path.read_bytes() == summary_before_failure
 
 
 def test_append_results_rejects_changed_fasta_contents(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "append_changed_fasta"
     common_args = [
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--no-metrics-plots",
     ]
-    run_cli(*common_args)
+    run_train(*common_args)
     summary_path = run_dir / "train_metrics_summary.csv"
     summary_before_failure = summary_path.read_bytes()
     changed_fasta_path = tmp_path / "changed_proteins.fasta"
@@ -870,19 +867,14 @@ def test_append_results_rejects_changed_fasta_contents(
     changed_args = common_args.copy()
     changed_args[changed_args.index("--fasta") + 1] = changed_fasta_path
 
-    completed_process = run_cli(
-        *changed_args,
-        "--append-results",
-        check=False,
-    )
+    with pytest.raises(SystemExit, match="input file contents changed"):
+        run_train(*changed_args, "--append-results")
 
-    assert completed_process.returncode != 0
-    assert "input file contents changed" in completed_process.stderr
     assert summary_path.read_bytes() == summary_before_failure
 
 
 def test_append_results_rejects_changed_protein_metadata(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     protein_ids = sorted(
         set(pd.read_csv(pairs_path)["protein_a"])
@@ -900,22 +892,16 @@ def test_append_results_rejects_changed_protein_metadata(
         "--no-metrics-plots",
     ]
 
-    run_cli(*common_args)
+    run_train(*common_args)
     protein_metadata = pd.read_csv(protein_metadata_path, dtype="string")
     protein_metadata.loc[0, "taxon_id"] = "2"
     protein_metadata.to_csv(protein_metadata_path, index=False)
-    completed_process = run_cli(
-        *common_args,
-        "--append-results",
-        check=False,
-    )
-
-    assert completed_process.returncode != 0
-    assert "protein_metadata_file_sha256" in completed_process.stderr
+    with pytest.raises(SystemExit, match="protein_metadata_file_sha256"):
+        run_train(*common_args, "--append-results")
 
 
 def test_append_results_adds_model_rows_and_regenerates_summary(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "append_success"
     common_args = [
@@ -929,8 +915,8 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         "--no-metrics-plots",
     ]
 
-    run_cli(*common_args, "--classifier", "always_positive")
-    run_cli(
+    run_train(*common_args, "--classifier", "always_positive")
+    run_train(
         *common_args,
         "--classifier", "always_negative",
         "--append-results",
@@ -965,7 +951,7 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
 
 
 def test_canonical_protein_metadata_is_discovered_and_audited(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     pairs = pd.read_csv(pairs_path)
     protein_ids = sorted(set(pairs["protein_a"]) | set(pairs["protein_b"]))
@@ -977,7 +963,7 @@ def test_canonical_protein_metadata_is_discovered_and_audited(
     }).to_csv(protein_metadata_path, index=False)
     run_dir = tmp_path / "species_metadata"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--no-metrics-plots",
     )
@@ -1000,11 +986,11 @@ def test_canonical_protein_metadata_is_discovered_and_audited(
 
 
 def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "fresh_cleanup"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--val-size", "0.25",
         "--eval-test-set",
@@ -1012,7 +998,7 @@ def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
     )
     assert_exists(run_dir / "test_metrics.csv", run_dir / "predictions.csv")
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--val-size", "0.25",
         "--no-metrics-plots",
@@ -1030,11 +1016,11 @@ def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
 
 
 def test_no_metrics_plots_writes_metrics_without_plot_artifacts(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "no_plots"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_path, fasta_path, run_dir),
         "--no-metrics-plots",
     )
@@ -1050,7 +1036,7 @@ def test_no_metrics_plots_writes_metrics_without_plot_artifacts(
 
 
 def test_dropped_pairs_and_metadata_are_written_for_missing_fasta_proteins(
-        tmp_path, ppi_test_data, run_cli):
+        tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     pairs = pd.read_csv(pairs_path)
     missing_pairs = pd.DataFrame({
@@ -1067,7 +1053,7 @@ def test_dropped_pairs_and_metadata_are_written_for_missing_fasta_proteins(
     pairs_with_missing.to_csv(pairs_with_missing_path, index=False)
     run_dir = tmp_path / "dropped_pairs"
 
-    run_cli(
+    run_train(
         *base_cli_args(pairs_with_missing_path, fasta_path, run_dir),
         "--no-metrics-plots",
     )
@@ -1087,7 +1073,7 @@ def test_dropped_pairs_and_metadata_are_written_for_missing_fasta_proteins(
 
 
 def test_c3_three_way_metadata_reports_pairwise_disjoint_proteins(
-        tmp_path, run_cli):
+        tmp_path, run_train):
     run_dir = tmp_path / "c3_metadata"
     pair_rows = ["pair_id,protein_a,protein_b,label"]
     fasta_records = []
@@ -1105,7 +1091,7 @@ def test_c3_three_way_metadata_reports_pairwise_disjoint_proteins(
     pairs_path.write_text("\n".join(pair_rows) + "\n", encoding="utf-8")
     fasta_path.write_text("".join(fasta_records), encoding="utf-8")
 
-    run_cli(
+    run_train(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", run_dir,
