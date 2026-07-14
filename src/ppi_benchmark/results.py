@@ -138,16 +138,6 @@ def reset_output_file(output_path: Path, append_results: bool) -> None:
 ####################
 # Metric summaries #
 ####################
-def default_summary_path(metrics_path: Path) -> Path:
-    """
-    Build the default summary path from the run-level metrics path.
-    """
-    summary_path = metrics_path.with_name(
-        f"{metrics_path.stem}_summary{metrics_path.suffix}")
-
-    return summary_path
-
-
 def summarize_metrics(metrics_path: Path) -> pd.DataFrame:
     """
     Summarize per-run metrics with means and standard errors by model type.

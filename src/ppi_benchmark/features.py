@@ -240,25 +240,6 @@ def compose_split_feature_matrices(
     return x_train, x_val, x_test
 
 
-def make_pair_features(
-        df: pd.DataFrame, sequences: dict[str, str], vectorizer: Any,
-    ) -> Any:
-    """
-    Create features for each protein pair.
-    """
-    protein_ids = unique_protein_ids((df,))
-    protein_features = vectorizer.transform(
-        [sequences[protein_id] for protein_id in protein_ids]
-    )
-    prot_pair_fts = compose_pair_features(
-        df=df,
-        protein_ids=protein_ids,
-        protein_features=protein_features,
-    )
-
-    return prot_pair_fts
-
-
 def build_feature_matrices(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame | None,

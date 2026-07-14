@@ -259,41 +259,6 @@ def protein_ids_in_pairs(pairs: pd.DataFrame) -> set[str]:
     return protein_ids
 
 
-def validate_disjoint_proteins(
-        train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
-    """
-    Fail fast if any protein appears in both train and test pairs.
-    """
-    overlap = protein_ids_in_pairs(train_df) & protein_ids_in_pairs(test_df)
-    if overlap:
-        examples = sorted(overlap)[:10]
-        raise ValueError(
-            f"Train/test split has {len(overlap)} shared proteins. "
-            f"Examples: {examples}")
-
-
-def validate_disjoint_splits(
-        split_dfs: dict[str, pd.DataFrame | None],
-    ) -> None:
-    """
-    Fail fast if any protein appears in more than one non-empty split.
-    """
-    protein_sets = {
-        split_name: protein_ids_in_pairs(split_df)
-        for split_name, split_df in split_dfs.items()
-        if split_df is not None and not split_df.empty
-    }
-    split_names = list(protein_sets)
-    for left_index, left_name in enumerate(split_names):
-        for right_name in split_names[left_index + 1:]:
-            overlap = protein_sets[left_name] & protein_sets[right_name]
-            if overlap:
-                examples = sorted(overlap)[:10]
-                raise ValueError(
-                    f"{left_name}/{right_name} split has {len(overlap)} "
-                    f"shared proteins. Examples: {examples}")
-
-
 def validate_splits(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame,
@@ -315,14 +280,6 @@ def validate_splits(
             split_df["label"],
             context=f"{split_name} split",
         )
-
-
-def validate_train_test_splits(
-        train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
-    """
-    Backward-compatible train/test split validator.
-    """
-    validate_splits(train_df=train_df, val_df=None, test_df=test_df)
 
 
 def make_random_pair_split(

@@ -13,9 +13,6 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.svm import LinearSVC
 
-from .evaluation import binary_classification_metrics
-
-
 BASELINE_CLASSIFIER_CHOICES = ("always_positive", "always_negative")
 SKLEARN_LEARNED_CLASSIFIER_CHOICES = (
     "logistic",
@@ -163,25 +160,3 @@ def default_decision_threshold(model: Any) -> float:
         threshold = 0.5
 
     return threshold
-
-
-def get_metrics(
-        y_true: np.ndarray, y_score: np.ndarray, y_pred: np.ndarray,
-        split_name: str | None = None,
-    ) -> dict[str, float]:
-    """
-    Return binary classification metrics for a split.
-
-    Inputs are flattened so callers can pass pandas Series, lists, or numpy
-    arrays without changing metric behavior.
-    """
-    metrics = binary_classification_metrics(
-        targets=y_true,
-        scores=y_score,
-        predictions=y_pred,
-    )
-    prefix = f"_{split_name}" if split_name else ""
-    return {
-        f"{metric_name}{prefix}": metric_value
-        for metric_name, metric_value in metrics.items()
-    }
