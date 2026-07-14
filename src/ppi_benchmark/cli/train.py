@@ -9,6 +9,7 @@ in focused helper modules so future pipeline variants can reuse them.
 """
 
 import argparse
+import json
 import logging
 import math
 import re
@@ -36,9 +37,12 @@ from ..datasets.common import (
 )
 from ..features import (
     FEATURE_CHOICES,
+    PLM_FEATURE,
     build_feature_matrices,
+    compose_split_feature_matrices,
     make_feature_name,
     normalize_feature_types,
+    unique_protein_ids,
 )
 from ..inputs import (
     C2_SPLIT_STRATEGY,
@@ -71,6 +75,15 @@ from ..performance import (
     append_performance_report,
     peak_memory_bytes,
 )
+from ..protein_encoders import (
+    DEFAULT_ESM2_MODEL,
+    PLM_POOLING_CHOICES,
+    PLM_PRECISION_CHOICES,
+    PLM_TRUNCATION_CHOICES,
+    EmbeddingCache,
+    FrozenProteinEncoder,
+    HuggingFaceESM2Encoder,
+)
 from ..results import (
     append_dataframe,
     reset_output_file,
@@ -97,6 +110,7 @@ from ..splits import (
     SPLIT_ASSIGNMENTS_FILENAME,
     SPLIT_METADATA_FILENAME,
     SPLITS_DIRNAME,
+    write_metadata_json,
     write_split_artifacts,
 )
 from ..thresholds import (
@@ -107,6 +121,7 @@ from ..thresholds import (
     predictions_at_threshold,
     select_validation_f1_threshold,
 )
+from ..torch_utils import TORCH_DEVICE_CHOICES
 
 FEATURELESS_FEATURE = "none"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -114,6 +129,7 @@ LOGGER = logging.getLogger(__name__)
 PLOTS_DIRNAME = "plots"
 PREDICTIONS_FILENAME = "predictions.csv"
 TRAINING_HISTORY_FILENAME = "training_history.csv"
+PROTEIN_ENCODER_METADATA_FILENAME = "protein_encoder.json"
 CHECKPOINTS_DIRNAME = "checkpoints"
 TRAIN_METRICS_FILENAME = "train_metrics.csv"
 VAL_METRICS_FILENAME = "val_metrics.csv"
@@ -336,6 +352,66 @@ def argument_parser() -> argparse.Namespace:
     feature_group.add_argument("--bm25-k1", type=positive_float, default=1.5)
     feature_group.add_argument("--bm25-b", type=unit_interval, default=0.75)
 
+    # Frozen protein language-model args
+    plm_group = parser.add_argument_group("Frozen protein encoder")
+    plm_group.add_argument(
+        "--plm-model",
+        default=DEFAULT_ESM2_MODEL,
+        help="Hugging Face ESM-2 model ID or local model directory")
+    plm_group.add_argument(
+        "--plm-revision",
+        default=None,
+        help=(
+            "Exact model revision. Remote models require an immutable "
+            "40-character Hugging Face commit hash."
+        ))
+    plm_group.add_argument(
+        "--plm-tokenizer-revision",
+        default=None,
+        help="Exact tokenizer revision; defaults to --plm-revision")
+    plm_group.add_argument(
+        "--plm-pooling",
+        choices=PLM_POOLING_CHOICES,
+        default="mean",
+        help="Pool residue representations by masked mean or CLS token")
+    plm_group.add_argument(
+        "--plm-max-length",
+        type=positive_int,
+        default=1024,
+        help="Maximum tokenized length including model special tokens")
+    plm_group.add_argument(
+        "--plm-truncation-policy",
+        choices=PLM_TRUNCATION_CHOICES,
+        default="error",
+        help="Fail on overlength proteins or truncate them explicitly")
+    plm_group.add_argument(
+        "--plm-precision",
+        choices=PLM_PRECISION_CHOICES,
+        default="float32",
+        help="Frozen encoder compute precision and cache namespace")
+    plm_group.add_argument(
+        "--plm-device",
+        choices=TORCH_DEVICE_CHOICES,
+        default="auto",
+        help="Device for frozen PLM inference")
+    plm_group.add_argument(
+        "--plm-max-batch-tokens",
+        type=positive_int,
+        default=4096,
+        help="Maximum padded tokens per length-bucketed encoder batch")
+    plm_group.add_argument(
+        "--plm-max-batch-sequences",
+        type=positive_int,
+        default=32,
+        help="Safety cap on sequences per token-budgeted encoder batch")
+    plm_group.add_argument(
+        "--embedding-cache-dir",
+        default=None,
+        help=(
+            "Shared frozen-embedding cache directory. Defaults to "
+            "$PPI_EMBEDDING_CACHE_DIR or the user cache directory."
+        ))
+
     # Model args
     model_group = parser.add_argument_group("Models")
     model_group.add_argument(
@@ -413,7 +489,7 @@ def argument_parser() -> argparse.Namespace:
         "--torch-min-delta", type=nonnegative_float, default=1e-4,
         help="Minimum validation-AUPRC increase counted as improvement")
     torch_group.add_argument(
-        "--torch-device", choices=("auto", "cpu", "cuda", "mps"),
+        "--torch-device", choices=TORCH_DEVICE_CHOICES,
         default="auto",
         help="Device for torch_mlp; auto prefers CUDA, then MPS, then CPU")
     torch_group.add_argument(
@@ -454,6 +530,24 @@ def argument_parser() -> argparse.Namespace:
         args.features = normalize_feature_types(args.features)
     except ValueError as exc:
         parser.error(str(exc))
+    if PLM_FEATURE in args.features and len(args.features) != 1:
+        parser.error(
+            "--features plm cannot currently be concatenated with k-mer "
+            "features without inefficient dense/sparse conversion."
+        )
+    if PLM_FEATURE in args.features and args.plm_revision is None:
+        parser.error("--features plm requires --plm-revision.")
+    if args.torch_resume_from:
+        resume_path = Path(args.torch_resume_from).expanduser().resolve()
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        if resume_path == run_dir or run_dir in resume_path.parents:
+            parser.error(
+                "--torch-resume-from must be outside --run-dir. Resume into "
+                "a new output directory so the source checkpoint remains "
+                "immutable."
+            )
+
+    args.protein_encoder_metadata = None
 
     return args
 
@@ -544,6 +638,7 @@ class OutputPaths:
     checkpoints_dir: Path
     selected_examples_path: Path
     sequence_cluster_assignments_path: Path
+    protein_encoder_metadata_path: Path
     training_history_path: Path
     predictions_path: Path | None
     train_metrics_path: Path
@@ -614,26 +709,129 @@ def is_baseline_classifier(classifier_name: str) -> bool:
 
 def feature_metadata(
         feature_name: str, args: argparse.Namespace
-    ) -> dict[str, float | int | str]:
+    ) -> dict[str, Any]:
     """
     Return feature metadata stored with each result row.
     """
-    if feature_name == FEATURELESS_FEATURE:
-        feature_metadata = {
-            "features": FEATURELESS_FEATURE,
-            "k": np.nan,
-            "bm25_k1": np.nan,
-            "bm25_b": np.nan,
-        }
-    else:
-        feature_metadata = {
-            "features": feature_name,
-            "k": args.k,
-            "bm25_k1": args.bm25_k1,
-            "bm25_b": args.bm25_b,
-        }
+    is_featureless = feature_name == FEATURELESS_FEATURE
+    is_plm = (
+        not is_featureless
+        and getattr(args, "protein_encoder_metadata", None) is not None
+    )
+    feature_metadata = {
+        "features": FEATURELESS_FEATURE if is_featureless else feature_name,
+        "k": np.nan if is_featureless or is_plm else args.k,
+        "bm25_k1": np.nan if is_featureless or is_plm else args.bm25_k1,
+        "bm25_b": np.nan if is_featureless or is_plm else args.bm25_b,
+        "encoder_fingerprint": np.nan,
+        "encoder_model": np.nan,
+        "encoder_revision": np.nan,
+        "encoder_pooling": np.nan,
+        "encoder_maximum_length": np.nan,
+        "encoder_precision": np.nan,
+        "encoder_label_independent": np.nan,
+        "encoder_checkpoint_sha256": np.nan,
+        "encoder_training_split_sha256": np.nan,
+    }
+    if is_plm:
+        encoder_metadata = args.protein_encoder_metadata
+        encoder_spec = encoder_metadata["encoder_spec"]
+        feature_metadata.update({
+            "encoder_fingerprint": encoder_metadata[
+                "encoder_fingerprint"],
+            "encoder_model": encoder_spec["model_name"],
+            "encoder_revision": encoder_spec["model_revision"],
+            "encoder_pooling": encoder_spec["pooling"],
+            "encoder_maximum_length": encoder_spec["maximum_length"],
+            "encoder_precision": encoder_spec["precision"],
+            "encoder_label_independent": encoder_spec[
+                "label_independent"],
+            "encoder_checkpoint_sha256": encoder_spec[
+                "checkpoint_sha256"],
+            "encoder_training_split_sha256": encoder_spec[
+                "training_split_sha256"],
+        })
 
     return feature_metadata
+
+
+def frozen_plm_feature_name(encoder_metadata: dict[str, Any]) -> str:
+    """Return a model-specific feature name that cannot mix PLM revisions."""
+    encoder_spec = encoder_metadata["encoder_spec"]
+    model_label = Path(str(encoder_spec["model_name"])).name
+    model_label = safe_artifact_component(model_label)
+    fingerprint = str(encoder_metadata["encoder_fingerprint"])
+    return f"plm-{model_label}-{fingerprint[:12]}"
+
+
+def build_frozen_plm_feature_matrices(
+        cohort_df: pd.DataFrame, train_df: pd.DataFrame,
+        val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame, sequences: dict[str, str],
+        evaluate_test_metrics: bool, args: argparse.Namespace,
+    ) -> tuple[Any, Any | None, Any | None, str, dict[str, Any]]:
+    """Encode unique proteins once and compose dense symmetric pair rows."""
+    encoder = HuggingFaceESM2Encoder(
+        model_name=args.plm_model,
+        model_revision=args.plm_revision,
+        tokenizer_revision=args.plm_tokenizer_revision,
+        pooling=args.plm_pooling,
+        maximum_length=args.plm_max_length,
+        precision=args.plm_precision,
+        truncation_policy=args.plm_truncation_policy,
+        device=args.plm_device,
+    )
+    all_protein_ids = unique_protein_ids((cohort_df,))
+    with EmbeddingCache(
+            encoder_spec=encoder.spec,
+            cache_dir=args.embedding_cache_dir,
+        ) as cache:
+        cached_encoder = FrozenProteinEncoder(
+            encoder=encoder,
+            cache=cache,
+            max_batch_tokens=args.plm_max_batch_tokens,
+            max_batch_sequences=args.plm_max_batch_sequences,
+        )
+        embedding_table = cached_encoder.encode(
+            protein_sequences=sequences,
+            protein_ids=all_protein_ids.tolist(),
+        )
+    protein_ids = pd.Index(embedding_table.protein_ids)
+    x_train, x_val, x_test = compose_split_feature_matrices(
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df if evaluate_test_metrics else None,
+        protein_ids=protein_ids,
+        protein_features=embedding_table.embeddings,
+    )
+    encoder_metadata = {
+        **embedding_table.metadata,
+        "model_loaded_for_cache_misses": encoder.is_loaded,
+    }
+    return (
+        x_train,
+        x_val,
+        x_test,
+        frozen_plm_feature_name(encoder_metadata),
+        encoder_metadata,
+    )
+
+
+def write_protein_encoder_metadata(
+        metadata: dict[str, Any], output_path: Path,
+        append_results: bool,
+    ) -> None:
+    """Write encoder/cache provenance without mixing incompatible specs."""
+    if append_results and output_path.exists():
+        with output_path.open("r", encoding="utf-8") as input_file:
+            existing_metadata = json.load(input_file)
+        if existing_metadata.get("encoder_fingerprint") != metadata.get(
+                "encoder_fingerprint"):
+            raise ValueError(
+                f"Cannot append a different frozen encoder to "
+                f"{output_path.parent}. Use a new --run-dir."
+            )
+    write_metadata_json(metadata, output_path)
 
 
 def make_metrics_df(
@@ -942,6 +1140,8 @@ def train_and_evaluate_model_run(
             threshold_selection.threshold)
         predictions_df["threshold_selection"] = (
             threshold_selection.strategy)
+        predictions_df["encoder_fingerprint"] = feature_meta[
+            "encoder_fingerprint"]
 
     model_performance = {
         "model_name": model_name,
@@ -955,6 +1155,11 @@ def train_and_evaluate_model_run(
         "total_seconds": float(perf_counter() - model_run_started_at),
         "solver_iterations": iteration_report,
         "training": training_metadata,
+        "protein_encoder": (
+            args.protein_encoder_metadata
+            if feature_name != FEATURELESS_FEATURE
+            else None
+        ),
         "threshold_selection_seconds": threshold_selection_seconds,
         "decision_threshold": {
             "selected": threshold_selection.threshold,
@@ -1077,6 +1282,8 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
     sequence_cluster_assignments_path = (
         splits_dir / SEQUENCE_CLUSTER_ASSIGNMENTS_FILENAME)
+    protein_encoder_metadata_path = (
+        run_dir / PROTEIN_ENCODER_METADATA_FILENAME)
     selected_examples_path = sampling_dir / SELECTED_EXAMPLES_FILENAME
     invocations_path = run_dir / INVOCATIONS_FILENAME
     performance_path = run_dir / PERFORMANCE_FILENAME
@@ -1134,6 +1341,7 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         selected_examples_path=selected_examples_path,
         sequence_cluster_assignments_path=(
             sequence_cluster_assignments_path),
+        protein_encoder_metadata_path=protein_encoder_metadata_path,
         training_history_path=training_history_path,
         predictions_path=predictions_path,
         train_metrics_path=train_metrics_path,
@@ -1173,6 +1381,7 @@ def initialize_output_files(
         run_dir / filename
         for filename in (
             PREDICTIONS_FILENAME,
+            PROTEIN_ENCODER_METADATA_FILENAME,
             TRAINING_HISTORY_FILENAME,
             TRAIN_METRICS_FILENAME,
             VAL_METRICS_FILENAME,
@@ -1404,6 +1613,12 @@ def log_model_outputs(
             else None,
             "sequence-cluster assignments",
         ),
+        (
+            output_paths.protein_encoder_metadata_path
+            if output_paths.protein_encoder_metadata_path.exists()
+            else None,
+            "protein-encoder metadata",
+        ),
     )
     artifact_lines = [
         f"Saved {description} to: {path}"
@@ -1610,16 +1825,48 @@ def main() -> None:
 
     # Extract the combined feature set
     if learned_classifiers:
-        feature_name = make_feature_name(args.features)
         with performance.stage("feature_extraction"):
-            x_train, x_val, x_test = build_feature_matrices(
-                train_df=train_df,
-                val_df=val_df,
-                test_df=test_df if args.evaluate_test_metrics else None,
-                sequences=sequences,
-                feature_types=args.features,
-                args=args,
-            )
+            if args.features == (PLM_FEATURE,):
+                (
+                    x_train,
+                    x_val,
+                    x_test,
+                    feature_name,
+                    encoder_metadata,
+                ) = build_frozen_plm_feature_matrices(
+                    cohort_df=protein_pairs,
+                    train_df=train_df,
+                    val_df=val_df,
+                    test_df=test_df,
+                    sequences=sequences,
+                    evaluate_test_metrics=args.evaluate_test_metrics,
+                    args=args,
+                )
+                args.protein_encoder_metadata = encoder_metadata
+                try:
+                    write_protein_encoder_metadata(
+                        metadata=encoder_metadata,
+                        output_path=(
+                            output_paths.protein_encoder_metadata_path),
+                        append_results=args.append_results,
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from None
+                performance.add_observation(
+                    "protein_encoder",
+                    encoder_metadata,
+                )
+            else:
+                feature_name = make_feature_name(args.features)
+                x_train, x_val, x_test = build_feature_matrices(
+                    train_df=train_df,
+                    val_df=val_df,
+                    test_df=(
+                        test_df if args.evaluate_test_metrics else None),
+                    sequences=sequences,
+                    feature_types=args.features,
+                    args=args,
+                )
             performance.add_matrices({
                 "train": x_train,
                 "val": x_val,

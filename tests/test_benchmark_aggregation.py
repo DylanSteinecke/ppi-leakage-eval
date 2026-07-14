@@ -336,6 +336,9 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
     assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
+    assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
+    assert 'PLM_REVISION="${PLM_REVISION:-}"' in grid_text
+    assert "FEATURE_SETS+=(plm)" in grid_text
     assert 'SPLIT_SEEDS="${SPLIT_SEEDS:-0}"' in grid_text
     assert '--split-seed "$split_seed"' in grid_text
     assert '--model-seed "$MODEL_SEED"' in grid_text
@@ -345,9 +348,13 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
 def test_benchmark_profiles_expand_to_expected_command_grids(tmp_path):
     grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
 
-    def profile_commands(profile, include_torch=False, split_seeds="0"):
+    def profile_commands(
+            profile, include_torch=False, split_seeds="0",
+            include_plm=False,
+        ):
         suffix = "_torch" if include_torch else ""
         suffix += "_multi_seed" if " " in split_seeds else ""
+        suffix += "_plm" if include_plm else ""
         calls_path = tmp_path / f"{profile}{suffix}_calls.txt"
         out_dir = tmp_path / f"{profile}_results"
         shell_script = r'''
@@ -358,6 +365,9 @@ OUT_DIR="$3"
 BENCHMARK_PROFILE="$4"
 INCLUDE_TORCH_MLP="$5"
 SPLIT_SEEDS="$6"
+INCLUDE_PLM="$7"
+PLM_REVISION="0123456789abcdef0123456789abcdef01234567"
+EMBEDDING_CACHE_DIR="$8"
 ppi-train() {
     printf '%s\n' "$*" >> "$CALLS_PATH"
 }
@@ -385,6 +395,8 @@ source "$GRID_PATH" --no-metrics-plots
                 profile,
                 "1" if include_torch else "0",
                 split_seeds,
+                "1" if include_plm else "0",
+                str(tmp_path / "shared_embeddings"),
             ],
             check=True,
             cwd=REPO_ROOT,
@@ -399,10 +411,12 @@ source "$GRID_PATH" --no-metrics-plots
         "laptop",
         split_seeds="3 7",
     )
+    laptop_plm_calls = profile_commands("laptop", include_plm=True)
     exhaustive_calls = profile_commands("exhaustive")
 
     assert len(laptop_calls) == 12
     assert len(laptop_multi_seed_calls) == 24
+    assert len(laptop_plm_calls) == 16
     assert len(exhaustive_calls) == 24
     assert all("--n-split-trials 25" in call for call in laptop_calls)
     assert all("--val-size 0.10" in call for call in laptop_calls)
@@ -436,6 +450,19 @@ source "$GRID_PATH" --no-metrics-plots
         for call in laptop_torch_calls
         if "--features" in call
     )
+    plm_calls = [
+        call for call in laptop_plm_calls if "--features plm" in call
+    ]
+    non_plm_calls = [
+        call for call in laptop_plm_calls if "--features plm" not in call
+    ]
+    assert len(plm_calls) == 4
+    assert all("--plm-model facebook/esm2_t6_8M_UR50D" in call
+               for call in plm_calls)
+    assert all("--plm-revision 0123456789abcdef0123456789abcdef01234567"
+               in call for call in plm_calls)
+    assert all("--embedding-cache-dir" in call for call in plm_calls)
+    assert all("--plm-model" not in call for call in non_plm_calls)
 
     assert all("--n-split-trials 100" in call for call in exhaustive_calls)
     assert all("--val-size 0.10" in call for call in exhaustive_calls)

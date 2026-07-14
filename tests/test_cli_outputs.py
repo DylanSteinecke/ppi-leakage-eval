@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -358,6 +359,9 @@ def test_torch_mlp_cli_resumes_from_last_checkpoint(
         (first_run_dir / "performance.jsonl").read_text(encoding="utf-8"))
     first_training = first_performance["model_runs"][0]["training"]
     last_checkpoint = Path(first_training["last_checkpoint_path"])
+    source_checkpoint_sha256 = hashlib.sha256(
+        last_checkpoint.read_bytes()
+    ).hexdigest()
 
     run_cli(
         *shared_args,
@@ -372,8 +376,148 @@ def test_torch_mlp_cli_resumes_from_last_checkpoint(
     resumed_training = resumed_performance["model_runs"][0]["training"]
     assert history["epoch"].tolist() == [1, 2]
     assert resumed_training["resumed_from"] == str(last_checkpoint)
+    assert resumed_training["resumed_from_sha256"] == (
+        source_checkpoint_sha256)
     assert resumed_training["resumed_from_epoch"] == 1
     assert resumed_training["epochs_completed"] == 2
+    assert hashlib.sha256(last_checkpoint.read_bytes()).hexdigest() == (
+        source_checkpoint_sha256)
+
+    rejected = run_cli(
+        *shared_args,
+        "--run-dir", first_run_dir,
+        "--torch-max-epochs", "2",
+        "--torch-resume-from", last_checkpoint,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "must be outside --run-dir" in rejected.stderr
+    assert hashlib.sha256(last_checkpoint.read_bytes()).hexdigest() == (
+        source_checkpoint_sha256)
+
+
+def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
+        tmp_path, ppi_test_data, tiny_esm_model, run_cli):
+    pytest.importorskip("torch")
+    pairs_path, fasta_path = ppi_test_data
+    cache_dir = tmp_path / "embedding_cache"
+    common_args = [
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--classifier", "sgd_logistic",
+        "--features", "plm",
+        "--plm-model", tiny_esm_model,
+        "--plm-revision", "local-test-revision",
+        "--plm-device", "cpu",
+        "--plm-max-length", "32",
+        "--plm-max-batch-tokens", "64",
+        "--plm-max-batch-sequences", "4",
+        "--embedding-cache-dir", cache_dir,
+        "--num-reruns", "1",
+        "--max-iter", "20",
+        "--train-size", "0.50",
+        "--val-size", "0.25",
+        "--model-seed", "17",
+        "--no-metrics-plots",
+    ]
+    first_run_dir = tmp_path / "plm_split_1"
+    second_run_dir = tmp_path / "plm_split_2"
+
+    run_cli(
+        *common_args,
+        "--run-dir", first_run_dir,
+        "--split-seed", "3",
+    )
+    first_metadata = json.loads(
+        (first_run_dir / "protein_encoder.json").read_text(
+            encoding="utf-8"))
+    first_performance = json.loads(
+        (first_run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+
+    assert first_metadata["n_proteins"] == 48
+    assert first_metadata["n_unique_sequences"] == 10
+    assert first_metadata["cache_hits"] == 0
+    assert first_metadata["cache_misses"] == 10
+    assert first_metadata["model_loaded_for_cache_misses"] is True
+    assert set(first_performance["matrices"]) == {"train", "val"}
+    assert first_performance["observations"]["protein_encoder"] == (
+        first_metadata)
+    assert not (first_run_dir / "test_metrics.csv").exists()
+    first_metrics = pd.read_csv(first_run_dir / "train_metrics.csv")
+    assert first_metrics.loc[0, "encoder_fingerprint"] == (
+        first_metadata["encoder_fingerprint"])
+    assert bool(first_metrics.loc[0, "encoder_label_independent"]) is True
+    assert pd.isna(first_metrics.loc[0, "encoder_checkpoint_sha256"])
+    assert pd.isna(first_metrics.loc[0, "encoder_training_split_sha256"])
+    assert first_metadata["encoder_fingerprint"][:12] in (
+        first_metrics.loc[0, "features"])
+
+    run_cli(
+        *common_args,
+        "--run-dir", second_run_dir,
+        "--split-seed", "11",
+    )
+    second_metadata = json.loads(
+        (second_run_dir / "protein_encoder.json").read_text(
+            encoding="utf-8"))
+
+    assert second_metadata["encoder_fingerprint"] == (
+        first_metadata["encoder_fingerprint"])
+    assert second_metadata["n_proteins"] == 48
+    assert second_metadata["cache_hits"] == 10
+    assert second_metadata["cache_misses"] == 0
+    assert second_metadata["encoded_batches"] == 0
+    assert second_metadata["model_loaded_for_cache_misses"] is False
+
+    # Freeze the first assignment, then change only held-out labels. Neither
+    # cached embeddings nor train/validation model results may change.
+    assignments = pd.read_csv(
+        first_run_dir / "splits" / "split_assignments.csv"
+    ).sort_values("source_row_index")
+    original_pairs = pd.read_csv(pairs_path)
+    original_pairs["heldout_split"] = assignments["split"].to_numpy()
+    changed_pairs = original_pairs.copy()
+    heldout_rows = changed_pairs["heldout_split"] == "test"
+    changed_pairs.loc[heldout_rows, "label"] = (
+        1 - changed_pairs.loc[heldout_rows, "label"]
+    )
+    provided_pairs_path = tmp_path / "provided_pairs.csv"
+    changed_pairs_path = tmp_path / "changed_test_labels.csv"
+    original_pairs.to_csv(provided_pairs_path, index=False)
+    changed_pairs.to_csv(changed_pairs_path, index=False)
+
+    invariant_metrics = []
+    for name, input_pairs in (
+            ("original", provided_pairs_path),
+            ("changed", changed_pairs_path),
+        ):
+        run_dir = tmp_path / f"heldout_labels_{name}"
+        provided_args = list(common_args)
+        provided_args[1] = input_pairs
+        run_cli(
+            *provided_args,
+            "--run-dir", run_dir,
+            "--split-col", "heldout_split",
+            "--split-name", "heldout-invariance",
+            "--split-seed", "3",
+        )
+        metadata = json.loads(
+            (run_dir / "protein_encoder.json").read_text(encoding="utf-8"))
+        assert metadata["cache_hits"] == 10
+        assert metadata["cache_misses"] == 0
+        split_metrics = pd.concat([
+            pd.read_csv(run_dir / "train_metrics.csv"),
+            pd.read_csv(run_dir / "val_metrics.csv"),
+        ], ignore_index=True)
+        invariant_metrics.append(split_metrics.drop(
+            columns=["execution_id", "fit_seconds", "evaluation_seconds"],
+        ))
+
+    pd.testing.assert_frame_equal(
+        invariant_metrics[0],
+        invariant_metrics[1],
+        check_exact=True,
+    )
 
 
 def test_split_and_model_seeds_are_independent(

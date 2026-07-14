@@ -11,11 +11,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 
-FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
+PLM_FEATURE = "plm"
+KMER_FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
+FEATURE_CHOICES = KMER_FEATURE_CHOICES + (PLM_FEATURE,)
 FEATURE_NAME_SEPARATOR = "+"
+DENSE_PAIR_COMPOSITION_CHUNK_SIZE = 8192
 
 
 ####################
@@ -189,7 +193,7 @@ def unique_protein_ids(
 
 def compose_pair_features(
         df: pd.DataFrame, protein_ids: pd.Index, protein_features: Any,
-    ) -> csr_matrix:
+    ) -> Any:
     """
     Compose symmetric pair features from precomputed protein feature rows.
     """
@@ -198,13 +202,76 @@ def compose_pair_features(
     if (protein_a_rows < 0).any() or (protein_b_rows < 0).any():
         raise ValueError("Pair dataframe contains proteins without features.")
 
-    prot_a_fts = protein_features[protein_a_rows]
-    prot_b_fts = protein_features[protein_b_rows]
-    ft_sums = prot_a_fts + prot_b_fts
-    ft_diffs = np.abs(prot_a_fts - prot_b_fts)
-    ft_prods = prot_a_fts.multiply(prot_b_fts)
+    if sparse.issparse(protein_features):
+        prot_a_fts = protein_features[protein_a_rows]
+        prot_b_fts = protein_features[protein_b_rows]
+        ft_sums = prot_a_fts + prot_b_fts
+        ft_diffs = np.abs(prot_a_fts - prot_b_fts)
+        ft_prods = prot_a_fts.multiply(prot_b_fts)
+        return hstack([ft_sums, ft_diffs, ft_prods], format="csr")
 
-    return hstack([ft_sums, ft_diffs, ft_prods], format="csr")
+    dense_features = np.asarray(protein_features)
+    if dense_features.ndim != 2:
+        raise ValueError("Protein features must be a two-dimensional matrix.")
+    n_pairs = len(df)
+    n_protein_features = dense_features.shape[1]
+    pair_features = np.empty(
+        (n_pairs, n_protein_features * 3),
+        dtype=dense_features.dtype,
+    )
+    for start in range(0, n_pairs, DENSE_PAIR_COMPOSITION_CHUNK_SIZE):
+        stop = min(start + DENSE_PAIR_COMPOSITION_CHUNK_SIZE, n_pairs)
+        protein_a = dense_features[protein_a_rows[start:stop]]
+        protein_b = dense_features[protein_b_rows[start:stop]]
+        output = pair_features[start:stop]
+        np.add(protein_a, protein_b, out=output[:, :n_protein_features])
+        np.subtract(
+            protein_a,
+            protein_b,
+            out=output[:, n_protein_features:2 * n_protein_features],
+        )
+        np.abs(
+            output[:, n_protein_features:2 * n_protein_features],
+            out=output[:, n_protein_features:2 * n_protein_features],
+        )
+        np.multiply(
+            protein_a,
+            protein_b,
+            out=output[:, 2 * n_protein_features:],
+        )
+    return pair_features
+
+
+def compose_split_feature_matrices(
+        train_df: pd.DataFrame, val_df: pd.DataFrame | None,
+        test_df: pd.DataFrame | None, protein_ids: pd.Index,
+        protein_features: Any,
+    ) -> tuple[Any, Any | None, Any | None]:
+    """Compose one protein feature table into each requested pair split."""
+    x_train = compose_pair_features(
+        df=train_df,
+        protein_ids=protein_ids,
+        protein_features=protein_features,
+    )
+    x_val = (
+        compose_pair_features(
+            df=val_df,
+            protein_ids=protein_ids,
+            protein_features=protein_features,
+        )
+        if val_df is not None and not val_df.empty
+        else None
+    )
+    x_test = (
+        compose_pair_features(
+            df=test_df,
+            protein_ids=protein_ids,
+            protein_features=protein_features,
+        )
+        if test_df is not None and not test_df.empty
+        else None
+    )
+    return x_train, x_val, x_test
 
 
 def make_pair_features(
@@ -237,6 +304,11 @@ def build_feature_matrices(
     """
     # Define and extract features based on the training set
     feature_types = normalize_feature_types(feature_types)
+    if PLM_FEATURE in feature_types:
+        raise ValueError(
+            "PLM features are built by the frozen ProteinEncoder path, not "
+            "the train-fitted k-mer vectorizer path."
+        )
     train_proteins = sorted(
         set(train_df["protein_a"]) | set(train_df["protein_b"]))
     train_sequences = [sequences[protein] for protein in train_proteins]
@@ -252,28 +324,22 @@ def build_feature_matrices(
         vectorizer = make_vectorizer(feature_type, args)
         vectorizer.fit(train_sequences)
         protein_features = vectorizer.transform(all_sequences)
-        train_feature_block = compose_pair_features(
-            df=train_df,
+        (
+            train_feature_block,
+            val_feature_block,
+            test_feature_block,
+        ) = compose_split_feature_matrices(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
             protein_ids=all_protein_ids,
             protein_features=protein_features,
         )
         train_feature_blocks.append(train_feature_block)
-        if val_df is not None and not val_df.empty:
-            val_feature_blocks.append(
-                compose_pair_features(
-                    df=val_df,
-                    protein_ids=all_protein_ids,
-                    protein_features=protein_features,
-                )
-            )
-        if test_df is not None and not test_df.empty:
-            test_feature_blocks.append(
-                compose_pair_features(
-                    df=test_df,
-                    protein_ids=all_protein_ids,
-                    protein_features=protein_features,
-                )
-            )
+        if val_feature_block is not None:
+            val_feature_blocks.append(val_feature_block)
+        if test_feature_block is not None:
+            test_feature_blocks.append(test_feature_block)
 
     # Preserve feature blocks as separate sparse columns
     if len(train_feature_blocks) == 1:

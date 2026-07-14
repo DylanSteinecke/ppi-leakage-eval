@@ -16,6 +16,8 @@ from sklearn.metrics import average_precision_score
 import torch
 from torch import nn
 
+from ..datasets.common import file_sha256
+from ..torch_utils import resolve_torch_device
 from .base import BackendFitResult, BackendPrediction, SupervisedSplit
 
 
@@ -76,6 +78,7 @@ class TorchMLPBackend:
     """Train and evaluate a small MLP without densifying a full sparse split."""
 
     backend_name = "torch"
+    CHECKPOINT_FORMAT_VERSION = 3
     _RESUME_CONFIG_FIELDS = (
         "batch_size",
         "hidden_dim",
@@ -107,31 +110,13 @@ class TorchMLPBackend:
         self.resume_from = (
             None if resume_from is None else Path(resume_from)
         )
-        self.device = self._resolve_device(config.device)
+        self.device = resolve_torch_device(config.device)
         self.model: _BinaryMLP | None = None
         self.input_dim: int | None = None
         self.data_signature: dict[str, Any] | None = None
         self.max_dense_batch_rows = 0
         self._memory_best_checkpoint: dict[str, Any] | None = None
         self._memory_last_checkpoint: dict[str, Any] | None = None
-
-    @staticmethod
-    def _resolve_device(requested_device: str) -> torch.device:
-        if requested_device == "auto":
-            if torch.cuda.is_available():
-                device_name = "cuda"
-            elif torch.backends.mps.is_available():
-                device_name = "mps"
-            else:
-                device_name = "cpu"
-        else:
-            device_name = requested_device
-
-        if device_name == "cuda" and not torch.cuda.is_available():
-            raise ValueError("CUDA was requested but is not available.")
-        if device_name == "mps" and not torch.backends.mps.is_available():
-            raise ValueError("MPS was requested but is not available.")
-        return torch.device(device_name)
 
     def _synchronize_device(self) -> None:
         if self.device.type == "cuda":
@@ -328,7 +313,7 @@ class TorchMLPBackend:
         if self.input_dim is None or self.data_signature is None:
             raise RuntimeError("torch_mlp has not been initialized.")
         return {
-            "format_version": 3,
+            "format_version": self.CHECKPOINT_FORMAT_VERSION,
             "backend_name": self.backend_name,
             "classifier_name": "torch_mlp",
             "input_dim": self.input_dim,
@@ -416,6 +401,12 @@ class TorchMLPBackend:
         if checkpoint.get("checkpoint_kind") != "last":
             raise ValueError(
                 "--torch-resume-from must point to a last checkpoint."
+            )
+        if checkpoint.get("format_version") != self.CHECKPOINT_FORMAT_VERSION:
+            raise ValueError(
+                "Unsupported Torch checkpoint format version: "
+                f"{checkpoint.get('format_version')!r}; expected "
+                f"{self.CHECKPOINT_FORMAT_VERSION}."
             )
         if checkpoint.get("classifier_name") != "torch_mlp":
             raise ValueError("Resume checkpoint is not for torch_mlp.")
@@ -713,6 +704,11 @@ class TorchMLPBackend:
             "stopped_early": stopped_early,
             "resumed_from": (
                 None if self.resume_from is None else str(self.resume_from)
+            ),
+            "resumed_from_sha256": (
+                None
+                if self.resume_from is None
+                else file_sha256(self.resume_from)
             ),
             "resumed_from_epoch": resumed_from_epoch,
             "best_checkpoint_path": (

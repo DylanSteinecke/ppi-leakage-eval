@@ -251,6 +251,19 @@ def test_torch_mlp_last_checkpoint_resumes_optimizer_and_rng_state(tmp_path):
         validation=SupervisedSplit("val", x_val, y_val),
     )
 
+    best_only_backend = make_model_backend(
+        classifier_name="torch_mlp",
+        max_iter=4,
+        random_state=19,
+        resume_from=source_best,
+        backend_options=backend_options,
+    )
+    with pytest.raises(ValueError, match="must point to a last checkpoint"):
+        best_only_backend.fit(
+            SupervisedSplit("train", x_train, y_train),
+            validation=SupervisedSplit("val", x_val, y_val),
+        )
+
     resumed_backend = make_model_backend(
         classifier_name="torch_mlp",
         max_iter=4,

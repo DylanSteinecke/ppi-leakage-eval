@@ -104,6 +104,7 @@ class PerformanceTracker:
     stages_seconds: dict[str, float] = field(default_factory=dict)
     matrices: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_runs: list[dict[str, Any]] = field(default_factory=list)
+    observations: dict[str, Any] = field(default_factory=dict)
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
@@ -128,6 +129,10 @@ class PerformanceTracker:
         """Append model-level timing and solver observations."""
         self.model_runs.extend(model_runs)
 
+    def add_observation(self, name: str, value: Any) -> None:
+        """Record one JSON-compatible invocation-level observation."""
+        self.observations[name] = value
+
     def report(self, execution_id: str) -> dict[str, Any]:
         """Return the complete invocation-level performance record."""
         peak_bytes = peak_memory_bytes()
@@ -143,6 +148,7 @@ class PerformanceTracker:
             "peak_memory_mib": float(peak_bytes / (1024 ** 2)),
             "matrices": self.matrices,
             "model_runs": self.model_runs,
+            "observations": self.observations,
         }
 
 

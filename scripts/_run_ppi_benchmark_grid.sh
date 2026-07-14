@@ -22,6 +22,10 @@ EXECUTION_ID="${EXECUTION_ID:-${BENCHMARK_PROFILE}_models_$(date -u +%Y-%m-%d_%H
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
 INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"
+INCLUDE_PLM="${INCLUDE_PLM:-0}"
+PLM_MODEL="${PLM_MODEL:-facebook/esm2_t6_8M_UR50D}"
+PLM_REVISION="${PLM_REVISION:-}"
+EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-}"
 USER_ARGS=("$@")
 BASELINE_CLASSIFIERS=(
     always_positive
@@ -94,6 +98,25 @@ elif [[ "$INCLUDE_TORCH_MLP" != "0" ]]; then
     return 2
 fi
 
+PLM_ARGS=()
+if [[ "$INCLUDE_PLM" == "1" ]]; then
+    if [[ -z "$PLM_REVISION" ]]; then
+        echo "INCLUDE_PLM=1 requires an immutable PLM_REVISION." >&2
+        return 2
+    fi
+    FEATURE_SETS+=(plm)
+    PLM_ARGS=(
+        --plm-model "$PLM_MODEL"
+        --plm-revision "$PLM_REVISION"
+    )
+    if [[ -n "$EMBEDDING_CACHE_DIR" ]]; then
+        PLM_ARGS+=(--embedding-cache-dir "$EMBEDDING_CACHE_DIR")
+    fi
+elif [[ "$INCLUDE_PLM" != "0" ]]; then
+    echo "INCLUDE_PLM must be 0 or 1." >&2
+    return 2
+fi
+
 PROTEIN_METADATA_ARGS=()
 if [[ -n "$PROTEIN_METADATA" ]]; then
     PROTEIN_METADATA_ARGS=(--protein-metadata "$PROTEIN_METADATA")
@@ -147,9 +170,14 @@ for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
 
         for feature_set in "${FEATURE_SETS[@]}"; do
             IFS=" " read -r -a FEATURE_ARGS <<< "$feature_set"
+            FEATURE_SPECIFIC_ARGS=()
+            if [[ "$feature_set" == "plm" ]]; then
+                FEATURE_SPECIFIC_ARGS=("${PLM_ARGS[@]}")
+            fi
             run_ppi_benchmark \
                 --features "${FEATURE_ARGS[@]}" \
                 --classifier "${LEARNED_CLASSIFIERS[@]}" \
+                "${FEATURE_SPECIFIC_ARGS[@]}" \
                 "${APPEND_ARGS[@]}"
         done
 

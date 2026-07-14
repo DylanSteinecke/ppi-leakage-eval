@@ -20,6 +20,10 @@ dependencies = [
 torch = [
     "torch>=2.1",
 ]
+plm = [
+    "torch>=2.1",
+    "transformers>=4.40",
+]
 dev = [
     "pytest",
     "ruff",

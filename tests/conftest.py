@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +8,41 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_COMMAND = "ppi-train"
+
+
+@pytest.fixture
+def tiny_esm_model(tmp_path):
+    """Write a network-free tiny ESM model and tokenizer."""
+    transformers = pytest.importorskip("transformers")
+    vocab = [
+        "<cls>", "<pad>", "<eos>", "<unk>",
+        "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M",
+        "N", "P", "Q", "R", "S", "T", "V", "W", "Y", "X", "<mask>",
+    ]
+    model_dir = tmp_path / "tiny_esm"
+    model_dir.mkdir()
+    vocab_path = model_dir / "vocab.txt"
+    vocab_path.write_text("\n".join(vocab) + "\n", encoding="utf-8")
+    tokenizer = transformers.EsmTokenizer(vocab_file=str(vocab_path))
+    tokenizer.save_pretrained(model_dir)
+    config = transformers.EsmConfig(
+        vocab_size=len(vocab),
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        max_position_embeddings=64,
+        pad_token_id=vocab.index("<pad>"),
+        mask_token_id=vocab.index("<mask>"),
+        bos_token_id=vocab.index("<cls>"),
+        eos_token_id=vocab.index("<eos>"),
+        token_dropout=False,
+    )
+    transformers.EsmModel(
+        config,
+        add_pooling_layer=False,
+    ).save_pretrained(model_dir)
+    return model_dir
 
 
 @pytest.fixture

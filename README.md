@@ -16,6 +16,12 @@ Install the optional Torch backend with:
 python -m pip install -e '.[torch]'
 ```
 
+Install frozen protein language-model features with:
+
+```bash
+python -m pip install -e '.[plm]'
+```
+
 This provides `ppi-train`, `ppi-prepare`, `ppi-aggregate`, and
 `ppi-make-toy-data`.
 
@@ -147,6 +153,73 @@ shape/density/storage statistics, and per-model fit/evaluation timings and
 solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
 `evaluation_seconds`, and `solver_iterations` columns.
 
+## Frozen protein encoders and embedding cache
+
+`ProteinEncoder` is a model-neutral interface; the first concrete adapter is
+Hugging Face ESM-2. `--features plm` encodes each distinct sequence in the
+complete sampled cohort once, before split-specific C2/C3 edge discards and
+including proteins assigned to held-out test. This is safe because the encoder
+is frozen and its API never receives labels or split assignments. Test features
+and metrics are still not constructed unless `--eval-test-set` is supplied.
+
+Cache entries are addressed by the normalized sequence SHA-256 inside a
+namespace that covers the adapter version, exact model and tokenizer revisions,
+pooling, output layer, maximum length, truncation policy, and precision. Remote
+Hugging Face models therefore require immutable 40-character commit revisions;
+floating names such as `main` are rejected. A cache hit does not load model
+weights. “Frozen during encoding” and “label-independent” are separate
+provenance properties: post-fine-tuning checkpoint identities must include both
+the checkpoint SHA-256 and training-split SHA-256. They therefore cannot share
+pretrained or cross-split cache namespaces, and mutable encoders cannot be
+cached before a checkpoint is written.
+
+For a local model directory, the resolved directory path plus the supplied
+revision string form the model identity. Treat that directory as immutable and
+change the revision whenever its contents change. The pipeline intentionally
+does not re-hash multi-gigabyte local weights on every cache-only grid process.
+
+By default, per-encoder SQLite caches live under
+`~/.cache/ppi-leakage/protein_embeddings/`, outside timestamped run
+directories. Override this globally with `PPI_EMBEDDING_CACHE_DIR` or per
+command with `--embedding-cache-dir`. This shared location lets random,
+C1, C2, C3, and repeated split-seed runs reuse the same frozen embeddings.
+Writes are transactional, payload checksums are verified on read, and every run
+writes cache/encoder provenance to `protein_encoder.json` and
+`performance.jsonl`.
+
+Uncached sequences are sorted by tokenized length and batched under
+`--plm-max-batch-tokens`, with `--plm-max-batch-sequences` as a second safety
+cap. The pooled protein rows are composed into symmetric PPI features using
+sum, absolute difference, and elementwise product. Dense pair matrices are
+allocated once and filled in chunks.
+
+Example for one split:
+
+```bash
+ppi-train \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --features plm \
+    --plm-model facebook/esm2_t6_8M_UR50D \
+    --plm-revision <40-character-hugging-face-commit> \
+    --plm-max-batch-tokens 4096 \
+    --classifier sgd_logistic \
+    --run-dir results/yeast_esm2
+```
+
+Add the same frozen encoder to every split strategy in a benchmark grid with:
+
+```bash
+INCLUDE_PLM=1 \
+PLM_REVISION=<40-character-hugging-face-commit> \
+PREPARE_YEAST_DATA=0 \
+    bash scripts/run_yeast_biogrid_ppi_example.sh
+```
+
+Set `PLM_MODEL` or `EMBEDDING_CACHE_DIR` to override their grid defaults.
+Frozen PLM is opt-in for both laptop and exhaustive profiles so existing grid
+sizes and runtimes remain unchanged.
+
 ## Validation-selected thresholds
 
 Learned models select their binary decision threshold by maximizing F1 on the
@@ -211,6 +284,10 @@ ppi-train \
 `--torch-max-epochs` is the total target, not the number of additional epochs.
 Resume validates the model seed, training configuration, and exact sparse
 train/validation data signatures before restoring optimizer and RNG state.
+Resume must write to a new `--run-dir`; the source `*.last.pt` remains
+immutable, and its path plus SHA-256 are recorded in the new performance
+report. `*.best.pt` is inference-only and is intentionally rejected as a
+resume source.
 
 To add the model to every feature set in an existing laptop or exhaustive
 benchmark grid without changing that profile's defaults:
