@@ -7,11 +7,16 @@ from ppi_benchmark.backends import (
     ModelBackend,
     SklearnBackend,
     SupervisedSplit,
+    backend_name_for_classifier,
     make_model_backend,
 )
 from ppi_benchmark.models import (
-    get_scores_and_predictions,
+    CLASSIFIER_CHOICES,
+    MODEL_SPECS,
+    is_baseline_classifier,
     make_classifier,
+    model_spec,
+    score_estimator,
 )
 from ppi_benchmark.performance import solver_iteration_report
 
@@ -36,7 +41,7 @@ def test_sklearn_backend_matches_existing_estimator_path():
         random_state=7,
     )
     estimator.fit(x_train, y_train)
-    expected_scores, expected_predictions = get_scores_and_predictions(
+    expected_scores, expected_threshold = score_estimator(
         estimator,
         x_eval,
     )
@@ -55,11 +60,7 @@ def test_sklearn_backend_matches_existing_estimator_path():
     assert isinstance(backend, ModelBackend)
     assert isinstance(prediction, BackendPrediction)
     np.testing.assert_allclose(prediction.scores, expected_scores)
-    np.testing.assert_array_equal(
-        prediction.predictions,
-        expected_predictions,
-    )
-    assert prediction.default_threshold == 0.5
+    assert prediction.default_threshold == expected_threshold == 0.5
     assert fit_result.fit_seconds >= 0.0
     assert fit_result.iteration_report == solver_iteration_report(estimator)
     assert fit_result.training_history == ()
@@ -101,7 +102,7 @@ def test_sklearn_backend_fits_only_the_training_split():
 
 
 def test_unsupported_and_unknown_backends_fail_clearly():
-    with pytest.raises(ValueError, match="supports only.*torch_mlp"):
+    with pytest.raises(ValueError, match="requires backend 'sklearn'"):
         make_model_backend(
             classifier_name="logistic",
             max_iter=100,
@@ -115,6 +116,17 @@ def test_unsupported_and_unknown_backends_fail_clearly():
             random_state=7,
             backend_name="jax",
         )
+
+
+def test_model_registry_is_the_single_source_for_choices_and_routing():
+    assert CLASSIFIER_CHOICES == tuple(spec.name for spec in MODEL_SPECS)
+    assert backend_name_for_classifier("logistic") == "sklearn"
+    assert backend_name_for_classifier("torch_mlp") == "torch"
+    assert is_baseline_classifier("always_positive") is True
+    assert is_baseline_classifier("sgd_logistic") is False
+    assert model_spec("torch_mlp").estimator_factory is None
+    with pytest.raises(ValueError, match="Unknown classifier: missing"):
+        model_spec("missing")
 
 
 def test_torch_mlp_batches_sparse_densification_and_early_stops(
@@ -188,7 +200,6 @@ def test_torch_mlp_batches_sparse_densification_and_early_stops(
     assert max(n_rows for n_rows, _ in dense_batch_shapes) <= 3
     assert x_train.shape not in dense_batch_shapes
     assert prediction.scores.shape == (x_val.shape[0],)
-    assert prediction.predictions.shape == (x_val.shape[0],)
     best_checkpoint = torch.load(
         best_checkpoint_path,
         map_location="cpu",

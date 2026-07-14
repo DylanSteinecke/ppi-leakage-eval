@@ -14,6 +14,7 @@ from ppi_benchmark.tasks import (
     PTM_TASK,
     PTMResidueDataset,
     PTMWindowCollator,
+    TaskAdapter,
     split_ptm_examples_by_protein,
 )
 from ppi_benchmark.training import (
@@ -59,7 +60,6 @@ class ScoreBackend:
         scores = np.asarray(inputs, dtype=float)
         return BackendPrediction(
             scores=scores,
-            predictions=(scores >= 0.5).astype(int),
             default_threshold=0.5,
         )
 
@@ -150,6 +150,8 @@ def test_ptm_task_formats_standard_predictions_and_signatures():
     assert set(STANDARD_PREDICTION_COLUMNS) <= set(predictions.columns)
     assert set(predictions["task"]) == {"ptm"}
     assert predictions["example_id"].tolist() == ["a0", "a4", "b2"]
+    assert isinstance(PTM_TASK, TaskAdapter)
+    assert signature["schema_version"] == PTM_TASK.schema_version
     assert signature["n_examples"] == 3
     assert signature["sha256"] != PTM_TASK.data_signature(changed)["sha256"]
 

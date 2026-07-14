@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -15,8 +15,10 @@ from ..protein_encoders.representations import (
     TokenizedProteinBatch,
 )
 from ..schema import EVALUATION_SCHEMA_VERSION
-from ..training import SplitEvaluation
 from .base import stable_task_data_signature
+
+if TYPE_CHECKING:
+    from ..training import SplitEvaluation
 
 
 PTM_REQUIRED_COLUMNS = ("protein_id", "residue_index", "label")
@@ -232,6 +234,7 @@ class PTMTask:
     """Connect residue-level PTM examples to shared evaluation outputs."""
 
     name = "ptm"
+    schema_version = 1
 
     @staticmethod
     def _dataset(examples: pd.DataFrame) -> PTMResidueDataset:
@@ -301,7 +304,7 @@ class PTMTask:
         ]
         return stable_task_data_signature(
             task_name=self.name,
-            schema_version=EVALUATION_SCHEMA_VERSION,
+            schema_version=self.schema_version,
             records=records,
         )
 

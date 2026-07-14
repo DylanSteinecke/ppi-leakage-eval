@@ -41,7 +41,6 @@ class ScoreBackend:
         scores = np.asarray(inputs, dtype=float).reshape(-1)
         return BackendPrediction(
             scores=scores,
-            predictions=(scores >= 0.5).astype(int),
             default_threshold=0.5,
         )
 

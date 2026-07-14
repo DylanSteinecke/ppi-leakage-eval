@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -13,8 +13,10 @@ from scipy.sparse import hstack
 
 from ..backends.base import SupervisedSplit
 from ..schema import EVALUATION_SCHEMA_VERSION
-from ..training import SplitEvaluation
 from .base import stable_task_data_signature
+
+if TYPE_CHECKING:
+    from ..training import SplitEvaluation
 
 
 PPI_REQUIRED_COLUMNS = ("protein_a", "protein_b", "label")
@@ -186,6 +188,7 @@ class PPITask:
     """Connect PPI dataframes to shared training and evaluation."""
 
     name = "ppi"
+    schema_version = 1
 
     @staticmethod
     def _validate_examples(examples: pd.DataFrame) -> None:
@@ -281,7 +284,7 @@ class PPITask:
         ]
         return stable_task_data_signature(
             task_name=self.name,
-            schema_version=EVALUATION_SCHEMA_VERSION,
+            schema_version=self.schema_version,
             records=records,
         )
 

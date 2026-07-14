@@ -5,11 +5,7 @@ from __future__ import annotations
 from time import perf_counter
 from typing import Any
 
-from ..models import (
-    default_decision_threshold,
-    get_scores_and_predictions,
-    make_classifier,
-)
+from ..models import make_classifier, score_estimator
 from ..performance import solver_iteration_report
 from .base import BackendFitResult, BackendPrediction, SupervisedSplit
 
@@ -50,12 +46,8 @@ class SklearnBackend:
 
     def predict(self, inputs: Any) -> BackendPrediction:
         """Use the existing sklearn score and threshold behavior."""
-        scores, predictions = get_scores_and_predictions(
-            self.estimator,
-            inputs,
-        )
+        scores, default_threshold = score_estimator(self.estimator, inputs)
         return BackendPrediction(
             scores=scores,
-            predictions=predictions,
-            default_threshold=default_decision_threshold(self.estimator),
+            default_threshold=default_threshold,
         )

@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..models import TORCH_CLASSIFIER_CHOICES
+from ..models import MODEL_SPECS, model_spec
 from .base import (
     BackendFitResult,
     BackendPrediction,
@@ -13,16 +13,16 @@ from .base import (
 from .sklearn import SklearnBackend
 
 
-DEFAULT_BACKEND = "sklearn"
-TORCH_BACKEND = "torch"
-BACKEND_CHOICES = (DEFAULT_BACKEND, TORCH_BACKEND)
+BACKEND_CHOICES = tuple(dict.fromkeys(
+    spec.backend for spec in MODEL_SPECS
+))
+DEFAULT_BACKEND = model_spec("logistic").backend
+TORCH_BACKEND = model_spec("torch_mlp").backend
 
 
 def backend_name_for_classifier(classifier_name: str) -> str:
     """Return the framework backend that owns a classifier."""
-    if classifier_name in TORCH_CLASSIFIER_CHOICES:
-        return TORCH_BACKEND
-    return DEFAULT_BACKEND
+    return model_spec(classifier_name).backend
 
 
 def make_model_backend(
@@ -36,15 +36,17 @@ def make_model_backend(
         task_schema_version: int = 1,
     ) -> ModelBackend:
     """Construct a model backend without coupling the runner to a framework."""
-    resolved_backend = (
-        backend_name or backend_name_for_classifier(classifier_name)
-    )
+    if backend_name is not None and backend_name not in BACKEND_CHOICES:
+        raise ValueError(f"Unknown model backend: {backend_name}")
+    spec = model_spec(classifier_name)
+    resolved_backend = backend_name or spec.backend
+    if resolved_backend != spec.backend:
+        raise ValueError(
+            f"Classifier {classifier_name!r} requires backend "
+            f"{spec.backend!r}, not {resolved_backend!r}."
+        )
     options = dict(backend_options or {})
     if resolved_backend == DEFAULT_BACKEND:
-        if classifier_name in TORCH_CLASSIFIER_CHOICES:
-            raise ValueError(
-                f"Classifier {classifier_name!r} requires the torch backend."
-            )
         if options:
             raise ValueError("sklearn backend does not accept backend options.")
         return SklearnBackend.from_classifier(
@@ -53,11 +55,6 @@ def make_model_backend(
             random_state=random_state,
         )
     if resolved_backend == TORCH_BACKEND:
-        if classifier_name != "torch_mlp":
-            raise ValueError(
-                "torch backend currently supports only classifier "
-                "'torch_mlp'."
-            )
         try:
             from .torch_mlp import TorchMLPBackend, TorchMLPConfig
         except ModuleNotFoundError as exc:
@@ -77,7 +74,7 @@ def make_model_backend(
             task_name=task_name,
             task_schema_version=task_schema_version,
         )
-    raise ValueError(f"Unknown model backend: {resolved_backend}")
+    raise RuntimeError(f"No backend factory for {resolved_backend!r}.")
 
 
 __all__ = [

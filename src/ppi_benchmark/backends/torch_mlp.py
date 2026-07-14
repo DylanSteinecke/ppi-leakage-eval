@@ -25,7 +25,7 @@ from ..torch_training import (
     TorchTrainer,
     TorchTrainerConfig,
 )
-from ..torch_utils import TORCH_TRAINING_PRECISIONS, resolve_torch_device
+from ..torch_utils import TORCH_DEVICE_CHOICES, resolve_torch_device
 from .base import BackendFitResult, BackendPrediction, SupervisedSplit
 
 
@@ -53,31 +53,17 @@ class TorchMLPConfig:
             raise ValueError("hidden_dim must be at least 1.")
         if not math.isfinite(self.dropout) or not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be at least 0 and less than 1.")
-        if self.device not in {"auto", "cpu", "cuda", "mps"}:
-            raise ValueError("device must be one of: auto, cpu, cuda, mps.")
-        if self.precision not in TORCH_TRAINING_PRECISIONS:
+        if self.device not in TORCH_DEVICE_CHOICES:
             raise ValueError(
-                "precision must be one of: "
-                f"{', '.join(TORCH_TRAINING_PRECISIONS)}."
+                "device must be one of: "
+                f"{', '.join(TORCH_DEVICE_CHOICES)}."
             )
         if self.validation_monitor not in TORCH_VALIDATION_MONITORS:
             raise ValueError(
                 "validation_monitor must be one of: "
                 f"{', '.join(TORCH_VALIDATION_MONITORS)}."
             )
-        TorchTrainerConfig(
-            max_epochs=self.max_epochs,
-            batch_size=self.batch_size,
-            learning_rate=self.learning_rate,
-            weight_decay=self.weight_decay,
-            patience=self.patience,
-            min_delta=self.min_delta,
-            precision=self.precision,
-            validation_monitor=self.validation_monitor,
-            validation_monitor_mode=(
-                "min" if self.validation_monitor == "loss" else "max"
-            ),
-        )
+        self.trainer_config()
 
     def trainer_config(self) -> TorchTrainerConfig:
         """Return only framework-owned trainer settings."""
@@ -342,15 +328,7 @@ class TorchMLPBackend:
             last_path=last_checkpoint_path,
             resume_from=resume_from,
         )
-        self.best_checkpoint_path = self.checkpoints.best_path
-        self.last_checkpoint_path = self.checkpoints.last_path
-        self.resume_from = self.checkpoints.resume_from
-        self.model: _BinaryMLP | None = None
         self.input_dim: int | None = None
-        self.data_signature: dict[str, Any] | None = None
-        self.max_dense_batch_rows = 0
-        self._memory_best_checkpoint: dict[str, Any] | None = None
-        self._memory_last_checkpoint: dict[str, Any] | None = None
         self._task: _MatrixBinaryTask | None = None
         self._trainer: TorchTrainer | None = None
 
@@ -417,7 +395,6 @@ class TorchMLPBackend:
             task_name=self.task_name,
             task_schema_version=self.task_schema_version,
         )
-        self.model = self._task.module
         self._trainer = TorchTrainer(
             task=self._task,
             config=self.config.trainer_config(),
@@ -431,12 +408,6 @@ class TorchMLPBackend:
             config_defaults=self._RESUME_CONFIG_DEFAULTS,
         )
         result = self._trainer.fit(train_data, validation_data)
-        self.data_signature = dict(
-            self._task.data_signature(train_data, validation_data)
-        )
-        self.max_dense_batch_rows = self._task.max_dense_batch_rows
-        self._memory_best_checkpoint = self.checkpoints.memory_best
-        self._memory_last_checkpoint = self.checkpoints.memory_last
         return BackendFitResult(
             fit_seconds=result.fit_seconds,
             training_history=result.history,
@@ -458,9 +429,7 @@ class TorchMLPBackend:
             targets=None,
         )
         scores = self._trainer.predict(prepared).reshape(-1)
-        self.max_dense_batch_rows = self._task.max_dense_batch_rows
         return BackendPrediction(
             scores=scores,
-            predictions=(scores >= 0.5).astype(int),
             default_threshold=0.5,
         )

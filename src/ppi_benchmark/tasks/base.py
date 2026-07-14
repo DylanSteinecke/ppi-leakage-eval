@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 from ..backends.base import SupervisedSplit
-from ..training import SplitEvaluation
+
+if TYPE_CHECKING:
+    from ..training import SplitEvaluation
 
 
 def stable_task_data_signature(
@@ -38,6 +40,7 @@ class TaskAdapter(Protocol):
     """Convert task examples to shared splits and prediction records."""
 
     name: str
+    schema_version: int
 
     def make_split(
             self, name: str, examples: Any, inputs: Any,

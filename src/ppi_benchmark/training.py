@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping
 
 import numpy as np
 
 from .backends.base import BackendFitResult, ModelBackend, SupervisedSplit
 from .evaluation import EvaluationPolicy
+from .tasks.base import TaskAdapter
 
 
 @dataclass(frozen=True)
@@ -42,16 +43,6 @@ class TaskSplitData:
     name: str
     examples: Any
     inputs: Any
-
-
-class TaskSplitAdapter(Protocol):
-    """Minimal task boundary needed by the shared run interface."""
-
-    def make_split(
-            self, name: str, examples: Any, inputs: Any,
-        ) -> SupervisedSplit:
-        """Build a backend-neutral supervised split."""
-        ...
 
 
 def fit_and_evaluate_backend(
@@ -117,7 +108,7 @@ def fit_and_evaluate_backend(
 
 
 def fit_and_evaluate_task(
-        backend: ModelBackend, task: TaskSplitAdapter,
+        backend: ModelBackend, task: TaskAdapter,
         train: TaskSplitData,
         validation: TaskSplitData | None,
         test: TaskSplitData | None,

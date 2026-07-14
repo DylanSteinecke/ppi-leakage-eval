@@ -27,12 +27,10 @@ class BackendFitResult:
 
 @dataclass(frozen=True)
 class BackendPrediction:
-    """Task scores plus optional conventional backend decisions."""
+    """Task scores and the backend's conventional decision threshold."""
 
     scores: Any
-    predictions: Any | None = None
     default_threshold: float | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable

@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from ..features import FEATURE_CHOICES, PLM_FEATURE
 from ..inputs import SPLIT_STRATEGY_CHOICES
-from ..models import BASELINE_CLASSIFIER_CHOICES, CLASSIFIER_CHOICES
+from ..models import CLASSIFIER_CHOICES, is_baseline_classifier
 from ..protein_encoders import DEFAULT_ESM2_MODEL
 
 
@@ -179,17 +179,21 @@ class BenchmarkGridConfig:
             raise ValueError("Baseline and learned classifier lists must not be empty.")
         if len(set(all_classifiers)) != len(all_classifiers):
             raise ValueError("Classifier lists cannot contain duplicates.")
-        invalid_baselines = (
-            set(self.baseline_classifiers) - set(BASELINE_CLASSIFIER_CHOICES)
-        )
+        invalid_baselines = {
+            classifier
+            for classifier in self.baseline_classifiers
+            if not is_baseline_classifier(classifier)
+        }
         if invalid_baselines:
             raise ValueError(
                 "baseline_classifiers contains learned models: "
                 f"{sorted(invalid_baselines)}"
             )
-        learned_baselines = (
-            set(self.learned_classifiers) & set(BASELINE_CLASSIFIER_CHOICES)
-        )
+        learned_baselines = {
+            classifier
+            for classifier in self.learned_classifiers
+            if is_baseline_classifier(classifier)
+        }
         if learned_baselines:
             raise ValueError(
                 "learned_classifiers contains baseline models: "

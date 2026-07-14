@@ -1,35 +1,18 @@
 """
-Model construction, scoring, and metrics for PPI prediction.
+Model registration, sklearn construction, and score extraction.
 
 This module owns sklearn classifier factories, baseline estimators, score
 extraction, and metric calculation. Framework adapters live in ``backends``.
-Future additions should include new sklearn models, calibration, threshold
-tuning, and expanded metrics.
+Register each model once here so CLI choices and backend routing cannot drift.
 """
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.svm import LinearSVC
 
-BASELINE_CLASSIFIER_CHOICES = ("always_positive", "always_negative")
-SKLEARN_LEARNED_CLASSIFIER_CHOICES = (
-    "logistic",
-    "linear_svm",
-    "sgd_logistic",
-)
-TORCH_CLASSIFIER_CHOICES = ("torch_mlp",)
-LEARNED_CLASSIFIER_CHOICES = (
-    SKLEARN_LEARNED_CLASSIFIER_CHOICES + TORCH_CLASSIFIER_CHOICES
-)
-CLASSIFIER_CHOICES = LEARNED_CLASSIFIER_CHOICES + BASELINE_CLASSIFIER_CHOICES
-
-
-#######################
-# Baseline estimators #
-#######################
-# Baseline classifier: predicts always positive or negative
 class ConstantClassifier:
     """
     Minimal classifier that always predicts one class.
@@ -78,85 +61,119 @@ class ConstantClassifier:
         return n_samples
 
 
-#################
-# Model factory #
-#################
+ClassifierFactory = Callable[[int, int], Any]
+
+
+def _make_logistic(max_iter: int, random_state: int) -> Any:
+    return LogisticRegression(
+        max_iter=max_iter,
+        class_weight="balanced",
+        solver="liblinear",
+        random_state=random_state,
+    )
+
+
+def _make_linear_svm(max_iter: int, random_state: int) -> Any:
+    return LinearSVC(
+        class_weight="balanced",
+        max_iter=max_iter,
+        random_state=random_state,
+    )
+
+
+def _make_sgd_logistic(max_iter: int, random_state: int) -> Any:
+    return SGDClassifier(
+        loss="log_loss",
+        penalty="l2",
+        class_weight="balanced",
+        max_iter=max_iter,
+        random_state=random_state,
+    )
+
+
+def _make_always_positive(max_iter: int, random_state: int) -> Any:
+    del max_iter, random_state
+    return ConstantClassifier(positive_probability=1.0)
+
+
+def _make_always_negative(max_iter: int, random_state: int) -> Any:
+    del max_iter, random_state
+    return ConstantClassifier(positive_probability=0.0)
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One registered model and the backend that owns it."""
+
+    name: str
+    backend: str
+    baseline: bool = False
+    estimator_factory: ClassifierFactory | None = None
+
+
+MODEL_SPECS = (
+    ModelSpec("logistic", "sklearn", estimator_factory=_make_logistic),
+    ModelSpec("linear_svm", "sklearn", estimator_factory=_make_linear_svm),
+    ModelSpec(
+        "sgd_logistic",
+        "sklearn",
+        estimator_factory=_make_sgd_logistic,
+    ),
+    ModelSpec("torch_mlp", "torch"),
+    ModelSpec(
+        "always_positive",
+        "sklearn",
+        baseline=True,
+        estimator_factory=_make_always_positive,
+    ),
+    ModelSpec(
+        "always_negative",
+        "sklearn",
+        baseline=True,
+        estimator_factory=_make_always_negative,
+    ),
+)
+_MODEL_SPECS_BY_NAME = {spec.name: spec for spec in MODEL_SPECS}
+CLASSIFIER_CHOICES = tuple(spec.name for spec in MODEL_SPECS)
+
+
+def model_spec(classifier_name: str) -> ModelSpec:
+    """Return the single registered specification for a model."""
+    try:
+        return _MODEL_SPECS_BY_NAME[classifier_name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown classifier: {classifier_name}") from exc
+
+
+def is_baseline_classifier(classifier_name: str) -> bool:
+    """Return whether a registered model ignores feature matrices."""
+    return model_spec(classifier_name).baseline
+
+
 def make_classifier(
         classifier_name: str, max_iter: int, random_state: int,
     ) -> Any:
     """
-    Create a classifier based on the specified model name.
+    Create the sklearn estimator owned by a registered model.
     """
-    # Baseline classifiers
-    if classifier_name == "always_positive":
-        model = ConstantClassifier(positive_probability=1.0)
-    elif classifier_name == "always_negative":
-        model = ConstantClassifier(positive_probability=0.0)
-
-    # Learned Classifiers
-    elif classifier_name == "logistic":
-        model = LogisticRegression(
-            max_iter=max_iter,
-            class_weight="balanced",
-            solver="liblinear",
-            random_state=random_state,
+    spec = model_spec(classifier_name)
+    if spec.estimator_factory is None:
+        raise ValueError(
+            f"Classifier {classifier_name!r} is owned by the "
+            f"{spec.backend!r} backend and has no sklearn estimator."
         )
-    elif classifier_name == "linear_svm":
-        model = LinearSVC(
-            class_weight="balanced",
-            max_iter=max_iter,
-            random_state=random_state,
-        )
-    elif classifier_name == "sgd_logistic":
-        model = SGDClassifier(
-            loss="log_loss",
-            penalty="l2",
-            class_weight="balanced",
-            max_iter=max_iter,
-            random_state=random_state,
-        )
-
-    # Unknown classifier
-    else:
-        raise ValueError(f"Unknown classifier: {classifier_name}")
-
-    return model
+    return spec.estimator_factory(max_iter, random_state)
 
 
-####################
-# Model evaluation #
-####################
-def get_scores_and_predictions(
-        model: Any, x: Any,
-    ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Return probability-like scores and hard 0/1 predictions.
-    """
-    # Predicted probability
+def score_estimator(model: Any, x: Any) -> tuple[np.ndarray, float]:
+    """Return one score per example and its conventional threshold."""
     if hasattr(model, "predict_proba"):
         y_score = model.predict_proba(x)[:, 1]
-        y_pred = (y_score >= 0.5).astype(int)
-
-    # Decision function
+        threshold = 0.5
     elif hasattr(model, "decision_function"):
         y_score = model.decision_function(x)
-        y_pred = (y_score >= 0.0).astype(int)
-
-    # Hard predictions only
-    else:
-        y_pred = model.predict(x)
-        y_score = y_pred.astype(float)
-
-    return y_score, y_pred
-
-
-def default_decision_threshold(model: Any) -> float:
-    """Return the estimator's conventional hard-decision threshold."""
-    if hasattr(model, "predict_proba"):
-        threshold = 0.5
-    elif hasattr(model, "decision_function"):
         threshold = 0.0
     else:
+        y_score = np.asarray(model.predict(x), dtype=float)
         threshold = 0.5
-
-    return threshold
+    return np.asarray(y_score).reshape(-1), threshold

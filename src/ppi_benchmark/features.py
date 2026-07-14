@@ -20,10 +20,7 @@ PLM_FEATURE = "plm"
 KMER_FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
 FEATURE_CHOICES = KMER_FEATURE_CHOICES + (PLM_FEATURE,)
 FEATURE_NAME_SEPARATOR = "+"
-DENSE_PAIR_COMPOSITION_CHUNK_SIZE = 8192
-PAIR_COMPOSER = SymmetricPairComposer(
-    chunk_size=DENSE_PAIR_COMPOSITION_CHUNK_SIZE,
-)
+PAIR_COMPOSER = SymmetricPairComposer()
 
 
 ####################

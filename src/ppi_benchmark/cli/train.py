@@ -57,8 +57,8 @@ from ..inputs import (
     validate_splits,
 )
 from ..models import (
-    BASELINE_CLASSIFIER_CHOICES,
     CLASSIFIER_CHOICES,
+    is_baseline_classifier,
 )
 from ..plots import (
     legacy_f1_heatmap_output_paths,
@@ -761,15 +761,6 @@ def model_checkpoint_paths(
     )
 
 
-def is_baseline_classifier(classifier_name: str) -> bool:
-    """
-    Return whether a classifier ignores feature matrices.
-    """
-    is_baseline = classifier_name in BASELINE_CLASSIFIER_CHOICES
-
-    return is_baseline
-
-
 def feature_metadata(
         feature_name: str, args: argparse.Namespace
     ) -> dict[str, Any]:
@@ -957,6 +948,14 @@ def train_and_evaluate_model_run(
     )
     max_iter = np.nan if is_baseline else backend_max_iter
     feature_meta = feature_metadata(feature_name, args)
+    run_identity = {
+        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+        "task": PPI_TASK.name,
+        "execution_id": execution_id,
+        "model_name": model_name,
+        "run_number": run_number,
+        "model_seed": model_seed,
+    }
 
     # Define model backend
     backend_options = None
@@ -983,7 +982,7 @@ def train_and_evaluate_model_run(
         resume_from=resume_from,
         backend_options=backend_options,
         task_name=PPI_TASK.name,
-        task_schema_version=EVALUATION_SCHEMA_VERSION,
+        task_schema_version=PPI_TASK.schema_version,
     )
     train_split = TaskSplitData("train", train_df, x_train)
     validation_split = None
@@ -1021,12 +1020,7 @@ def train_and_evaluate_model_run(
     actual_val_size = n_val / n_total
     actual_test_size = len(test_df) / n_total
     metrics_metadata = {
-        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
-        "task": PPI_TASK.name,
-        "execution_id": execution_id,
-        "model_name": model_name,
-        "run_number": run_number,
-        "model_seed": model_seed,
+        **run_identity,
         "split_seed": args.split_seed,
         "n_train": len(train_df),
         "n_val": n_val,
@@ -1061,15 +1055,10 @@ def train_and_evaluate_model_run(
     training_history_df = None
     if fit_result.training_history:
         history_metadata = {
-            "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
-            "task": PPI_TASK.name,
-            "execution_id": execution_id,
-            "model_name": model_name,
+            **run_identity,
             "classifier": classifier_name,
             "backend": backend.backend_name,
             "features": feature_meta["features"],
-            "run_number": run_number,
-            "model_seed": model_seed,
         }
         training_history_df = pd.DataFrame([
             {**history_metadata, **history_row}
@@ -1102,10 +1091,10 @@ def train_and_evaluate_model_run(
             examples=test_df,
             evaluation=test_evaluation,
             model_metadata={
-                "execution_id": execution_id,
-                "model_name": model_name,
-                "run_number": run_number,
-                "model_seed": model_seed,
+                "execution_id": run_identity["execution_id"],
+                "model_name": run_identity["model_name"],
+                "run_number": run_identity["run_number"],
+                "model_seed": run_identity["model_seed"],
                 "features": feature_meta["features"],
                 "classifier": classifier_name,
                 "k": feature_meta["k"],
@@ -1119,13 +1108,14 @@ def train_and_evaluate_model_run(
             "encoder_fingerprint"]
 
     model_performance = {
-        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
-        "task": PPI_TASK.name,
-        "model_name": model_name,
+        "evaluation_schema_version": run_identity[
+            "evaluation_schema_version"],
+        "task": run_identity["task"],
+        "model_name": run_identity["model_name"],
         "feature_name": feature_name,
         "classifier": classifier_name,
         "backend": backend.backend_name,
-        "run_number": run_number,
+        "run_number": run_identity["run_number"],
         "model_seed": None if is_baseline else run_seed,
         "fit_seconds": float(fit_seconds),
         "evaluation_seconds": {
