@@ -15,7 +15,7 @@ class ToyResidue:
 
 def test_grad_scaler_supports_torch_before_2_3(monkeypatch):
     torch = pytest.importorskip("torch")
-    from ppi_benchmark import torch_training
+    from ppi_benchmark.training import torch_trainer
 
     sentinel = object()
     calls = []
@@ -27,7 +27,7 @@ def test_grad_scaler_supports_torch_before_2_3(monkeypatch):
 
     monkeypatch.setattr(torch.cuda.amp, "GradScaler", legacy_grad_scaler)
 
-    assert torch_training._make_grad_scaler(enabled=False) is sentinel
+    assert torch_trainer._make_grad_scaler(enabled=False) is sentinel
     assert calls == [{"enabled": False}]
 
 
@@ -35,8 +35,8 @@ def test_shared_torch_trainer_accepts_non_matrix_ptm_connector(tmp_path):
     torch = pytest.importorskip("torch")
     from torch import nn
 
-    from ppi_benchmark.torch_checkpoints import TorchCheckpointManager
-    from ppi_benchmark.torch_training import (
+    from ppi_benchmark.training.checkpoints import TorchCheckpointManager
+    from ppi_benchmark.training.torch_trainer import (
         TorchStepOutput,
         TorchTaskRuntime,
         TorchTrainer,

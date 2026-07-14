@@ -10,7 +10,7 @@ from ppi_benchmark.backends import (
     backend_name_for_classifier,
     make_model_backend,
 )
-from ppi_benchmark.models import (
+from ppi_benchmark.backends.models import (
     CLASSIFIER_CHOICES,
     MODEL_SPECS,
     is_baseline_classifier,

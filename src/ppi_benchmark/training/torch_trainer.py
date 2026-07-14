@@ -13,12 +13,12 @@ import numpy as np
 import torch
 from torch import nn
 
-from .torch_checkpoints import (
+from ..torch_utils import TORCH_TRAINING_PRECISIONS
+from .checkpoints import (
     TorchCheckpointManager,
     cloned_component_states,
     load_component_states,
 )
-from .torch_utils import TORCH_TRAINING_PRECISIONS
 
 
 MONITOR_MODES = ("max", "min")

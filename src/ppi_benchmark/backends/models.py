@@ -2,7 +2,7 @@
 Model registration, sklearn construction, and score extraction.
 
 This module owns sklearn classifier factories, baseline estimators, score
-extraction, and metric calculation. Framework adapters live in ``backends``.
+extraction, and the registered model catalog used by backend adapters.
 Register each model once here so CLI choices and backend routing cannot drift.
 """
 

@@ -25,7 +25,7 @@ from .thresholds import (
 )
 
 if TYPE_CHECKING:
-    from .backends.base import BackendPrediction
+    from ..backends.base import BackendPrediction
 
 
 def binary_classification_metrics(

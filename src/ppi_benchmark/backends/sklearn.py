@@ -5,9 +5,9 @@ from __future__ import annotations
 from time import perf_counter
 from typing import Any
 
-from ..models import make_classifier, score_estimator
 from ..performance import solver_iteration_report
 from .base import BackendFitResult, BackendPrediction, SupervisedSplit
+from .models import make_classifier, score_estimator
 
 
 class SklearnBackend:

@@ -27,11 +27,20 @@ from ..backends import (
     backend_name_for_classifier,
     make_model_backend,
 )
+from ..backends.models import (
+    CLASSIFIER_CHOICES,
+    is_baseline_classifier,
+)
 from ..datasets.common import (
     discover_protein_metadata_path,
     FASTA_ID_FORMAT_CHOICES,
     file_sha256,
     read_fasta_with_taxa,
+)
+from ..evaluation import (
+    BinaryClassificationPolicy,
+    THRESHOLD_SELECTION_CHOICES,
+    VALIDATION_F1_THRESHOLD,
 )
 from ..features import (
     FEATURE_CHOICES,
@@ -42,7 +51,6 @@ from ..features import (
     normalize_feature_types,
     unique_protein_ids,
 )
-from ..evaluation import BinaryClassificationPolicy
 from ..inputs import (
     C2_SPLIT_STRATEGY,
     C3_SPLIT_STRATEGY,
@@ -55,10 +63,6 @@ from ..inputs import (
     RANDOM_SPLIT_STRATEGY,
     SPLIT_STRATEGY_CHOICES,
     validate_splits,
-)
-from ..models import (
-    CLASSIFIER_CHOICES,
-    is_baseline_classifier,
 )
 from ..plots import (
     legacy_f1_heatmap_output_paths,
@@ -111,10 +115,6 @@ from ..splits import (
     SPLITS_DIRNAME,
     write_metadata_json,
     write_split_artifacts,
-)
-from ..thresholds import (
-    THRESHOLD_SELECTION_CHOICES,
-    VALIDATION_F1_THRESHOLD,
 )
 from ..tasks import PPI_TASK
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS

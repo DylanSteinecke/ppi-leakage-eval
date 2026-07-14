@@ -8,9 +8,9 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .backends.base import BackendFitResult, ModelBackend, SupervisedSplit
-from .evaluation import EvaluationPolicy
-from .tasks.base import TaskAdapter
+from ..backends.base import BackendFitResult, ModelBackend, SupervisedSplit
+from ..evaluation import EvaluationPolicy
+from ..tasks.base import TaskAdapter
 
 
 @dataclass(frozen=True)

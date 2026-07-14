@@ -3,13 +3,13 @@
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..models import MODEL_SPECS, model_spec
 from .base import (
     BackendFitResult,
     BackendPrediction,
     ModelBackend,
     SupervisedSplit,
 )
+from .models import MODEL_SPECS, model_spec
 from .sklearn import SklearnBackend
 
 

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from sklearn.metrics import f1_score
 
-from ppi_benchmark.thresholds import (
+from ppi_benchmark.evaluation.thresholds import (
     fixed_threshold_selection,
     predictions_at_threshold,
     select_validation_f1_threshold,

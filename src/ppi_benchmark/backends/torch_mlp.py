@@ -15,11 +15,11 @@ from torch import nn
 
 from ..evaluation import binary_classification_metrics
 from ..schema import EVALUATION_SCHEMA_VERSION
-from ..torch_checkpoints import (
+from ..training.checkpoints import (
     TORCH_CHECKPOINT_FORMAT_VERSION,
     TorchCheckpointManager,
 )
-from ..torch_training import (
+from ..training.torch_trainer import (
     TorchStepOutput,
     TorchTaskRuntime,
     TorchTrainer,
