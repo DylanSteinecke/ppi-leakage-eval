@@ -24,6 +24,14 @@ from .torch_utils import TORCH_TRAINING_PRECISIONS
 MONITOR_MODES = ("max", "min")
 
 
+def _make_grad_scaler(enabled: bool):
+    """Construct a CUDA gradient scaler across supported Torch versions."""
+    grad_scaler = getattr(torch.amp, "GradScaler", None)
+    if grad_scaler is not None:
+        return grad_scaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 @dataclass(frozen=True)
 class TorchTrainerConfig:
     """Framework-level optimization and early-stopping configuration."""
@@ -346,10 +354,7 @@ class TorchTrainer:
             self.device.type == "cuda"
             and self.config.precision == "float16"
         )
-        self.scaler = torch.amp.GradScaler(
-            "cuda",
-            enabled=scaler_enabled,
-        )
+        self.scaler = _make_grad_scaler(enabled=scaler_enabled)
         data_signature = dict(self.task.data_signature(train, validation))
         base_payload = self._base_checkpoint_payload(data_signature)
         components = self.task.checkpoint_components()
