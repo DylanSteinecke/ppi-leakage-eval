@@ -204,15 +204,22 @@ def test_torch_mlp_batches_sparse_densification_and_early_stops(
     assert best_checkpoint["monitor_metric"] == "validation_auprc"
     assert best_checkpoint["epoch"] == 1
     assert best_checkpoint["input_dim"] == x_train.shape[1]
+    assert best_checkpoint["task_schema_version"] == 1
+    assert set(best_checkpoint["component_state_dicts"]) == {"task_head"}
+    assert best_checkpoint["task_head_state_dict"] is not None
     assert last_checkpoint["checkpoint_kind"] == "last"
     assert last_checkpoint["data_signature"]["train_inputs"]["format"] == (
         "csr")
     assert last_checkpoint["epoch"] == 3
     assert len(last_checkpoint["history"]) == 3
+    assert "scheduler_state_dict" in last_checkpoint
+    assert "scaler_state_dict" in last_checkpoint
+    assert "python_rng_state" in last_checkpoint
+    assert "torch_rng_state" in last_checkpoint
 
 
-def test_torch_mlp_last_checkpoint_resumes_optimizer_and_rng_state(tmp_path):
-    pytest.importorskip("torch")
+def test_torch_mlp_resumes_legacy_last_checkpoint_optimizer_and_rng(tmp_path):
+    torch = pytest.importorskip("torch")
     x_train = csr_matrix(np.asarray([
         [1, 0, 0, 1],
         [0, 1, 1, 0],
@@ -250,6 +257,33 @@ def test_torch_mlp_last_checkpoint_resumes_optimizer_and_rng_state(tmp_path):
         SupervisedSplit("train", x_train, y_train),
         validation=SupervisedSplit("val", x_val, y_val),
     )
+
+    # Simulate the pre-refactor format-3 payload. The shared checkpoint
+    # manager intentionally adapts its single model state and default config.
+    legacy_checkpoint = torch.load(
+        source_last,
+        map_location="cpu",
+        weights_only=True,
+    )
+    for field_name in (
+        "task_name",
+        "task_schema_version",
+        "task_identity",
+        "component_state_dicts",
+        "best_component_state_dicts",
+        "encoder_state_dict",
+        "task_head_state_dict",
+        "scheduler_state_dict",
+        "scaler_state_dict",
+        "task_runtime_state",
+        "best_validation_metrics",
+        "monitor_mode",
+        "python_rng_state",
+    ):
+        legacy_checkpoint.pop(field_name, None)
+    legacy_checkpoint["config"].pop("precision", None)
+    legacy_checkpoint["config"].pop("validation_monitor", None)
+    torch.save(legacy_checkpoint, source_last)
 
     best_only_backend = make_model_backend(
         classifier_name="torch_mlp",

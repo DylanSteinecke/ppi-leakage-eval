@@ -23,6 +23,13 @@ from .huggingface_esm import (
     PLM_PRECISION_CHOICES,
     PLM_TRUNCATION_CHOICES,
 )
+from .representations import (
+    ResidueAlignmentProvider,
+    ResidueTokenAlignment,
+    TokenizedProteinBatch,
+    TokenRepresentationBatch,
+    TokenRepresentationEncoder,
+)
 
 __all__ = [
     "DEFAULT_ESM2_MODEL",
@@ -36,6 +43,11 @@ __all__ = [
     "HuggingFaceESM2Encoder",
     "ProteinEmbeddingTable",
     "ProteinEncoder",
+    "ResidueAlignmentProvider",
+    "ResidueTokenAlignment",
+    "TokenizedProteinBatch",
+    "TokenRepresentationBatch",
+    "TokenRepresentationEncoder",
     "default_embedding_cache_dir",
     "normalize_protein_sequence",
     "sequence_sha256",

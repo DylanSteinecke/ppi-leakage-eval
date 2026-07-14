@@ -117,8 +117,8 @@ from ..thresholds import (
     VALIDATION_F1_THRESHOLD,
 )
 from ..tasks import PPI_TASK
-from ..torch_utils import TORCH_DEVICE_CHOICES
-from ..training import fit_and_evaluate_backend
+from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
+from ..training import TaskSplitData, fit_and_evaluate_task
 
 FEATURELESS_FEATURE = "none"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -490,11 +490,19 @@ def argument_parser() -> argparse.Namespace:
         help="Validation epochs without improvement before early stopping")
     torch_group.add_argument(
         "--torch-min-delta", type=nonnegative_float, default=1e-4,
-        help="Minimum validation-AUPRC increase counted as improvement")
+        help="Minimum validation-monitor improvement counted as progress")
     torch_group.add_argument(
         "--torch-device", choices=TORCH_DEVICE_CHOICES,
         default="auto",
         help="Device for torch_mlp; auto prefers CUDA, then MPS, then CPU")
+    torch_group.add_argument(
+        "--torch-precision", choices=TORCH_TRAINING_PRECISIONS,
+        default="float32",
+        help="Autocast precision used by the shared Torch trainer")
+    torch_group.add_argument(
+        "--torch-validation-monitor", choices=("auprc", "loss"),
+        default="auprc",
+        help="Validation quantity used for early stopping")
     torch_group.add_argument(
         "--torch-resume-from", default=None,
         help=(
@@ -962,6 +970,8 @@ def train_and_evaluate_model_run(
             "patience": args.torch_patience,
             "min_delta": args.torch_min_delta,
             "device": args.torch_device,
+            "precision": args.torch_precision,
+            "validation_monitor": args.torch_validation_monitor,
         }
     backend = make_model_backend(
         classifier_name=classifier_name,
@@ -972,19 +982,22 @@ def train_and_evaluate_model_run(
         last_checkpoint_path=last_checkpoint_path,
         resume_from=resume_from,
         backend_options=backend_options,
+        task_name=PPI_TASK.name,
+        task_schema_version=EVALUATION_SCHEMA_VERSION,
     )
-    train_split = PPI_TASK.make_split("train", train_df, x_train)
+    train_split = TaskSplitData("train", train_df, x_train)
     validation_split = None
     if val_df is not None and x_val is not None:
-        validation_split = PPI_TASK.make_split("val", val_df, x_val)
+        validation_split = TaskSplitData("val", val_df, x_val)
     test_split = None
     if args.evaluate_test_metrics:
         if x_test is None:
             raise ValueError("Test evaluation requested without test features.")
-        test_split = PPI_TASK.make_split("test", test_df, x_test)
+        test_split = TaskSplitData("test", test_df, x_test)
 
-    model_run_result = fit_and_evaluate_backend(
+    model_run_result = fit_and_evaluate_task(
         backend=backend,
+        task=PPI_TASK,
         train=train_split,
         validation=validation_split,
         test=test_split,

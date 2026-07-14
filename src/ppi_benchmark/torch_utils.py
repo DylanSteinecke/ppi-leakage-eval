@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 TORCH_DEVICE_CHOICES = ("auto", "cpu", "cuda", "mps")
+TORCH_TRAINING_PRECISIONS = ("float32", "float16", "bfloat16")
 
 
 def resolve_torch_device(requested_device: str):
@@ -28,4 +29,3 @@ def resolve_torch_device(requested_device: str):
     if device_name == "mps" and not torch.backends.mps.is_available():
         raise ValueError("MPS was requested but is not available.")
     return torch.device(device_name)
-

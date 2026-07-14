@@ -14,6 +14,7 @@ from scipy.sparse import hstack
 from ..backends.base import SupervisedSplit
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..training import SplitEvaluation
+from .base import stable_task_data_signature
 
 
 PPI_REQUIRED_COLUMNS = ("protein_a", "protein_b", "label")
@@ -264,6 +265,25 @@ class PPITask:
         frame["score"] = evaluation.scores
         frame["prediction"] = evaluation.predictions
         return frame
+
+    def data_signature(self, examples: pd.DataFrame) -> dict[str, Any]:
+        """Hash ordered PPI identities, endpoints, and labels."""
+        self._validate_examples(examples)
+        dataset = PPIPairDataset(examples)
+        records = [
+            {
+                "example_id": example.example_id,
+                "protein_a": example.protein_a,
+                "protein_b": example.protein_b,
+                "target": example.target,
+            }
+            for example in dataset
+        ]
+        return stable_task_data_signature(
+            task_name=self.name,
+            schema_version=EVALUATION_SCHEMA_VERSION,
+            records=records,
+        )
 
 
 PPI_TASK = PPITask()

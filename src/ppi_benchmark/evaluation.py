@@ -128,6 +128,10 @@ class BinaryClassificationPolicy:
             has_validation: bool,
         ) -> ThresholdSelection:
         """Select one threshold without consulting held-out test targets."""
+        if prediction.default_threshold is None:
+            raise ValueError(
+                "Binary evaluation requires a backend default threshold."
+            )
         targets_for_fixed = targets if has_validation else None
         scores_for_fixed = prediction.scores if has_validation else None
         if self.force_fixed:
@@ -163,6 +167,10 @@ class BinaryClassificationPolicy:
             operating_point: ThresholdSelection,
         ) -> tuple[np.ndarray, Mapping[str, float]]:
         """Apply the selected threshold and calculate binary metrics."""
+        if prediction.default_threshold is None:
+            raise ValueError(
+                "Binary evaluation requires a backend default threshold."
+            )
         if not np.isclose(
             prediction.default_threshold,
             operating_point.default_threshold,

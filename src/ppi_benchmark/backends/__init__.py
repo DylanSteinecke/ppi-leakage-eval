@@ -32,6 +32,8 @@ def make_model_backend(
         last_checkpoint_path: str | Path | None = None,
         resume_from: str | Path | None = None,
         backend_options: Mapping[str, Any] | None = None,
+        task_name: str = "binary_classification",
+        task_schema_version: int = 1,
     ) -> ModelBackend:
     """Construct a model backend without coupling the runner to a framework."""
     resolved_backend = (
@@ -72,6 +74,8 @@ def make_model_backend(
             best_checkpoint_path=best_checkpoint_path,
             last_checkpoint_path=last_checkpoint_path,
             resume_from=resume_from,
+            task_name=task_name,
+            task_schema_version=task_schema_version,
         )
     raise ValueError(f"Unknown model backend: {resolved_backend}")
 

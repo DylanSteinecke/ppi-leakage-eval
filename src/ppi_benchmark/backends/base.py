@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-import numpy as np
-
 
 @dataclass(frozen=True)
 class SupervisedSplit:
@@ -29,11 +27,12 @@ class BackendFitResult:
 
 @dataclass(frozen=True)
 class BackendPrediction:
-    """Scores and hard predictions returned by a model backend."""
+    """Task scores plus optional conventional backend decisions."""
 
-    scores: np.ndarray
-    predictions: np.ndarray
-    default_threshold: float
+    scores: Any
+    predictions: Any | None = None
+    default_threshold: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -50,5 +49,5 @@ class ModelBackend(Protocol):
         ...
 
     def predict(self, inputs: Any) -> BackendPrediction:
-        """Return task scores and hard predictions for model inputs."""
+        """Return task scores; task evaluation owns final decisions."""
         ...

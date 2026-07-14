@@ -39,8 +39,9 @@ examples, a collator that deduplicates proteins within a batch, symmetric pair
 composition (sum, absolute difference, and product), and PPI-specific output
 fields. A future PTM adapter can provide residue/window examples and its own
 head while reusing the backend contract, thresholding, checkpointing, metrics,
-and runtime reporting. Residue-level PLM output can be added to the encoder
-interface without changing the shared trainer.
+and runtime reporting. The shared Torch trainer accepts task connectors for
+batch iteration, loss, metrics, task/data signatures, and checkpoint
+components; it has no PPI or matrix assumptions.
 
 Metric, prediction, training-history, split-metadata, and performance outputs
 carry `evaluation_schema_version` and `task`. Prediction rows retain the legacy
@@ -236,6 +237,13 @@ cap. The pooled protein rows are composed into symmetric PPI features using
 sum, absolute difference, and elementwise product. Dense pair matrices are
 allocated once and filled in chunks.
 
+The ESM adapter also exposes `tokenize_with_alignment` and
+`encode_token_batch`. Token-level results include attention masks and an exact
+zero-based residue-to-token map. Pooled encoding remains the efficient cached
+wrapper used by existing PPI runs; token tensors are produced only when a
+residue task explicitly requests them and are not added to the pooled SQLite
+cache.
+
 Example for one split:
 
 ```bash
@@ -285,6 +293,13 @@ densifies only the current batch for training, validation, and prediction. The
 default 80/10/10 split therefore supports validation-AUPRC early stopping while
 keeping test held out unless `--eval-test-set` is requested.
 
+Its matrix handling is now a task connector over the reusable Torch trainer.
+The trainer owns optimization, device/autocast precision, configurable
+validation monitoring, early stopping, scheduler/scaler state, RNG state, and
+resumption. Use `--torch-validation-monitor loss` to monitor validation loss
+instead of AUPRC and `--torch-precision` to select `float32`, `float16`, or
+`bfloat16` where supported by the requested device.
+
 ```bash
 ppi-train \
     --pairs processed/biogrid_yeast_physical/pairs.csv \
@@ -331,6 +346,24 @@ Resume must write to a new `--run-dir`; the source `*.last.pt` remains
 immutable, and its path plus SHA-256 are recorded in the new performance
 report. `*.best.pt` is inference-only and is intentionally rejected as a
 resume source.
+
+Checkpoints carry task/schema identity, exact task-owned split signatures, and
+independent encoder/task-head component dictionaries. Last checkpoints also
+carry optimizer, optional scheduler, autocast scaler, RNG, history, and
+early-stopping state. The legacy single `model_state_dict` field remains for
+compatibility with existing `torch_mlp` checkpoints.
+
+## PTM task primitives
+
+The package now provides `PTMResidueDataset`, protein-aware split assignment,
+`PTMWindowCollator`, and `PTMResidueHead`. Windows are generated only after
+protein-level assignment, and the collator resolves the target through the
+encoder-provided residue map rather than assuming a fixed special-token
+offset. `PPIPairHead` similarly owns Torch sum/absolute-difference/product
+composition for a future end-to-end PPI PLM model. These are framework
+connectors rather than a PTM CLI: dataset-specific PTM loading, negative-site
+policy, split strategy, and benchmark metrics still need to be chosen before
+shipping an end-to-end PTM command.
 
 To add the model to every feature set in an existing laptop or exhaustive
 benchmark grid without changing that profile's defaults:

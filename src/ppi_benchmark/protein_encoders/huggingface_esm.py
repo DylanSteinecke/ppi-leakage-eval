@@ -10,6 +10,11 @@ import numpy as np
 
 from ..torch_utils import resolve_torch_device
 from .base import EncoderSpec, normalize_protein_sequence
+from .representations import (
+    ResidueTokenAlignment,
+    TokenizedProteinBatch,
+    TokenRepresentationBatch,
+)
 
 
 DEFAULT_ESM2_MODEL = "facebook/esm2_t6_8M_UR50D"
@@ -201,45 +206,105 @@ class HuggingFaceESM2Encoder:
             )
         return lengths
 
-    def encode_batch(self, sequences: Sequence[str]) -> np.ndarray:
-        """Encode and pool one token-budgeted sequence batch."""
-        import torch
-
+    def tokenize_with_alignment(
+            self, sequences: Sequence[str],
+        ) -> TokenizedProteinBatch:
+        """Tokenize ESM sequences and preserve exact residue-token indexes."""
         if not sequences:
-            raise ValueError("Cannot encode an empty sequence batch.")
-        encoded, observed_lengths = self._tokenize(sequences)
-        planned_lengths = self.token_lengths(sequences)
+            raise ValueError("Cannot tokenize an empty sequence batch.")
+        normalized = tuple(
+            normalize_protein_sequence(sequence)
+            for sequence in sequences
+        )
+        encoded, observed_lengths = self._tokenize(normalized)
+        planned_lengths = self.token_lengths(normalized)
         if not np.array_equal(observed_lengths, planned_lengths):
             raise ValueError(
                 "The selected tokenizer is not compatible with standard "
                 "one-token-per-residue ESM-2 batching."
             )
         special_tokens_mask = encoded.pop("special_tokens_mask").bool()
+        token_attention_mask = encoded["attention_mask"].bool()
+        residue_token_mask = token_attention_mask & ~special_tokens_mask
+        alignment = ResidueTokenAlignment.from_token_masks(
+            token_attention_mask.cpu().numpy(),
+            residue_token_mask.cpu().numpy(),
+        )
+        represented_residues = alignment.residue_counts
+        sequence_lengths = np.asarray(
+            [len(sequence) for sequence in normalized],
+            dtype=np.int64,
+        )
+        if np.any(represented_residues > sequence_lengths):
+            raise ValueError(
+                "Tokenizer produced more residue tokens than input residues."
+            )
+        if (
+            self.spec.truncation_policy == "error"
+            and not np.array_equal(represented_residues, sequence_lengths)
+        ):
+            raise ValueError(
+                "ESM tokenizer did not preserve one token per input residue."
+            )
+        return TokenizedProteinBatch(
+            sequences=normalized,
+            model_inputs={key: value for key, value in encoded.items()},
+            alignment=alignment,
+        )
+
+    def _hidden_states(self, tokenized: TokenizedProteinBatch):
+        """Run frozen inference while retaining token-level hidden states."""
+        import torch
+
         model = self._ensure_model()
         model_inputs = {
             key: value.to(self._device)
-            for key, value in encoded.items()
+            for key, value in tokenized.model_inputs.items()
         }
         with torch.inference_mode():
             hidden = model(**model_inputs).last_hidden_state
-            if self.spec.pooling == "cls":
-                pooled = hidden[:, 0]
-            else:
-                valid_tokens = (
-                    model_inputs["attention_mask"].bool()
-                    & ~special_tokens_mask.to(self._device)
-                )
-                token_counts = valid_tokens.sum(dim=1)
-                if torch.any(token_counts == 0):
-                    raise ValueError(
-                        "Mean pooling found a sequence without residue tokens."
-                    )
-                pooled = (
-                    hidden * valid_tokens.unsqueeze(-1)
-                ).sum(dim=1) / token_counts.unsqueeze(-1)
-        pooled = pooled.cpu()
+        return hidden
+
+    def _numpy_precision(self, tensor):
+        """Move representations to CPU in a NumPy-compatible precision."""
+        import torch
+
+        tensor = tensor.cpu()
         if self.spec.precision == "float16":
-            pooled = pooled.to(torch.float16)
+            tensor = tensor.to(torch.float16)
         else:
-            pooled = pooled.to(torch.float32)
-        return pooled.numpy()
+            tensor = tensor.to(torch.float32)
+        return tensor.numpy()
+
+    def encode_token_batch(
+            self, sequences: Sequence[str],
+        ) -> TokenRepresentationBatch:
+        """Return frozen token states with residue-to-token alignment."""
+        tokenized = self.tokenize_with_alignment(sequences)
+        hidden = self._hidden_states(tokenized)
+        return TokenRepresentationBatch(
+            tokenized=tokenized,
+            representations=self._numpy_precision(hidden),
+        )
+
+    def encode_batch(self, sequences: Sequence[str]) -> np.ndarray:
+        """Encode and pool one token-budgeted sequence batch."""
+        import torch
+
+        tokenized = self.tokenize_with_alignment(sequences)
+        hidden = self._hidden_states(tokenized)
+        if self.spec.pooling == "cls":
+            pooled = hidden[:, 0]
+        else:
+            residue_token_mask = torch.from_numpy(
+                tokenized.alignment.residue_token_mask
+            ).to(self._device)
+            token_counts = residue_token_mask.sum(dim=1)
+            if torch.any(token_counts == 0):
+                raise ValueError(
+                    "Mean pooling found a sequence without residue tokens."
+                )
+            pooled = (
+                hidden * residue_token_mask.unsqueeze(-1)
+            ).sum(dim=1) / token_counts.unsqueeze(-1)
+        return self._numpy_precision(pooled)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 import numpy as np
 
@@ -33,6 +33,25 @@ class SupervisedRunResult:
     split_evaluations: Mapping[str, SplitEvaluation]
     operating_point_selection_seconds: float
     total_seconds: float
+
+
+@dataclass(frozen=True)
+class TaskSplitData:
+    """Task examples paired with backend inputs for one named split."""
+
+    name: str
+    examples: Any
+    inputs: Any
+
+
+class TaskSplitAdapter(Protocol):
+    """Minimal task boundary needed by the shared run interface."""
+
+    def make_split(
+            self, name: str, examples: Any, inputs: Any,
+        ) -> SupervisedSplit:
+        """Build a backend-neutral supervised split."""
+        ...
 
 
 def fit_and_evaluate_backend(
@@ -94,4 +113,33 @@ def fit_and_evaluate_backend(
         split_evaluations=split_evaluations,
         operating_point_selection_seconds=float(selection_seconds),
         total_seconds=float(perf_counter() - run_started_at),
+    )
+
+
+def fit_and_evaluate_task(
+        backend: ModelBackend, task: TaskSplitAdapter,
+        train: TaskSplitData,
+        validation: TaskSplitData | None,
+        test: TaskSplitData | None,
+        evaluation_policy: EvaluationPolicy,
+    ) -> SupervisedRunResult:
+    """Connect task-owned examples to the framework-neutral run engine."""
+    return fit_and_evaluate_backend(
+        backend=backend,
+        train=task.make_split(train.name, train.examples, train.inputs),
+        validation=(
+            None
+            if validation is None
+            else task.make_split(
+                validation.name,
+                validation.examples,
+                validation.inputs,
+            )
+        ),
+        test=(
+            None
+            if test is None
+            else task.make_split(test.name, test.examples, test.inputs)
+        ),
+        evaluation_policy=evaluation_policy,
     )

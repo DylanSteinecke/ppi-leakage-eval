@@ -10,6 +10,7 @@ from ppi_benchmark.protein_encoders import (
     EncoderSpec,
     FrozenProteinEncoder,
     HuggingFaceESM2Encoder,
+    ResidueTokenAlignment,
     sequence_sha256,
     token_budget_batches,
 )
@@ -265,6 +266,46 @@ def test_huggingface_esm_adapter_is_lazy_and_cacheable(tiny_esm_model):
         not parameter.requires_grad
         for parameter in encoder._model.parameters()
     )
+
+
+def test_huggingface_token_representations_preserve_residue_alignment(
+        tiny_esm_model):
+    pytest.importorskip("torch")
+    encoder = HuggingFaceESM2Encoder(
+        model_name=str(tiny_esm_model),
+        model_revision="local-test-revision",
+        pooling="mean",
+        maximum_length=32,
+        precision="float32",
+        device="cpu",
+    )
+
+    tokenized = encoder.tokenize_with_alignment(["ACDE", "FG"])
+    token_batch = encoder.encode_token_batch(["ACDE", "FG"])
+    pooled = encoder.encode_batch(["ACDE", "FG"])
+
+    assert tokenized.alignment.residue_counts.tolist() == [4, 2]
+    assert tokenized.alignment.token_index(0, 0) == 1
+    assert tokenized.alignment.token_index(0, 3) == 4
+    assert token_batch.representations.shape == (2, 6, 8)
+    expected_pooled = np.stack([
+        token_batch.representations[row][
+            token_batch.tokenized.alignment.residue_token_mask[row]
+        ].mean(axis=0)
+        for row in range(2)
+    ])
+    np.testing.assert_allclose(pooled, expected_pooled, atol=1e-6, rtol=1e-6)
+
+
+def test_residue_alignment_rejects_padded_or_nonresidue_indices():
+    alignment = ResidueTokenAlignment.from_token_masks(
+        [[1, 1, 1, 1]],
+        [[0, 1, 1, 0]],
+    )
+    assert alignment.token_index(0, 0) == 1
+    assert alignment.token_index(0, 1) == 2
+    with pytest.raises(ValueError, match="not represented"):
+        alignment.token_index(0, 2)
 
 
 def test_remote_huggingface_encoder_rejects_floating_revision():
