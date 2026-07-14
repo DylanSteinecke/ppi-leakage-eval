@@ -354,6 +354,25 @@ def compute_ppi_split_diagnostics(
             "unordered_pairs",
         ))
 
+    def has_pairwise_overlap(count_prefix: str) -> bool:
+        return any(
+            diagnostics[f"n_{count_prefix}_{left_name}_{right_name}"] > 0
+            for left_name, right_name in split_pairs(split_dfs)
+        )
+
+    diagnostics["has_shared_proteins_across_splits"] = (
+        has_pairwise_overlap("shared_proteins")
+    )
+    diagnostics["has_exact_ordered_pair_overlap_across_splits"] = (
+        has_pairwise_overlap("exact_ordered_pair_overlaps")
+    )
+    diagnostics["has_unordered_pair_overlap_across_splits"] = (
+        has_pairwise_overlap("unordered_pair_overlaps")
+    )
+    diagnostics["has_pair_leakage_across_splits"] = diagnostics[
+        "has_unordered_pair_overlap_across_splits"
+    ]
+
     diagnostics["n_discarded_edges"] = native_value(
         getattr(args, "n_discarded_edges", 0))
     diagnostics["discarded_edge_fraction"] = native_value(

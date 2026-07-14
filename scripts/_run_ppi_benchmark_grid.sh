@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 
-# Shared benchmark grid for the example runners. This file is sourced, not run
-# directly. The caller must set PAIRS, FASTA, OUT_DIR, and the default values
-# for NUM_RERUNS, MAX_ITER, and K before sourcing it. BENCHMARK_PROFILE selects
-# a laptop or exhaustive feature/model grid.
+# Thin compatibility wrapper around the Python grid orchestrator. This file is
+# sourced by the example runners so their environment-variable interface stays
+# convenient; profile expansion and execution live in ppi_benchmark.cli.grid.
 
 PAIRS="${PAIRS:?Set PAIRS before sourcing _run_ppi_benchmark_grid.sh}"
 FASTA="${FASTA:?Set FASTA before sourcing _run_ppi_benchmark_grid.sh}"
 OUT_DIR="${OUT_DIR:?Set OUT_DIR before sourcing _run_ppi_benchmark_grid.sh}"
 PROTEIN_METADATA="${PROTEIN_METADATA:-}"
-NUM_RERUNS="${NUM_RERUNS:?Set NUM_RERUNS before sourcing _run_ppi_benchmark_grid.sh}"
-MAX_ITER="${MAX_ITER:?Set MAX_ITER before sourcing _run_ppi_benchmark_grid.sh}"
-K="${K:?Set K before sourcing _run_ppi_benchmark_grid.sh}"
+SEQUENCE_CLUSTERS="${SEQUENCE_CLUSTERS:-}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"
 SAMPLING_SEED="${SAMPLING_SEED:-0}"
 TRAIN_SIZE="${TRAIN_SIZE:-0.80}"
 VAL_SIZE="${VAL_SIZE:-0.10}"
+SPLIT_STRATEGIES="${SPLIT_STRATEGIES:-random c1 c2 c3}"
 SPLIT_SEEDS="${SPLIT_SEEDS:-0}"
-MODEL_SEED="${MODEL_SEED:-0}"
-EXECUTION_ID="${EXECUTION_ID:-${BENCHMARK_PROFILE}_models_$(date -u +%Y-%m-%d_%H-%M-%S)}"
+MAX_ITER="${MAX_ITER:-1000}"
+K="${K:-3}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
+RUN_NAME="${RUN_NAME:-${BENCHMARK_PROFILE}_${RUN_STAMP}}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
 INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"
 INCLUDE_PLM="${INCLUDE_PLM:-0}"
@@ -27,17 +26,13 @@ PLM_MODEL="${PLM_MODEL:-facebook/esm2_t6_8M_UR50D}"
 PLM_REVISION="${PLM_REVISION:-}"
 EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-}"
 USER_ARGS=("$@")
-BASELINE_CLASSIFIERS=(
-    always_positive
-    always_negative
-)
-SPLIT_STRATEGIES=(
-    random
-    c1
-    c2
-    c3
-)
+
+read -r -a SPLIT_STRATEGY_VALUES <<< "$SPLIT_STRATEGIES"
 read -r -a SPLIT_SEED_VALUES <<< "$SPLIT_SEEDS"
+if [[ "${#SPLIT_STRATEGY_VALUES[@]}" -eq 0 ]]; then
+    echo "SPLIT_STRATEGIES must contain at least one strategy." >&2
+    return 2
+fi
 if [[ "${#SPLIT_SEED_VALUES[@]}" -eq 0 ]]; then
     echo "SPLIT_SEEDS must contain at least one integer seed." >&2
     return 2
@@ -49,158 +44,107 @@ for split_seed in "${SPLIT_SEED_VALUES[@]}"; do
     fi
 done
 
-case "$BENCHMARK_PROFILE" in
-    laptop)
-        if [[ -z "${MAX_PAIRS+x}" ]]; then
-            MAX_PAIRS=10000
-        fi
-        if [[ -z "${N_SPLIT_TRIALS+x}" ]]; then
-            N_SPLIT_TRIALS=25
-        fi
-        FEATURE_SETS=(
-            tfidf
-            count
-        )
-        LEARNED_CLASSIFIERS=(
-            sgd_logistic
-        )
-        ;;
-    exhaustive)
-        if [[ -z "${MAX_PAIRS+x}" ]]; then
-            MAX_PAIRS=""
-        fi
-        if [[ -z "${N_SPLIT_TRIALS+x}" ]]; then
-            N_SPLIT_TRIALS=100
-        fi
-        FEATURE_SETS=(
-            tfidf
-            bm25
-            count
-            binary
-            "tfidf bm25 count binary"
-        )
-        LEARNED_CLASSIFIERS=(
-            logistic
-            linear_svm
-            sgd_logistic
-        )
-        ;;
+# MODEL_SEEDS is canonical. MODEL_SEED plus NUM_RERUNS remains a compatibility
+# bridge for existing laptop commands and expands once here into explicit seeds.
+if [[ -n "${MODEL_SEEDS:-}" ]]; then
+    read -r -a MODEL_SEED_VALUES <<< "$MODEL_SEEDS"
+else
+    MODEL_SEED="${MODEL_SEED:-0}"
+    NUM_RERUNS="${NUM_RERUNS:-1}"
+    if [[ ! "$MODEL_SEED" =~ ^-?[0-9]+$ ]]; then
+        echo "MODEL_SEED must be an integer." >&2
+        return 2
+    fi
+    if [[ ! "$NUM_RERUNS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "NUM_RERUNS must be a positive integer." >&2
+        return 2
+    fi
+    MODEL_SEED_VALUES=()
+    for ((seed_offset = 0; seed_offset < NUM_RERUNS; seed_offset++)); do
+        MODEL_SEED_VALUES+=("$((MODEL_SEED + seed_offset))")
+    done
+fi
+for model_seed in "${MODEL_SEED_VALUES[@]}"; do
+    if [[ ! "$model_seed" =~ ^-?[0-9]+$ ]]; then
+        echo "Invalid model seed '$model_seed'; expected an integer." >&2
+        return 2
+    fi
+done
+
+GRID_ARGS=(
+    --pairs "$PAIRS"
+    --fasta "$FASTA"
+    --out-dir "$OUT_DIR"
+    --run-name "$RUN_NAME"
+    --profile "$BENCHMARK_PROFILE"
+    --sampling-seed "$SAMPLING_SEED"
+    --train-size "$TRAIN_SIZE"
+    --val-size "$VAL_SIZE"
+    --split-strategies "${SPLIT_STRATEGY_VALUES[@]}"
+    --split-seeds "${SPLIT_SEED_VALUES[@]}"
+    --model-seeds "${MODEL_SEED_VALUES[@]}"
+    --max-iter "$MAX_ITER"
+    --k "$K"
+)
+
+if [[ -n "$PROTEIN_METADATA" ]]; then
+    GRID_ARGS+=(--protein-metadata "$PROTEIN_METADATA")
+fi
+if [[ -n "$SEQUENCE_CLUSTERS" ]]; then
+    GRID_ARGS+=(--sequence-clusters "$SEQUENCE_CLUSTERS")
+fi
+if [[ -v MAX_PAIRS ]]; then
+    if [[ -n "$MAX_PAIRS" ]]; then
+        GRID_ARGS+=(--max-pairs "$MAX_PAIRS")
+    else
+        GRID_ARGS+=(--full-cohort)
+    fi
+fi
+if [[ -n "${N_SPLIT_TRIALS:-}" ]]; then
+    GRID_ARGS+=(--n-split-trials "$N_SPLIT_TRIALS")
+fi
+
+case "$AGGREGATE_RESULTS" in
+    1) GRID_ARGS+=(--aggregate-results) ;;
+    0) GRID_ARGS+=(--no-aggregate-results) ;;
     *)
-        echo "Unknown BENCHMARK_PROFILE '$BENCHMARK_PROFILE'; expected laptop or exhaustive." >&2
+        echo "AGGREGATE_RESULTS must be 0 or 1." >&2
+        return 2
+        ;;
+esac
+case "$INCLUDE_TORCH_MLP" in
+    1) GRID_ARGS+=(--include-torch-mlp) ;;
+    0) GRID_ARGS+=(--no-include-torch-mlp) ;;
+    *)
+        echo "INCLUDE_TORCH_MLP must be 0 or 1." >&2
+        return 2
+        ;;
+esac
+case "$INCLUDE_PLM" in
+    1)
+        if [[ -z "$PLM_REVISION" ]]; then
+            echo "INCLUDE_PLM=1 requires an immutable PLM_REVISION." >&2
+            return 2
+        fi
+        GRID_ARGS+=(
+            --include-plm
+            --plm-model "$PLM_MODEL"
+            --plm-revision "$PLM_REVISION"
+        )
+        if [[ -n "$EMBEDDING_CACHE_DIR" ]]; then
+            GRID_ARGS+=(--embedding-cache-dir "$EMBEDDING_CACHE_DIR")
+        fi
+        ;;
+    0) GRID_ARGS+=(--no-include-plm) ;;
+    *)
+        echo "INCLUDE_PLM must be 0 or 1." >&2
         return 2
         ;;
 esac
 
-if [[ "$INCLUDE_TORCH_MLP" == "1" ]]; then
-    LEARNED_CLASSIFIERS+=(torch_mlp)
-elif [[ "$INCLUDE_TORCH_MLP" != "0" ]]; then
-    echo "INCLUDE_TORCH_MLP must be 0 or 1." >&2
-    return 2
-fi
-
-PLM_ARGS=()
-if [[ "$INCLUDE_PLM" == "1" ]]; then
-    if [[ -z "$PLM_REVISION" ]]; then
-        echo "INCLUDE_PLM=1 requires an immutable PLM_REVISION." >&2
-        return 2
-    fi
-    FEATURE_SETS+=(plm)
-    PLM_ARGS=(
-        --plm-model "$PLM_MODEL"
-        --plm-revision "$PLM_REVISION"
-    )
-    if [[ -n "$EMBEDDING_CACHE_DIR" ]]; then
-        PLM_ARGS+=(--embedding-cache-dir "$EMBEDDING_CACHE_DIR")
-    fi
-elif [[ "$INCLUDE_PLM" != "0" ]]; then
-    echo "INCLUDE_PLM must be 0 or 1." >&2
-    return 2
-fi
-
-PROTEIN_METADATA_ARGS=()
-if [[ -n "$PROTEIN_METADATA" ]]; then
-    PROTEIN_METADATA_ARGS=(--protein-metadata "$PROTEIN_METADATA")
-fi
-
-COHORT_SAMPLING_ARGS=()
-if [[ -n "$MAX_PAIRS" ]]; then
-    COHORT_SAMPLING_ARGS=(
-        --max-pairs "$MAX_PAIRS"
-        --sampling-seed "$SAMPLING_SEED"
-    )
-fi
-
-mkdir -p "$OUT_DIR"
 echo "Benchmark profile: $BENCHMARK_PROFILE"
-echo "Feature sets: ${FEATURE_SETS[*]}"
-echo "Learned classifiers: ${LEARNED_CLASSIFIERS[*]}"
 echo "Split fractions: train=$TRAIN_SIZE, val=$VAL_SIZE, test=remainder"
 echo "Split seeds: ${SPLIT_SEED_VALUES[*]}"
-echo "First model seed: $MODEL_SEED"
+echo "Model seeds: ${MODEL_SEED_VALUES[*]}"
 
-for split_strategy in "${SPLIT_STRATEGIES[@]}"; do
-    for split_seed in "${SPLIT_SEED_VALUES[@]}"; do
-        STRATEGY_EXECUTION_ID="${EXECUTION_ID}__${split_strategy}__split_seed_${split_seed}"
-        RUN_DIR="$OUT_DIR/${split_strategy}_seed-${split_seed}_${RUN_STAMP}"
-        APPEND_ARGS=()
-
-        run_ppi_benchmark() {
-            ppi-train \
-                --pairs "$PAIRS" \
-                --fasta "$FASTA" \
-                "${PROTEIN_METADATA_ARGS[@]}" \
-                "${COHORT_SAMPLING_ARGS[@]}" \
-                --run-dir "$RUN_DIR" \
-                --num-reruns "$NUM_RERUNS" \
-                --max-iter "$MAX_ITER" \
-                --k "$K" \
-                --train-size "$TRAIN_SIZE" \
-                --val-size "$VAL_SIZE" \
-                --split-seed "$split_seed" \
-                --model-seed "$MODEL_SEED" \
-                --split-strategy "$split_strategy" \
-                --n-split-trials "$N_SPLIT_TRIALS" \
-                --execution-id "$STRATEGY_EXECUTION_ID" \
-                "$@" \
-                "${USER_ARGS[@]}"
-        }
-
-        run_ppi_benchmark --classifier "${BASELINE_CLASSIFIERS[@]}"
-        APPEND_ARGS=(--append-results)
-
-        for feature_set in "${FEATURE_SETS[@]}"; do
-            IFS=" " read -r -a FEATURE_ARGS <<< "$feature_set"
-            FEATURE_SPECIFIC_ARGS=()
-            if [[ "$feature_set" == "plm" ]]; then
-                FEATURE_SPECIFIC_ARGS=("${PLM_ARGS[@]}")
-            fi
-            run_ppi_benchmark \
-                --features "${FEATURE_ARGS[@]}" \
-                --classifier "${LEARNED_CLASSIFIERS[@]}" \
-                "${FEATURE_SPECIFIC_ARGS[@]}" \
-                "${APPEND_ARGS[@]}"
-        done
-
-        echo "Finished strategy: $split_strategy; split seed: $split_seed"
-        echo "Execution ID: $STRATEGY_EXECUTION_ID"
-        echo "Run directory: $RUN_DIR"
-        echo "Metrics: $RUN_DIR/train_metrics.csv, $RUN_DIR/val_metrics.csv"
-        echo "Split assignments (including held-out test): $RUN_DIR/splits/split_assignments.csv"
-        echo "Summaries: $RUN_DIR/*_metrics_summary.csv"
-        echo "Plots: $RUN_DIR/plots/"
-        echo "Performance: $RUN_DIR/performance.jsonl"
-    done
-done
-
-if [[ "$AGGREGATE_RESULTS" == "1" ]]; then
-    ppi-aggregate \
-        --benchmark-dir "$OUT_DIR" \
-        --plot-execution-id-prefix "${EXECUTION_ID}__"
-    echo "Benchmark manifest: $OUT_DIR/benchmark_manifest.csv"
-    echo "Benchmark summary: $OUT_DIR/benchmark_summary.csv"
-    if [[ -f "$OUT_DIR/benchmark_train_val_f1.png" ]]; then
-        echo "Train/validation F1 plot: $OUT_DIR/benchmark_train_val_f1.png"
-    fi
-fi
-
-echo "Finished all runs for all split strategies."
+ppi-grid "${GRID_ARGS[@]}" -- "${USER_ARGS[@]}"

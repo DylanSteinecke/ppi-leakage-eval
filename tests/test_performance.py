@@ -65,12 +65,14 @@ def test_tracker_and_jsonl_writer_report_invocation_resources(tmp_path):
     tracker.add_matrices({"train": np.ones((2, 3)), "test": None})
     tracker.add_model_runs([{"model_name": "example", "fit_seconds": 0.1}])
 
-    report = tracker.report("execution-1")
+    report = tracker.report("execution-1", task="ppi")
     output_path = tmp_path / "performance.jsonl"
     append_performance_report(report, output_path)
     written = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert written["execution_id"] == "execution-1"
+    assert written["evaluation_schema_version"] == 1
+    assert written["task"] == "ppi"
     assert written["total_seconds"] >= written["stages_seconds"][
         "example_stage"]
     assert written["stages_seconds"]["example_stage"] > 0.0

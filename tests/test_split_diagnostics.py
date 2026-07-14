@@ -97,6 +97,8 @@ def test_shared_protein_counts_and_examples():
     assert diagnostics["n_shared_proteins_train_test"] == 1
     assert diagnostics["shared_proteins_train_test_examples"] == ["C"]
     assert diagnostics["n_shared_proteins_val_test"] == 0
+    assert diagnostics["has_shared_proteins_across_splits"] is True
+    assert diagnostics["has_pair_leakage_across_splits"] is False
 
 
 def test_exact_ordered_pair_overlap():
@@ -144,6 +146,9 @@ def test_reversed_pair_counts_only_as_unordered_overlap():
     assert diagnostics["unordered_pair_overlap_examples_train_val"] == [
         ["A", "B"],
     ]
+    assert diagnostics["has_exact_ordered_pair_overlap_across_splits"] is False
+    assert diagnostics["has_unordered_pair_overlap_across_splits"] is True
+    assert diagnostics["has_pair_leakage_across_splits"] is True
 
 
 def test_within_split_duplicate_pair_counts():
@@ -224,3 +229,5 @@ def test_c3_reports_zero_shared_proteins():
     )
 
     assert diagnostics["n_shared_proteins_train_test"] == 0
+    assert diagnostics["has_shared_proteins_across_splits"] is False
+    assert diagnostics["has_pair_leakage_across_splits"] is False

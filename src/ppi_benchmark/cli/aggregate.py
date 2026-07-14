@@ -31,6 +31,8 @@ SUMMARY_FILES = (
 )
 MANIFEST_COLUMNS = (
     "run_dir",
+    "evaluation_schema_version",
+    "task",
     "execution_id",
     "timestamp_utc",
     "split_strategy",
@@ -44,6 +46,7 @@ MANIFEST_COLUMNS = (
     "actual_test_size",
     "split_seed",
     "model_seed",
+    "model_seeds",
     "num_reruns",
     "features_run",
     "classifiers_run",
@@ -74,6 +77,8 @@ MANIFEST_COLUMNS = (
 )
 SUMMARY_CONTEXT_COLUMNS = (
     "run_dir",
+    "evaluation_schema_version",
+    "task",
     "execution_id",
     "timestamp_utc",
     "split_strategy",
@@ -99,6 +104,10 @@ SUMMARY_CONTEXT_COLUMNS = (
     "n_dropped_pairs",
 )
 DIAGNOSTIC_COLUMNS = (
+    "has_shared_proteins_across_splits",
+    "has_exact_ordered_pair_overlap_across_splits",
+    "has_unordered_pair_overlap_across_splits",
+    "has_pair_leakage_across_splits",
     "n_shared_proteins_train_val",
     "n_shared_proteins_train_test",
     "n_shared_proteins_val_test",
@@ -252,9 +261,9 @@ def fallback_arg_values(metadata: dict[str, Any], arg_name: str) -> list[Any]:
 
 def run_directories(benchmark_dir: Path) -> list[Path]:
     """
-    Return child directories that contain split metadata.
+    Return descendant run directories that contain split metadata.
     """
-    metadata_paths = sorted(benchmark_dir.glob(f"*/{METADATA_RELATIVE_PATH}"))
+    metadata_paths = sorted(benchmark_dir.rglob(str(METADATA_RELATIVE_PATH)))
     directories = [
         metadata_path.parent.parent
         for metadata_path in metadata_paths
@@ -293,6 +302,9 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     sequence_clusters = metadata.get("sequence_clusters") or {}
     row = {
         "run_dir": str(run_dir),
+        "evaluation_schema_version": metadata.get(
+            "evaluation_schema_version", ""),
+        "task": metadata.get("task", "ppi"),
         "execution_id": metadata.get("execution_id", ""),
         "timestamp_utc": metadata.get("timestamp_utc", ""),
         "split_strategy": metadata.get("split_strategy", ""),
@@ -306,6 +318,12 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         "actual_test_size": metadata.get("actual_test_size", ""),
         "split_seed": metadata.get("split_seed", ""),
         "model_seed": metadata.get("model_seed", ""),
+        "model_seeds": csv_value(
+            metadata.get(
+                "model_seeds",
+                resolved_args.get("model_seeds", []),
+            )
+        ),
         "num_reruns": resolved_args.get("num_reruns", ""),
         "features_run": csv_value(features_run),
         "classifiers_run": csv_value(classifiers_run),

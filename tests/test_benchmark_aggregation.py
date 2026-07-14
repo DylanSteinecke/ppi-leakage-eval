@@ -42,6 +42,8 @@ def metadata(run_dir, split_strategy="random"):
     Return minimal split metadata for aggregation tests.
     """
     return {
+        "evaluation_schema_version": 1,
+        "task": "ppi",
         "execution_id": f"{split_strategy}_execution",
         "timestamp_utc": "2026-07-09T00:00:00+00:00",
         "run_dir": str(run_dir),
@@ -78,6 +80,10 @@ def metadata(run_dir, split_strategy="random"):
             "num_reruns": 3,
         },
         "diagnostics": {
+            "has_shared_proteins_across_splits": True,
+            "has_exact_ordered_pair_overlap_across_splits": True,
+            "has_unordered_pair_overlap_across_splits": True,
+            "has_pair_leakage_across_splits": True,
             "n_shared_proteins_train_val": 0,
             "n_shared_proteins_train_test": 2,
             "n_shared_proteins_val_test": 0,
@@ -113,8 +119,8 @@ def summary_row(split_name, features="tfidf", classifier="logistic"):
 
 def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     benchmark_dir = tmp_path / "benchmark"
-    run_dir = benchmark_dir / "random_20260709T000000Z"
-    second_run_dir = benchmark_dir / "c3_20260709T000000Z"
+    run_dir = benchmark_dir / "runs" / "random" / "seed_0" / "tfidf"
+    second_run_dir = benchmark_dir / "runs" / "c3" / "seed_0" / "tfidf"
 
     first_metadata = metadata(run_dir, split_strategy="random")
     first_metadata.update({
@@ -190,6 +196,11 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "linear_svm",
     ]
     assert first_manifest_row["diagnostics_n_shared_proteins_train_test"] == 2
+    assert first_manifest_row["evaluation_schema_version"] == 1
+    assert first_manifest_row["task"] == "ppi"
+    assert bool(
+        first_manifest_row["diagnostics_has_pair_leakage_across_splits"]
+    ) is True
     assert first_manifest_row["model_seed"] == 23
     assert first_manifest_row["sequence_clusters_file_sha256"] == (
         "clusters-sha")
@@ -209,6 +220,7 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "random_execution",
         "c3_execution",
     }
+    assert set(summary_df["task"]) == {"ppi"}
 
 
 def test_aggregate_benchmark_results_reads_real_cli_run(
@@ -222,11 +234,11 @@ def test_aggregate_benchmark_results_reads_real_cli_run(
         "--fasta", fasta_path,
         "--run-dir", run_dir,
         "--classifier", "always_positive",
-        "--num-reruns", "1",
+        "--model-seeds", "11",
         "--max-iter", "100",
         "--train-size", "0.50",
         "--val-size", "0.0",
-        "--seed", "11",
+        "--split-seed", "11",
         "--no-metrics-plots",
     )
 
@@ -326,35 +338,28 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert '--max-pairs "$MAX_PAIRS"' in grid_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-laptop}"' in yeast_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in toy_text
-    assert 'Unknown BENCHMARK_PROFILE' in grid_text
     assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
     assert '--val-size "$VAL_SIZE"' in grid_text
-    assert '--plot-execution-id-prefix "${EXECUTION_ID}__"' in grid_text
-    assert "ppi-train" in grid_text
-    assert "ppi-aggregate" in grid_text
+    assert 'ppi-grid "${GRID_ARGS[@]}"' in grid_text
+    assert "ppi-train" not in grid_text
+    assert "ppi-aggregate" not in grid_text
     assert "ppi-prepare biogrid" in yeast_text
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
     assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
     assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
     assert 'PLM_REVISION="${PLM_REVISION:-}"' in grid_text
-    assert "FEATURE_SETS+=(plm)" in grid_text
     assert 'SPLIT_SEEDS="${SPLIT_SEEDS:-0}"' in grid_text
-    assert '--split-seed "$split_seed"' in grid_text
-    assert '--model-seed "$MODEL_SEED"' in grid_text
-    assert "LEARNED_CLASSIFIERS+=(torch_mlp)" in grid_text
+    assert '--split-seeds "${SPLIT_SEED_VALUES[@]}"' in grid_text
+    assert '--model-seeds "${MODEL_SEED_VALUES[@]}"' in grid_text
+    assert "--include-torch-mlp" in grid_text
 
 
-def test_benchmark_profiles_expand_to_expected_command_grids(tmp_path):
+def test_benchmark_shell_wrapper_forwards_one_grid_command(tmp_path):
     grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
 
-    def profile_commands(
-            profile, include_torch=False, split_seeds="0",
-            include_plm=False,
-        ):
-        suffix = "_torch" if include_torch else ""
-        suffix += "_multi_seed" if " " in split_seeds else ""
-        suffix += "_plm" if include_plm else ""
+    def wrapper_command(profile, include_torch=False, include_plm=False):
+        suffix = f"_{int(include_torch)}_{int(include_plm)}"
         calls_path = tmp_path / f"{profile}{suffix}_calls.txt"
         out_dir = tmp_path / f"{profile}_results"
         shell_script = r'''
@@ -364,19 +369,16 @@ GRID_PATH="$2"
 OUT_DIR="$3"
 BENCHMARK_PROFILE="$4"
 INCLUDE_TORCH_MLP="$5"
-SPLIT_SEEDS="$6"
-INCLUDE_PLM="$7"
+INCLUDE_PLM="$6"
 PLM_REVISION="0123456789abcdef0123456789abcdef01234567"
-EMBEDDING_CACHE_DIR="$8"
-ppi-train() {
+EMBEDDING_CACHE_DIR="$7"
+ppi-grid() {
     printf '%s\n' "$*" >> "$CALLS_PATH"
-}
-ppi-aggregate() {
-    :
 }
 PAIRS="pairs.csv"
 FASTA="proteins.fasta"
-NUM_RERUNS=1
+MODEL_SEEDS="11 19"
+SPLIT_SEEDS="3 7"
 MAX_ITER=100
 K=2
 RUN_STAMP="profile-test"
@@ -394,7 +396,6 @@ source "$GRID_PATH" --no-metrics-plots
                 str(out_dir),
                 profile,
                 "1" if include_torch else "0",
-                split_seeds,
                 "1" if include_plm else "0",
                 str(tmp_path / "shared_embeddings"),
             ],
@@ -403,72 +404,26 @@ source "$GRID_PATH" --no-metrics-plots
             capture_output=True,
             text=True,
         )
-        return calls_path.read_text(encoding="utf-8").splitlines()
+        calls = calls_path.read_text(encoding="utf-8").splitlines()
+        assert len(calls) == 1
+        return calls[0]
 
-    laptop_calls = profile_commands("laptop")
-    laptop_torch_calls = profile_commands("laptop", include_torch=True)
-    laptop_multi_seed_calls = profile_commands(
-        "laptop",
-        split_seeds="3 7",
-    )
-    laptop_plm_calls = profile_commands("laptop", include_plm=True)
-    exhaustive_calls = profile_commands("exhaustive")
+    laptop_call = wrapper_command("laptop")
+    laptop_torch_call = wrapper_command("laptop", include_torch=True)
+    laptop_plm_call = wrapper_command("laptop", include_plm=True)
+    exhaustive_call = wrapper_command("exhaustive")
 
-    assert len(laptop_calls) == 12
-    assert len(laptop_multi_seed_calls) == 24
-    assert len(laptop_plm_calls) == 16
-    assert len(exhaustive_calls) == 24
-    assert all("--n-split-trials 25" in call for call in laptop_calls)
-    assert all("--val-size 0.10" in call for call in laptop_calls)
-    assert all("--max-pairs 10000" in call for call in laptop_calls)
-    assert all("--model-seed 0" in call for call in laptop_calls)
-    assert sum(
-        "--split-seed 3" in call
-        for call in laptop_multi_seed_calls
-    ) == 12
-    assert sum(
-        "--split-seed 7" in call
-        for call in laptop_multi_seed_calls
-    ) == 12
-    assert sum(
-        "seed-3_profile-test" in call
-        for call in laptop_multi_seed_calls
-    ) == 12
-    assert sum(
-        "seed-7_profile-test" in call
-        for call in laptop_multi_seed_calls
-    ) == 12
-    laptop_learned_calls = [
-        call for call in laptop_calls if "--features" in call
-    ]
-    assert all("--classifier sgd_logistic" in call
-               for call in laptop_learned_calls)
-    assert {call.split("--features ", 1)[1].split(" --classifier", 1)[0]
-            for call in laptop_learned_calls} == {"tfidf", "count"}
-    assert all(
-        "--classifier sgd_logistic torch_mlp" in call
-        for call in laptop_torch_calls
-        if "--features" in call
-    )
-    plm_calls = [
-        call for call in laptop_plm_calls if "--features plm" in call
-    ]
-    non_plm_calls = [
-        call for call in laptop_plm_calls if "--features plm" not in call
-    ]
-    assert len(plm_calls) == 4
-    assert all("--plm-model facebook/esm2_t6_8M_UR50D" in call
-               for call in plm_calls)
-    assert all("--plm-revision 0123456789abcdef0123456789abcdef01234567"
-               in call for call in plm_calls)
-    assert all("--embedding-cache-dir" in call for call in plm_calls)
-    assert all("--plm-model" not in call for call in non_plm_calls)
-
-    assert all("--n-split-trials 100" in call for call in exhaustive_calls)
-    assert all("--val-size 0.10" in call for call in exhaustive_calls)
-    assert all("--max-pairs" not in call for call in exhaustive_calls)
-    assert sum(
-        "--features tfidf bm25 count binary "
-        "--classifier logistic linear_svm sgd_logistic" in call
-        for call in exhaustive_calls
-    ) == 4
+    assert "--profile laptop" in laptop_call
+    assert "--run-name laptop_profile-test" in laptop_call
+    assert "--split-seeds 3 7" in laptop_call
+    assert "--model-seeds 11 19" in laptop_call
+    assert "--val-size 0.10" in laptop_call
+    assert "--no-aggregate-results" in laptop_call
+    assert "--no-metrics-plots" in laptop_call
+    assert "--no-include-torch-mlp" in laptop_call
+    assert "--include-torch-mlp" in laptop_torch_call
+    assert "--include-plm" in laptop_plm_call
+    assert "--plm-model facebook/esm2_t6_8M_UR50D" in laptop_plm_call
+    assert "--plm-revision 0123456789abcdef" in laptop_plm_call
+    assert "--embedding-cache-dir" in laptop_plm_call
+    assert "--profile exhaustive" in exhaustive_call

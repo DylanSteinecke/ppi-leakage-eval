@@ -22,7 +22,7 @@ Install frozen protein language-model features with:
 python -m pip install -e '.[plm]'
 ```
 
-This provides `ppi-train`, `ppi-prepare`, `ppi-aggregate`, and
+This provides `ppi-train`, `ppi-grid`, `ppi-prepare`, `ppi-aggregate`, and
 `ppi-make-toy-data`.
 
 The installable implementation lives under `src/ppi_benchmark/`. Command-line
@@ -31,6 +31,23 @@ in `datasets/`, model-framework adapters are in `backends/`, and reusable
 benchmark modules are at the package root. The runner uses a backend-neutral
 fit/predict contract. Classical classifiers retain the existing sklearn
 factory and scoring path, while `torch_mlp` exercises the batched Torch path.
+
+The training engine is task-neutral: a backend fits and predicts, an evaluation
+policy selects the operating point and computes metrics, and a task adapter
+maps domain examples to those shared contracts. The PPI adapter owns pair
+examples, a collator that deduplicates proteins within a batch, symmetric pair
+composition (sum, absolute difference, and product), and PPI-specific output
+fields. A future PTM adapter can provide residue/window examples and its own
+head while reusing the backend contract, thresholding, checkpointing, metrics,
+and runtime reporting. Residue-level PLM output can be added to the encoder
+interface without changing the shared trainer.
+
+Metric, prediction, training-history, split-metadata, and performance outputs
+carry `evaluation_schema_version` and `task`. Prediction rows retain the legacy
+PPI columns and also expose the common fields `split`, `example_id`, `target`,
+`score`, and `prediction`. The compact `splits/split_assignments.csv` records
+every train/validation/test source row; input hashes make those assignments
+reconstructable without copying the full dataset three times.
 
 ## Tests
 Run the lightweight regression suite with:
@@ -81,15 +98,22 @@ Both profiles include the constant baselines and random/C1/C2/C3 splits. Set
 `MAX_PAIRS` or `N_SPLIT_TRIALS` explicitly to override a profile default. An
 explicitly empty `MAX_PAIRS` uses the entire eligible cohort. `SAMPLING_SEED`
 controls cohort selection independently of the data-split seed. `SPLIT_SEEDS`
-accepts a quoted, space-separated list and creates a separate run directory for
-every split strategy/seed combination. `MODEL_SEED` controls the first model
-seed; `NUM_RERUNS` advances model seeds within each fixed split. For example:
+accepts a quoted, space-separated list. `MODEL_SEEDS` explicitly lists every
+independent model-fit seed. For example:
 
 ```bash
-SPLIT_SEEDS="0 1 2 3 4" MODEL_SEED=100 NUM_RERUNS=3 \
+SPLIT_SEEDS="0 1 2 3 4" MODEL_SEEDS="100 101 102" \
     PREPARE_YEAST_DATA=0 \
     bash scripts/run_yeast_biogrid_ppi_example.sh
 ```
+
+Each invocation creates one immutable benchmark root at
+`<OUT_DIR>/<RUN_NAME>/`. Every split strategy, split seed, baseline group, and
+feature set gets an independent run directory below `runs/`; no grid cell
+appends into another cell's files. The resolved grid is recorded in
+`benchmark_config.json`, and aggregation writes `benchmark_manifest.csv`,
+`benchmark_summary.csv`, and `benchmark_train_val_f1.png` at the benchmark
+root. Omit `RUN_NAME` to use a timestamped name.
 
 The grid defaults to a genuine 80/10/10 train/validation/test split. Test
 remains held out unless `--eval-test-set` is supplied. After aggregation, the
@@ -100,6 +124,25 @@ generalization gap. Strategy panels are stacked vertically on one shared F1
 scale, so better or worse performance can be compared by horizontal position.
 To reuse already prepared yeast files, add
 `PREPARE_YEAST_DATA=0` before the command.
+
+The Python grid runner owns profile expansion and can also be invoked directly:
+
+```bash
+ppi-grid \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --protein-metadata processed/biogrid_yeast_physical/protein_metadata.csv \
+    --out-dir results \
+    --run-name yeast_laptop_v1 \
+    --profile laptop \
+    --split-seeds 0 1 2 \
+    --model-seeds 100 101
+```
+
+Use `--config configs/benchmark_grid.example.toml` for a versionable TOML
+specification. CLI values override TOML values. Extra `ppi-train` options go
+after `--`; grid-defining options cannot be overridden there. An existing
+benchmark root is never overwritten.
 
 For example, run the exhaustive model grid on a bounded cohort with:
 
@@ -275,7 +318,7 @@ ppi-train \
     --features tfidf \
     --classifier torch_mlp \
     --split-seed 0 \
-    --model-seed 0 \
+    --model-seeds 0 \
     --torch-max-epochs 100 \
     --torch-resume-from results/yeast_torch_mlp/checkpoints/<execution-id>/tfidf__torch_mlp__run_1.last.pt \
     --run-dir results/yeast_torch_mlp_resumed
@@ -297,6 +340,12 @@ INCLUDE_TORCH_MLP=1 PREPARE_YEAST_DATA=0 \
     bash scripts/run_yeast_biogrid_ppi_example.sh \
     --torch-max-epochs 30 --torch-batch-size 256
 ```
+
+The canonical training CLI uses `--classifier`, `--split-seed`, and explicit
+`--model-seeds`. The older `--classifiers`, `--seed`,
+`--model-seed`/`--num-reruns`, `--append-results`, `--execution-id`, and
+`--split-name` spellings remain accepted as hidden compatibility options but
+emit deprecation warnings where applicable.
 
 ## Leakage-aware splits
 

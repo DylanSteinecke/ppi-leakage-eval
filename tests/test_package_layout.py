@@ -13,12 +13,14 @@ CLI_COMMANDS = (
     "ppi-train",
     "ppi-prepare",
     "ppi-aggregate",
+    "ppi-grid",
     "ppi-make-toy-data",
 )
 CLI_MODULES = (
     "ppi_benchmark.cli.train",
     "ppi_benchmark.cli.prepare",
     "ppi_benchmark.cli.aggregate",
+    "ppi_benchmark.cli.grid",
     "ppi_benchmark.cli.make_toy_data",
 )
 

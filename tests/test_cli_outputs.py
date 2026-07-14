@@ -48,11 +48,11 @@ def base_cli_args(pairs_path, fasta_path, run_dir):
         "--fasta", fasta_path,
         "--run-dir", run_dir,
         "--classifier", "always_positive",
-        "--num-reruns", "1",
         "--max-iter", "100",
         "--train-size", "0.50",
         "--val-size", "0.0",
-        "--seed", "11",
+        "--split-seed", "11",
+        "--model-seeds", "11",
     ]
 
     return args
@@ -70,6 +70,67 @@ def test_cli_without_run_dir_fails_clearly(ppi_test_data, run_cli):
 
     assert completed_process.returncode != 0
     assert "--run-dir" in completed_process.stderr
+
+
+def test_cli_help_shows_canonical_seed_flags_only(run_cli):
+    completed_process = run_cli("--help")
+
+    assert "--split-seed" in completed_process.stdout
+    assert "--model-seeds" in completed_process.stdout
+    assert "--num-reruns" not in completed_process.stdout
+    assert "--model-seed MODEL_SEED" not in completed_process.stdout
+    assert "--append-results" not in completed_process.stdout
+    assert "--execution-id" not in completed_process.stdout
+    assert "--classifiers" not in completed_process.stdout
+
+
+def test_explicit_model_seeds_control_every_fit(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "explicit_model_seeds"
+
+    run_cli(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--classifier", "sgd_logistic",
+        "--features", "count",
+        "--train-size", "0.50",
+        "--val-size", "0.25",
+        "--split-seed", "3",
+        "--model-seeds", "11", "19",
+        "--no-metrics-plots",
+    )
+
+    metrics = pd.read_csv(run_dir / "train_metrics.csv")
+    metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metrics["model_seed"].tolist() == [11, 19]
+    assert metadata["model_seeds"] == [11, 19]
+
+
+def test_legacy_seed_flags_remain_accepted_with_warning(
+        tmp_path, ppi_test_data, run_cli):
+    pairs_path, fasta_path = ppi_test_data
+
+    completed_process = run_cli(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", tmp_path / "legacy_seeds",
+        "--classifier", "always_positive",
+        "--seed", "7",
+        "--model-seed", "13",
+        "--num-reruns", "1",
+        "--no-metrics-plots",
+    )
+
+    assert "Deprecated CLI: --seed is deprecated" in completed_process.stderr
+    assert "--model-seed/--num-reruns are deprecated" in (
+        completed_process.stderr
+    )
 
 
 @pytest.mark.parametrize("removed_flag", REMOVED_OUTPUT_FLAGS)
@@ -121,8 +182,19 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
     )
     predictions = pd.read_csv(run_dir / "predictions.csv", nrows=0)
     assert "source_row_index" in predictions.columns[:6]
+    assert {
+        "evaluation_schema_version",
+        "task",
+        "split",
+        "example_id",
+        "target",
+        "score",
+        "prediction",
+    } <= set(predictions.columns)
     performance = json.loads(
         (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    assert performance["evaluation_schema_version"] == 1
+    assert performance["task"] == "ppi"
     assert performance["total_seconds"] > 0.0
     assert performance["peak_memory_bytes"] > 0
     assert performance["matrices"] == {}
@@ -150,9 +222,9 @@ def test_default_generated_split_is_true_train_val_test(
         "--fasta", fasta_path,
         "--run-dir", run_dir,
         "--classifier", "always_positive",
-        "--num-reruns", "1",
         "--max-iter", "100",
-        "--seed", "11",
+        "--split-seed", "11",
+        "--model-seeds", "11",
     )
 
     assert_exists(
@@ -179,6 +251,13 @@ def test_default_generated_split_is_true_train_val_test(
     metadata = json.loads(
         (run_dir / "splits" / "split_metadata.json").read_text(
             encoding="utf-8"))
+    train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
+    val_metrics = pd.read_csv(run_dir / "val_metrics.csv")
+    assert set(train_metrics["task"]) == {"ppi"}
+    assert set(val_metrics["task"]) == {"ppi"}
+    assert set(train_metrics["evaluation_schema_version"]) == {1}
+    assert metadata["task"] == "ppi"
+    assert metadata["evaluation_schema_version"] == 1
     assert metadata["target_train_size"] == pytest.approx(0.8)
     assert metadata["target_val_size"] == pytest.approx(0.1)
     assert metadata["target_test_size"] == pytest.approx(0.1)
@@ -231,10 +310,10 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
         "--classifier", "sgd_logistic", "torch_mlp",
         "--features", "count",
         "--k", "2",
-        "--num-reruns", "1",
         "--train-size", "0.50",
         "--val-size", "0.25",
-        "--seed", "11",
+        "--split-seed", "11",
+        "--model-seeds", "11",
         "--eval-test-set",
         "--torch-max-epochs", "5",
         "--torch-batch-size", "4",
@@ -281,6 +360,8 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
     last_checkpoint_path = Path(training["last_checkpoint_path"])
 
     assert history["epoch"].tolist() == [1, 2]
+    assert set(history["task"]) == {"ppi"}
+    assert set(history["evaluation_schema_version"]) == {1}
     assert set(history["backend"]) == {"torch"}
     assert history["validation_loss"].notna().all()
     assert history["validation_auprc"].notna().all()
@@ -297,6 +378,11 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
     }
     assert predictions["pred_score"].between(0.0, 1.0).all()
     assert predictions["decision_threshold"].notna().all()
+    assert set(predictions["task"]) == {"ppi"}
+    assert set(predictions["split"]) == {"test"}
+    assert predictions["target"].equals(predictions["label"])
+    assert predictions["score"].equals(predictions["pred_score"])
+    assert predictions["prediction"].equals(predictions["pred_label"])
     assert set(predictions["threshold_selection"]) == {"validation_f1"}
     assert model_run["backend"] == "torch"
     assert training["stopped_early"] is True
@@ -338,11 +424,10 @@ def test_torch_mlp_cli_resumes_from_last_checkpoint(
         "--classifier", "torch_mlp",
         "--features", "count",
         "--k", "2",
-        "--num-reruns", "1",
         "--train-size", "0.50",
         "--val-size", "0.25",
         "--split-seed", "13",
-        "--model-seed", "17",
+        "--model-seeds", "17",
         "--torch-batch-size", "4",
         "--torch-hidden-dim", "8",
         "--torch-dropout", "0",
@@ -413,11 +498,10 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
         "--plm-max-batch-tokens", "64",
         "--plm-max-batch-sequences", "4",
         "--embedding-cache-dir", cache_dir,
-        "--num-reruns", "1",
         "--max-iter", "20",
         "--train-size", "0.50",
         "--val-size", "0.25",
-        "--model-seed", "17",
+        "--model-seeds", "17",
         "--no-metrics-plots",
     ]
     first_run_dir = tmp_path / "plm_split_1"
@@ -532,12 +616,10 @@ def test_split_and_model_seeds_are_independent(
             "--run-dir", run_dir,
             "--classifier", "sgd_logistic",
             "--features", "count",
-            "--num-reruns", "1",
             "--train-size", "0.50",
             "--val-size", "0.25",
-            "--seed", "999",
             "--split-seed", str(split_seed),
-            "--model-seed", "41",
+            "--model-seeds", "41",
             "--no-metrics-plots",
         )
         metrics = pd.read_csv(run_dir / "train_metrics.csv")
@@ -754,7 +836,7 @@ def test_append_results_requires_identical_split(
     summary_before_failure = summary_path.read_bytes()
 
     changed_split = common_args.copy()
-    changed_split[changed_split.index("--seed") + 1] = "12"
+    changed_split[changed_split.index("--split-seed") + 1] = "12"
     completed_process = run_cli(
         *changed_split,
         "--append-results",
@@ -840,10 +922,10 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", run_dir,
-        "--num-reruns", "1",
         "--max-iter", "100",
         "--train-size", "0.50",
-        "--seed", "11",
+        "--split-seed", "11",
+        "--model-seeds", "11",
         "--no-metrics-plots",
     ]
 
@@ -1028,10 +1110,10 @@ def test_c3_three_way_metadata_reports_pairwise_disjoint_proteins(
         "--fasta", fasta_path,
         "--run-dir", run_dir,
         "--classifier", "always_positive",
-        "--num-reruns", "1",
         "--train-size", "0.7",
         "--val-size", "0.15",
-        "--seed", "11",
+        "--split-seed", "11",
+        "--model-seeds", "11",
         "--split-strategy", "c3",
         "--n-split-trials", "50",
         "--no-metrics-plots",

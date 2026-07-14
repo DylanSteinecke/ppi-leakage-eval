@@ -33,6 +33,7 @@ dev = [
 ppi-train = "ppi_benchmark.cli.train:main"
 ppi-prepare = "ppi_benchmark.cli.prepare:main"
 ppi-aggregate = "ppi_benchmark.cli.aggregate:main"
+ppi-grid = "ppi_benchmark.cli.grid:main"
 ppi-make-toy-data = "ppi_benchmark.cli.make_toy_data:main"
 
 [tool.setuptools.packages.find]

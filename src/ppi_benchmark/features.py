@@ -11,15 +11,19 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
 from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+
+from .tasks import SymmetricPairComposer
 
 PLM_FEATURE = "plm"
 KMER_FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
 FEATURE_CHOICES = KMER_FEATURE_CHOICES + (PLM_FEATURE,)
 FEATURE_NAME_SEPARATOR = "+"
 DENSE_PAIR_COMPOSITION_CHUNK_SIZE = 8192
+PAIR_COMPOSER = SymmetricPairComposer(
+    chunk_size=DENSE_PAIR_COMPOSITION_CHUNK_SIZE,
+)
 
 
 ####################
@@ -197,49 +201,11 @@ def compose_pair_features(
     """
     Compose symmetric pair features from precomputed protein feature rows.
     """
-    protein_a_rows = protein_ids.get_indexer(df["protein_a"])
-    protein_b_rows = protein_ids.get_indexer(df["protein_b"])
-    if (protein_a_rows < 0).any() or (protein_b_rows < 0).any():
-        raise ValueError("Pair dataframe contains proteins without features.")
-
-    if sparse.issparse(protein_features):
-        prot_a_fts = protein_features[protein_a_rows]
-        prot_b_fts = protein_features[protein_b_rows]
-        ft_sums = prot_a_fts + prot_b_fts
-        ft_diffs = np.abs(prot_a_fts - prot_b_fts)
-        ft_prods = prot_a_fts.multiply(prot_b_fts)
-        return hstack([ft_sums, ft_diffs, ft_prods], format="csr")
-
-    dense_features = np.asarray(protein_features)
-    if dense_features.ndim != 2:
-        raise ValueError("Protein features must be a two-dimensional matrix.")
-    n_pairs = len(df)
-    n_protein_features = dense_features.shape[1]
-    pair_features = np.empty(
-        (n_pairs, n_protein_features * 3),
-        dtype=dense_features.dtype,
+    return PAIR_COMPOSER.compose(
+        examples=df,
+        protein_ids=protein_ids,
+        protein_features=protein_features,
     )
-    for start in range(0, n_pairs, DENSE_PAIR_COMPOSITION_CHUNK_SIZE):
-        stop = min(start + DENSE_PAIR_COMPOSITION_CHUNK_SIZE, n_pairs)
-        protein_a = dense_features[protein_a_rows[start:stop]]
-        protein_b = dense_features[protein_b_rows[start:stop]]
-        output = pair_features[start:stop]
-        np.add(protein_a, protein_b, out=output[:, :n_protein_features])
-        np.subtract(
-            protein_a,
-            protein_b,
-            out=output[:, n_protein_features:2 * n_protein_features],
-        )
-        np.abs(
-            output[:, n_protein_features:2 * n_protein_features],
-            out=output[:, n_protein_features:2 * n_protein_features],
-        )
-        np.multiply(
-            protein_a,
-            protein_b,
-            out=output[:, 2 * n_protein_features:],
-        )
-    return pair_features
 
 
 def compose_split_feature_matrices(

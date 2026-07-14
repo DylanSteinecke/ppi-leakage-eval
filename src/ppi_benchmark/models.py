@@ -11,15 +11,9 @@ from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression, SGDClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 from sklearn.svm import LinearSVC
+
+from .evaluation import binary_classification_metrics
 
 
 BASELINE_CLASSIFIER_CHOICES = ("always_positive", "always_negative")
@@ -181,28 +175,13 @@ def get_metrics(
     Inputs are flattened so callers can pass pandas Series, lists, or numpy
     arrays without changing metric behavior.
     """
-    # Extract and check the predictions and labels
-    y_true = np.asarray(y_true).ravel()
-    y_score = np.asarray(y_score).ravel()
-    y_pred = np.asarray(y_pred).ravel()
-    if not (len(y_true) == len(y_score) == len(y_pred)):
-        raise ValueError(
-            "y_true, y_score, and y_pred must have the same length.")
-
-    # Define metrics
+    metrics = binary_classification_metrics(
+        targets=y_true,
+        scores=y_score,
+        predictions=y_pred,
+    )
     prefix = f"_{split_name}" if split_name else ""
-    has_predicted_positive = np.any(y_pred == 1)
-    metrics = {
-        f"accuracy{prefix}": accuracy_score(y_true, y_pred),
-        f"precision{prefix}": (
-            precision_score(y_true, y_pred, zero_division=0)
-            if has_predicted_positive
-            else np.nan
-        ),
-        f"recall{prefix}": recall_score(y_true, y_pred, zero_division=0),
-        f"f1{prefix}": f1_score(y_true, y_pred, zero_division=0),
-        f"auprc{prefix}": average_precision_score(y_true, y_score),
-        f"auroc{prefix}": roc_auc_score(y_true, y_score),
+    return {
+        f"{metric_name}{prefix}": metric_value
+        for metric_name, metric_value in metrics.items()
     }
-
-    return metrics

@@ -17,7 +17,6 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -25,7 +24,6 @@ import pandas as pd
 
 from ..backends import (
     TORCH_BACKEND,
-    SupervisedSplit,
     backend_name_for_classifier,
     make_model_backend,
 )
@@ -44,6 +42,7 @@ from ..features import (
     normalize_feature_types,
     unique_protein_ids,
 )
+from ..evaluation import BinaryClassificationPolicy
 from ..inputs import (
     C2_SPLIT_STRATEGY,
     C3_SPLIT_STRATEGY,
@@ -60,7 +59,6 @@ from ..inputs import (
 from ..models import (
     BASELINE_CLASSIFIER_CHOICES,
     CLASSIFIER_CHOICES,
-    get_metrics,
 )
 from ..plots import (
     legacy_f1_heatmap_output_paths,
@@ -97,6 +95,7 @@ from ..sampling import (
     select_examples,
     write_selection_manifest,
 )
+from ..schema import EVALUATION_SCHEMA_VERSION
 from ..splits import (
     add_source_row_index,
     append_invocation_log,
@@ -114,14 +113,12 @@ from ..splits import (
     write_split_artifacts,
 )
 from ..thresholds import (
-    FIXED_THRESHOLD,
     THRESHOLD_SELECTION_CHOICES,
     VALIDATION_F1_THRESHOLD,
-    fixed_threshold_selection,
-    predictions_at_threshold,
-    select_validation_f1_threshold,
 )
+from ..tasks import PPI_TASK
 from ..torch_utils import TORCH_DEVICE_CHOICES
+from ..training import fit_and_evaluate_backend
 
 FEATURELESS_FEATURE = "none"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -147,6 +144,8 @@ TRAIN_TEST_PLOT_FILENAME = "train_test_metrics_summary.svg"
 TRAIN_TEST_PNG_FILENAME = "train_test_metrics_summary.png"
 TRAIN_TEST_F1_HEATMAP_FILENAME = "train_test_f1_heatmap.png"
 TRAINING_HISTORY_COLUMNS = (
+    "evaluation_schema_version",
+    "task",
     "execution_id",
     "model_name",
     "classifier",
@@ -326,11 +325,10 @@ def argument_parser() -> argparse.Namespace:
             "written.")
     output_group.add_argument(
         "--append-results", action="store_true",
-        help="Append to existing metric/prediction CSVs in --run-dir instead "
-            "of starting fresh.")
+        help=argparse.SUPPRESS)
     output_group.add_argument(
         "--execution-id", default=None,
-        help="Optional identifier stored with each model run row.")
+        help=argparse.SUPPRESS)
     output_group.add_argument(
         "--log-level", choices=LOG_LEVEL_CHOICES, default="INFO",
         help="Logging verbosity.")
@@ -415,9 +413,13 @@ def argument_parser() -> argparse.Namespace:
     # Model args
     model_group = parser.add_argument_group("Models")
     model_group.add_argument(
-        "--classifier", "--classifiers", dest="classifiers",
+        "--classifier", dest="classifiers",
         choices=CLASSIFIER_CHOICES, nargs="+", default=["logistic"],
         help="One or more classifier model types")
+    model_group.add_argument(
+        "--classifiers", dest="classifiers",
+        choices=CLASSIFIER_CHOICES, nargs="+", default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS)
     model_group.add_argument(
         "--threshold-selection",
         choices=THRESHOLD_SELECTION_CHOICES,
@@ -441,20 +443,21 @@ def argument_parser() -> argparse.Namespace:
         help="Evaluate on the test split. In validation runs, omit this to "
             "keep test held out.")
     training_group.add_argument(
-        "--seed", type=int, default=0,
-        help="Backward-compatible default for split and model seeds")
+        "--seed", type=int, default=None, help=argparse.SUPPRESS)
     training_group.add_argument(
         "--split-seed", type=int, default=None,
         help="Seed controlling generated train/validation/test assignments")
     training_group.add_argument(
-        "--model-seed", type=int, default=None,
-        help="First model seed; reruns use consecutive values")
+        "--model-seeds", type=int, nargs="+", default=None,
+        help="Explicit random seeds for independent model fits")
+    training_group.add_argument(
+        "--model-seed", type=int, default=None, help=argparse.SUPPRESS)
     training_group.add_argument(
         "--split-col", default=None,
         help="Optional column with train, validation, and test labels")
     training_group.add_argument(
         "--split-name", type=non_empty_string, default=None,
-        help="Optional display name for a provided --split-col split")
+        help=argparse.SUPPRESS)
     training_group.add_argument(
         "--split-strategy", choices=SPLIT_STRATEGY_CHOICES, default=None,
         help="Optional strategy for creating train/validation/test splits")
@@ -462,8 +465,8 @@ def argument_parser() -> argparse.Namespace:
         "--n-split-trials", type=positive_int, default=100,
         help="Candidate assignments evaluated for C1/C2/C3 splitting")
     training_group.add_argument(
-        "--num-reruns", type=positive_int, default=1,
-        help="Number of times to rerun each classifier with consecutive seeds")
+        "--num-reruns", type=positive_int, default=None,
+        help=argparse.SUPPRESS)
 
     # Torch MLP args
     torch_group = parser.add_argument_group("Torch MLP")
@@ -506,10 +509,32 @@ def argument_parser() -> argparse.Namespace:
         parser.error("--split-name can only be used with --split-col.")
     if args.train_size + args.val_size >= 1.0:
         parser.error("--train-size + --val-size must be less than 1.")
-    if args.torch_resume_from and args.num_reruns != 1:
-        parser.error("--torch-resume-from requires --num-reruns 1.")
-    if args.torch_resume_from and "torch_mlp" not in args.classifiers:
-        parser.error("--torch-resume-from requires --classifier torch_mlp.")
+
+    args.cli_deprecation_warnings = []
+    if args.seed is not None:
+        args.cli_deprecation_warnings.append(
+            "--seed is deprecated; use --split-seed and --model-seeds."
+        )
+    if args.model_seed is not None or args.num_reruns is not None:
+        args.cli_deprecation_warnings.append(
+            "--model-seed/--num-reruns are deprecated; pass every seed "
+            "explicitly with --model-seeds."
+        )
+    if args.append_results:
+        args.cli_deprecation_warnings.append(
+            "--append-results is deprecated; use one immutable run "
+            "directory per configuration and aggregate run directories."
+        )
+    if args.execution_id is not None:
+        args.cli_deprecation_warnings.append(
+            "--execution-id is reserved for legacy orchestration and is "
+            "deprecated for direct use."
+        )
+    if args.split_name is not None:
+        args.cli_deprecation_warnings.append(
+            "--split-name is deprecated; use the provided split column name "
+            "or experiment configuration metadata."
+        )
 
     if args.split_col:
         args.effective_split_strategy = PROVIDED_SPLIT_STRATEGY
@@ -522,9 +547,37 @@ def argument_parser() -> argparse.Namespace:
     args.sampling_requested = (
         args.max_pairs is not None or args.sample_fraction is not None)
     args.split_seed = (
-        args.seed if args.split_seed is None else args.split_seed)
-    args.model_seed = (
-        args.seed if args.model_seed is None else args.model_seed)
+        args.split_seed
+        if args.split_seed is not None
+        else (0 if args.seed is None else args.seed)
+    )
+    if args.model_seeds is not None:
+        if args.model_seed is not None or args.num_reruns is not None:
+            parser.error(
+                "--model-seeds cannot be combined with deprecated "
+                "--model-seed or --num-reruns."
+            )
+        model_seeds = tuple(args.model_seeds)
+    else:
+        first_model_seed = (
+            args.model_seed
+            if args.model_seed is not None
+            else (0 if args.seed is None else args.seed)
+        )
+        n_model_seeds = 1 if args.num_reruns is None else args.num_reruns
+        model_seeds = tuple(
+            first_model_seed + offset
+            for offset in range(n_model_seeds)
+        )
+    if len(set(model_seeds)) != len(model_seeds):
+        parser.error("--model-seeds cannot contain duplicate values.")
+    args.model_seeds = model_seeds
+    args.model_seed = model_seeds[0]
+    args.num_reruns = len(model_seeds)
+    if args.torch_resume_from and len(args.model_seeds) != 1:
+        parser.error("--torch-resume-from requires exactly one model seed.")
+    if args.torch_resume_from and "torch_mlp" not in args.classifiers:
+        parser.error("--torch-resume-from requires --classifier torch_mlp.")
 
     try:
         args.features = normalize_feature_types(args.features)
@@ -560,6 +613,8 @@ def configure_logging(args: argparse.Namespace) -> None:
         level=getattr(logging, args.log_level),
         format="%(message)s",
     )
+    for warning_message in args.cli_deprecation_warnings:
+        LOGGER.warning("Deprecated CLI: %s", warning_message)
 
 
 def sample_ppi_cohort(
@@ -884,7 +939,7 @@ def train_and_evaluate_model_run(
     # Define model metadata
     model_name = make_model_name(feature_name, classifier_name)
     is_baseline = is_baseline_classifier(classifier_name)
-    run_seed = args.model_seed + run_number - 1
+    run_seed = args.model_seeds[run_number - 1]
     model_seed = np.nan if is_baseline else run_seed
     backend_name = backend_name_for_classifier(classifier_name)
     backend_max_iter = (
@@ -894,9 +949,6 @@ def train_and_evaluate_model_run(
     )
     max_iter = np.nan if is_baseline else backend_max_iter
     feature_meta = feature_metadata(feature_name, args)
-
-    # Define training labels
-    y_train = train_df["label"].to_numpy()
 
     # Define model backend
     backend_options = None
@@ -921,89 +973,33 @@ def train_and_evaluate_model_run(
         resume_from=resume_from,
         backend_options=backend_options,
     )
-    train_split = SupervisedSplit(
-        name="train",
-        inputs=x_train,
-        targets=y_train,
-    )
+    train_split = PPI_TASK.make_split("train", train_df, x_train)
     validation_split = None
     if val_df is not None and x_val is not None:
-        validation_split = SupervisedSplit(
-            name="val",
-            inputs=x_val,
-            targets=val_df["label"].to_numpy(),
-        )
+        validation_split = PPI_TASK.make_split("val", val_df, x_val)
+    test_split = None
+    if args.evaluate_test_metrics:
+        if x_test is None:
+            raise ValueError("Test evaluation requested without test features.")
+        test_split = PPI_TASK.make_split("test", test_df, x_test)
 
-    # Fit the model to the training data
-    model_run_started_at = perf_counter()
-    fit_result = backend.fit(
+    model_run_result = fit_and_evaluate_backend(
+        backend=backend,
         train=train_split,
         validation=validation_split,
+        test=test_split,
+        evaluation_policy=BinaryClassificationPolicy(
+            threshold_strategy=args.threshold_selection,
+            force_fixed=is_baseline,
+        ),
     )
+    fit_result = model_run_result.fit_result
     fit_seconds = fit_result.fit_seconds
     iteration_report = fit_result.iteration_report
     training_metadata = fit_result.metadata
     solver_iterations = (
         np.nan if iteration_report is None else iteration_report["maximum"])
-
-    # Select one operating threshold without consulting the test split.
-    prediction_cache = {}
-    threshold_started_at = perf_counter()
-    if val_df is not None and x_val is not None:
-        selection_inputs = x_val
-        selection_split_name = "val"
-    else:
-        selection_inputs = x_train
-        selection_split_name = "train"
-    selection_prediction = backend.predict(selection_inputs)
-    prediction_cache[selection_split_name] = selection_prediction
-    default_threshold = selection_prediction.default_threshold
-    if is_baseline:
-        threshold_selection = fixed_threshold_selection(
-            default_threshold=default_threshold,
-            labels=(
-                val_df["label"].to_numpy()
-                if val_df is not None and x_val is not None
-                else None
-            ),
-            scores=(
-                selection_prediction.scores
-                if val_df is not None and x_val is not None
-                else None
-            ),
-            strategy="fixed_baseline",
-        )
-    elif (
-        args.threshold_selection == VALIDATION_F1_THRESHOLD
-        and val_df is not None
-        and x_val is not None
-    ):
-        threshold_selection = select_validation_f1_threshold(
-            labels=val_df["label"].to_numpy(),
-            scores=selection_prediction.scores,
-            default_threshold=default_threshold,
-        )
-    else:
-        fixed_strategy = (
-            FIXED_THRESHOLD
-            if args.threshold_selection == FIXED_THRESHOLD
-            else "fixed_no_validation"
-        )
-        threshold_selection = fixed_threshold_selection(
-            default_threshold=default_threshold,
-            labels=(
-                val_df["label"].to_numpy()
-                if val_df is not None and x_val is not None
-                else None
-            ),
-            scores=(
-                selection_prediction.scores
-                if val_df is not None and x_val is not None
-                else None
-            ),
-            strategy=fixed_strategy,
-        )
-    threshold_selection_seconds = perf_counter() - threshold_started_at
+    threshold_selection = model_run_result.operating_point
 
     # Define the evaluate metrics tables
     n_val = 0 if val_df is None else len(val_df)
@@ -1012,6 +1008,8 @@ def train_and_evaluate_model_run(
     actual_val_size = n_val / n_total
     actual_test_size = len(test_df) / n_total
     metrics_metadata = {
+        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+        "task": PPI_TASK.name,
         "execution_id": execution_id,
         "model_name": model_name,
         "run_number": run_number,
@@ -1050,6 +1048,8 @@ def train_and_evaluate_model_run(
     training_history_df = None
     if fit_result.training_history:
         history_metadata = {
+            "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+            "task": PPI_TASK.name,
             "execution_id": execution_id,
             "model_name": model_name,
             "classifier": classifier_name,
@@ -1063,79 +1063,41 @@ def train_and_evaluate_model_run(
             for history_row in fit_result.training_history
         ]).reindex(columns=TRAINING_HISTORY_COLUMNS)
 
-    evaluation_seconds: dict[str, float] = {}
-
-    def evaluate_split(
-            split_df: pd.DataFrame, x_split: Any, split_name: str,
-        ) -> tuple[pd.DataFrame, Any, Any]:
-        """
-        Evaluate one split and return metrics plus raw predictions.
-        """
-        evaluation_started_at = perf_counter()
-        y_true = split_df["label"].to_numpy()
-        prediction = prediction_cache.get(split_name)
-        if prediction is None:
-            prediction = backend.predict(x_split)
-            prediction_cache[split_name] = prediction
-        if not np.isclose(
-                prediction.default_threshold,
-                threshold_selection.default_threshold):
-            raise RuntimeError(
-                "Model backend returned inconsistent default thresholds."
-            )
-        y_score = prediction.scores
-        y_pred = predictions_at_threshold(
-            y_score,
-            threshold_selection.threshold,
-        )
-        metrics = get_metrics(
-            y_true=y_true,
-            y_score=y_score,
-            y_pred=y_pred,
-        )
-        metrics_df = make_metrics_df(
+    def metrics_frame(split_name: str) -> pd.DataFrame | None:
+        evaluation = model_run_result.split_evaluations.get(split_name)
+        if evaluation is None:
+            return None
+        frame = make_metrics_df(
             metadata=metrics_metadata,
-            metrics=metrics,
+            metrics=dict(evaluation.metrics),
             split_name=split_name,
         )
-        elapsed = perf_counter() - evaluation_started_at
-        evaluation_seconds[split_name] = elapsed
-        metrics_df["evaluation_seconds"] = elapsed
+        frame["evaluation_seconds"] = evaluation.evaluation_seconds
+        return frame
 
-        return metrics_df, y_score, y_pred
-
-    train_metrics_df, _, _ = evaluate_split(train_df, x_train, "train")
-    val_metrics_df = None
-    if val_df is not None and x_val is not None:
-        val_metrics_df, _, _ = evaluate_split(val_df, x_val, "val")
-
-    test_metrics_df = None
+    train_metrics_df = metrics_frame("train")
+    if train_metrics_df is None:
+        raise RuntimeError("Training evaluation was not produced.")
+    val_metrics_df = metrics_frame("val")
+    test_metrics_df = metrics_frame("test")
     predictions_df = None
     if args.evaluate_test_metrics:
-        if x_test is None:
-            raise ValueError("Test evaluation requested without test features.")
-        test_metrics_df, y_test_score, y_test_pred = evaluate_split(
-            test_df,
-            x_test,
-            "test",
+        test_evaluation = model_run_result.split_evaluations.get("test")
+        if test_evaluation is None:
+            raise RuntimeError("Test evaluation was not produced.")
+        predictions_df = PPI_TASK.prediction_frame(
+            examples=test_df,
+            evaluation=test_evaluation,
+            model_metadata={
+                "execution_id": execution_id,
+                "model_name": model_name,
+                "run_number": run_number,
+                "model_seed": model_seed,
+                "features": feature_meta["features"],
+                "classifier": classifier_name,
+                "k": feature_meta["k"],
+            },
         )
-
-        # Define the predictions table
-        predictions_df = test_df[[
-            SOURCE_ROW_INDEX_COLUMN,
-            "protein_a",
-            "protein_b",
-            "label",
-        ]].copy()
-        predictions_df.insert(0, "execution_id", execution_id)
-        predictions_df.insert(1, "model_name", model_name)
-        predictions_df.insert(2, "run_number", run_number)
-        predictions_df.insert(3, "model_seed", model_seed)
-        predictions_df.insert(5, "features", feature_meta["features"])
-        predictions_df.insert(6, "classifier", classifier_name)
-        predictions_df.insert(7, "k", feature_meta["k"])
-        predictions_df["pred_score"] = y_test_score
-        predictions_df["pred_label"] = y_test_pred
         predictions_df["decision_threshold"] = (
             threshold_selection.threshold)
         predictions_df["threshold_selection"] = (
@@ -1144,6 +1106,8 @@ def train_and_evaluate_model_run(
             "encoder_fingerprint"]
 
     model_performance = {
+        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+        "task": PPI_TASK.name,
         "model_name": model_name,
         "feature_name": feature_name,
         "classifier": classifier_name,
@@ -1151,8 +1115,13 @@ def train_and_evaluate_model_run(
         "run_number": run_number,
         "model_seed": None if is_baseline else run_seed,
         "fit_seconds": float(fit_seconds),
-        "evaluation_seconds": evaluation_seconds,
-        "total_seconds": float(perf_counter() - model_run_started_at),
+        "evaluation_seconds": {
+            split_name: evaluation.evaluation_seconds
+            for split_name, evaluation in (
+                model_run_result.split_evaluations.items()
+            )
+        },
+        "total_seconds": model_run_result.total_seconds,
         "solver_iterations": iteration_report,
         "training": training_metadata,
         "protein_encoder": (
@@ -1160,7 +1129,8 @@ def train_and_evaluate_model_run(
             if feature_name != FEATURELESS_FEATURE
             else None
         ),
-        "threshold_selection_seconds": threshold_selection_seconds,
+        "threshold_selection_seconds": (
+            model_run_result.operating_point_selection_seconds),
         "decision_threshold": {
             "selected": threshold_selection.threshold,
             "default": threshold_selection.default_threshold,
@@ -1195,7 +1165,7 @@ def run_model_reruns(
     model_performance_records = []
 
     # Re-run the model
-    for run_number in range(1, args.num_reruns + 1):
+    for run_number, _ in enumerate(args.model_seeds, start=1):
         if backend_name_for_classifier(classifier_name) == TORCH_BACKEND:
             best_checkpoint_path, last_checkpoint_path = (
                 model_checkpoint_paths(
@@ -1763,6 +1733,7 @@ def main() -> None:
             sampling_metadata=sampling_metadata,
             protein_taxa=fasta_data.taxon_ids,
             protein_metadata_path=protein_metadata_path,
+            task_name=PPI_TASK.name,
         )
         try:
             write_selection_manifest(
@@ -1899,7 +1870,7 @@ def main() -> None:
         heatmap_paths = plot_model_outputs(output_paths)
     log_model_outputs(summaries, output_paths, heatmap_paths)
     append_performance_report(
-        performance.report(execution_id),
+        performance.report(execution_id, task=PPI_TASK.name),
         output_paths.performance_path,
     )
     LOGGER.info(

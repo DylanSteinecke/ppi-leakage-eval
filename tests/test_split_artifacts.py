@@ -144,6 +144,9 @@ def test_metadata_contains_required_audit_fields(tmp_path):
         split_col=None,
         num_reruns=1,
         seed=7,
+        split_seed=7,
+        model_seed=7,
+        model_seeds=(7,),
         has_validation_split=False,
         evaluate_test_metrics=True,
         n_split_trials=100,
@@ -172,6 +175,8 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     )
 
     required_keys = {
+        "evaluation_schema_version",
+        "task",
         "execution_id",
         "timestamp_utc",
         "run_dir",
@@ -206,10 +211,13 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     }
     assert required_keys <= set(metadata)
     assert metadata["execution_id"] == "test-execution"
+    assert metadata["evaluation_schema_version"] == 1
+    assert metadata["task"] == "ppi"
     assert metadata["n_val"] == 0
     assert metadata["actual_val_size"] == 0.0
     assert metadata["diagnostics"]["n_val"] == 0
     assert metadata["diagnostics"]["actual_val_size"] == 0.0
+    assert metadata["diagnostics"]["has_pair_leakage_across_splits"] is False
     assert (
         metadata["diagnostics"]["n_exact_ordered_pair_overlaps_train_test"]
         == 0

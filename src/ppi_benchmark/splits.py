@@ -23,6 +23,7 @@ from .diagnostics import (
 )
 from .inputs import protein_ids_in_pairs, TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT
 from .results import output_lock
+from .schema import EVALUATION_SCHEMA_VERSION
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"
@@ -272,6 +273,7 @@ def compute_split_metadata(
         sampling_metadata: dict[str, Any] | None = None,
         protein_taxa: dict[str, str] | None = None,
         protein_metadata_path: str | Path | None = None,
+        task_name: str = "ppi",
     ) -> dict[str, Any]:
     """
     Return reproducibility and audit metadata for one train/val/test split.
@@ -301,8 +303,19 @@ def compute_split_metadata(
         args=args,
         protein_pairs=protein_pairs,
     )
+    legacy_seed = getattr(args, "seed", 0)
+    legacy_seed = 0 if legacy_seed is None else legacy_seed
+    split_seed = getattr(args, "split_seed", None)
+    split_seed = legacy_seed if split_seed is None else split_seed
+    model_seed = getattr(args, "model_seed", None)
+    model_seed = legacy_seed if model_seed is None else model_seed
+    model_seeds = getattr(args, "model_seeds", None)
+    if model_seeds is None:
+        model_seeds = (model_seed,)
 
     metadata = {
+        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+        "task": task_name,
         "execution_id": execution_id,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(output_paths.run_dir),
@@ -326,8 +339,9 @@ def compute_split_metadata(
         "split_strategy": args.effective_split_strategy,
         "split_name": args.split_name,
         "split_col": args.split_col,
-        "split_seed": getattr(args, "split_seed", args.seed),
-        "model_seed": getattr(args, "model_seed", args.seed),
+        "split_seed": split_seed,
+        "model_seed": model_seed,
+        "model_seeds": list(model_seeds),
         "target_train_size": args.train_size,
         "target_val_size": args.val_size,
         "target_test_size": target_test_size,

@@ -81,10 +81,10 @@ def test_c3_cli_uses_sequence_clusters_as_atomic_homology_groups(
         "--sequence-clusters", clusters_path,
         "--run-dir", run_dir,
         "--classifier", "always_positive",
-        "--num-reruns", "1",
         "--train-size", "0.50",
         "--val-size", "0.25",
         "--split-seed", "5",
+        "--model-seeds", "5",
         "--split-strategy", "c3",
         "--n-split-trials", "100",
         "--no-metrics-plots",
@@ -147,4 +147,3 @@ def test_c2_c3_cluster_mapping_must_cover_the_pre_sampling_cohort(
 
     assert completed_process.returncode != 0
     assert "must map every eligible protein" in completed_process.stderr
-

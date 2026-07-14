@@ -27,6 +27,8 @@ SUMMARY_AUXILIARY_COLUMNS = (
     "threshold_metric_value",
 )
 SUMMARY_GROUP_COLUMNS = (
+    "evaluation_schema_version",
+    "task",
     "split",
     "model_name",
     "features",

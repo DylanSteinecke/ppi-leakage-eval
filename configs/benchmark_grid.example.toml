@@ -1,0 +1,26 @@
+# Paths are resolved from the directory where ppi-grid is invoked.
+[grid]
+pairs = "processed/biogrid_yeast_physical/pairs.csv"
+fasta = "processed/biogrid_yeast_physical/proteins.fasta"
+protein_metadata = "processed/biogrid_yeast_physical/protein_metadata.csv"
+out_dir = "results"
+run_name = "yeast_laptop_v1"
+profile = "laptop"
+
+max_pairs = 10000
+sampling_seed = 17
+train_size = 0.80
+val_size = 0.10
+split_strategies = ["random", "c1", "c2", "c3"]
+split_seeds = [0, 1, 2]
+model_seeds = [100, 101]
+aggregate_results = true
+
+# These are forwarded to each independent ppi-train process.
+train_args = ["--no-metrics-plots"]
+
+[plm]
+enabled = false
+model = "facebook/esm2_t6_8M_UR50D"
+# Set an immutable Hugging Face commit when enabled = true.
+revision = ""

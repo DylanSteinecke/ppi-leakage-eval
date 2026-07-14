@@ -17,6 +17,7 @@ import pandas as pd
 from scipy import sparse
 
 from .results import output_lock
+from .schema import EVALUATION_SCHEMA_VERSION
 
 
 PERFORMANCE_FILENAME = "performance.jsonl"
@@ -133,10 +134,14 @@ class PerformanceTracker:
         """Record one JSON-compatible invocation-level observation."""
         self.observations[name] = value
 
-    def report(self, execution_id: str) -> dict[str, Any]:
+    def report(
+            self, execution_id: str, task: str | None = None,
+        ) -> dict[str, Any]:
         """Return the complete invocation-level performance record."""
         peak_bytes = peak_memory_bytes()
         return {
+            "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+            "task": task,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "execution_id": execution_id,
             "total_seconds": float(perf_counter() - self.started_at),
