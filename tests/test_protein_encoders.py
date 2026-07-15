@@ -5,12 +5,17 @@ import pytest
 
 from ppi_benchmark.features import compose_pair_features
 from ppi_benchmark.protein_encoders import (
+    DEFAULT_PROTEIN_ENCODER_ADAPTER,
+    PROTEIN_ENCODER_ADAPTER_CHOICES,
     CachedEmbedding,
     EmbeddingCache,
     EncoderSpec,
     FrozenProteinEncoder,
     HuggingFaceESM2Encoder,
+    ProteinEncoder,
     ResidueTokenAlignment,
+    TokenRepresentationEncoder,
+    create_protein_encoder,
     sequence_sha256,
     token_budget_batches,
 )
@@ -52,6 +57,7 @@ def test_encoder_fingerprint_covers_cache_changing_configuration():
     base = encoder_spec()
     assert base.fingerprint == encoder_spec().fingerprint
     for field_name, changed_value in (
+        ("implementation", "another_adapter_v1"),
         ("model_revision", "revision-2"),
         ("tokenizer_revision", "tokenizer-2"),
         ("pooling", "cls"),
@@ -61,6 +67,26 @@ def test_encoder_fingerprint_covers_cache_changing_configuration():
     ):
         assert encoder_spec(**{field_name: changed_value}).fingerprint != (
             base.fingerprint)
+
+
+def test_encoder_factory_selects_explicit_model_family(tiny_esm_model):
+    assert DEFAULT_PROTEIN_ENCODER_ADAPTER == "esm2"
+    assert PROTEIN_ENCODER_ADAPTER_CHOICES == ("esm2",)
+
+    encoder = create_protein_encoder(
+        adapter="esm2",
+        model_name=str(tiny_esm_model),
+        model_revision="local-test-revision",
+    )
+
+    assert isinstance(encoder, HuggingFaceESM2Encoder)
+    assert isinstance(encoder, ProteinEncoder)
+    assert isinstance(encoder, TokenRepresentationEncoder)
+    assert encoder.spec.implementation == "huggingface_esm2_v1"
+    assert encoder.is_loaded is False
+
+    with pytest.raises(ValueError, match="Unknown protein encoder adapter"):
+        create_protein_encoder(adapter="unknown")
 
 
 def test_fine_tuned_cache_identity_requires_checkpoint_and_split_scope(

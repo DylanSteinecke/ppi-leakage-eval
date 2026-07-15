@@ -36,6 +36,7 @@ SUMMARY_GROUP_COLUMNS = (
     "k",
     "bm25_k1",
     "bm25_b",
+    "encoder_adapter",
     "encoder_fingerprint",
     "encoder_model",
     "encoder_revision",

@@ -199,8 +199,11 @@ solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
 
 ## Frozen protein encoders and embedding cache
 
-`ProteinEncoder` is a model-neutral interface; the first concrete adapter is
-Hugging Face ESM-2. `--features plm` encodes each distinct sequence in the
+`ProteinEncoder` is a model-neutral interface. Model families are selected
+explicitly with `--plm-adapter`; the default and first concrete adapter is
+Hugging Face ESM-2. Each adapter owns its tokenization, exact token accounting,
+pooling, and residue alignment, while batching and caching remain shared.
+`--features plm` encodes each distinct sequence in the
 complete sampled cohort once, before split-specific C2/C3 edge discards and
 including proteins assigned to held-out test. This is safe because the encoder
 is frozen and its API never receives labels or split assignments. Test features
@@ -251,6 +254,7 @@ ppi-train \
     --pairs processed/biogrid_yeast_physical/pairs.csv \
     --fasta processed/biogrid_yeast_physical/proteins.fasta \
     --features plm \
+    --plm-adapter esm2 \
     --plm-model facebook/esm2_t6_8M_UR50D \
     --plm-revision <40-character-hugging-face-commit> \
     --plm-max-batch-tokens 4096 \
@@ -267,7 +271,11 @@ PREPARE_YEAST_DATA=0 \
     bash scripts/run_yeast_biogrid_ppi_example.sh
 ```
 
-Set `PLM_MODEL` or `EMBEDDING_CACHE_DIR` to override their grid defaults.
+Set `PLM_ADAPTER`, `PLM_MODEL`, or `EMBEDDING_CACHE_DIR` to override their grid
+defaults. The low-resource ESM-2 preset intentionally requires the `esm2`
+adapter. Adding another model family requires a small adapter registered in
+`protein_encoders/factory.py`; it does not require changes to caching, pair
+composition, training backends, or evaluation.
 Frozen PLM is opt-in for both laptop and exhaustive profiles so existing grid
 sizes and runtimes remain unchanged.
 

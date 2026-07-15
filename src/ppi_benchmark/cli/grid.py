@@ -18,7 +18,11 @@ from typing import Any, Mapping, Sequence
 from ..backends.models import CLASSIFIER_CHOICES, is_baseline_classifier
 from ..features import FEATURE_CHOICES, PLM_FEATURE
 from ..inputs import SPLIT_STRATEGY_CHOICES
-from ..protein_encoders import DEFAULT_ESM2_MODEL
+from ..protein_encoders import (
+    DEFAULT_ESM2_MODEL,
+    DEFAULT_PROTEIN_ENCODER_ADAPTER,
+    PROTEIN_ENCODER_ADAPTER_CHOICES,
+)
 
 
 DEFAULT_SPLIT_STRATEGIES = ("random", "c1", "c2", "c3")
@@ -42,6 +46,7 @@ GRID_OWNED_TRAIN_FLAGS = frozenset({
     "--num-reruns",
     "--pairs",
     "--plm-model",
+    "--plm-adapter",
     "--plm-revision",
     "--protein-metadata",
     "--run-dir",
@@ -117,6 +122,7 @@ class BenchmarkGridConfig:
     include_sgd: bool
     include_torch_mlp: bool
     include_plm: bool
+    plm_adapter: str
     plm_model: str
     plm_revision: str | None
     embedding_cache_dir: Path | None
@@ -219,6 +225,10 @@ class BenchmarkGridConfig:
             )
         if plm_requested and not self.plm_revision:
             raise ValueError("PLM grids require an immutable plm_revision.")
+        if self.plm_adapter not in PROTEIN_ENCODER_ADAPTER_CHOICES:
+            raise ValueError(
+                f"Unknown protein encoder adapter: {self.plm_adapter}"
+            )
         if plm_requested and not self.learned_classifiers:
             raise ValueError(
                 "PLM features require at least one learned classifier. "
@@ -278,6 +288,7 @@ def _load_toml(path: str | Path | None) -> dict[str, Any]:
     plm_values = document.get("plm", {})
     plm_key_map = {
         "enabled": "include_plm",
+        "adapter": "plm_adapter",
         "model": "plm_model",
         "revision": "plm_revision",
         "embedding_cache_dir": "embedding_cache_dir",
@@ -335,6 +346,11 @@ def _cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--include-plm", action=argparse.BooleanOptionalAction, default=None,
+    )
+    parser.add_argument(
+        "--plm-adapter",
+        choices=PROTEIN_ENCODER_ADAPTER_CHOICES,
+        default=None,
     )
     parser.add_argument("--plm-model", default=None)
     parser.add_argument("--plm-revision", default=None)
@@ -402,7 +418,7 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         "split_strategies", "split_seeds", "model_seeds",
         "n_split_trials", "max_iter", "k", "include_sgd",
         "include_torch_mlp",
-        "include_plm", "plm_model", "plm_revision",
+        "include_plm", "plm_adapter", "plm_model", "plm_revision",
         "embedding_cache_dir", "aggregate_results", "feature_sets",
         "baseline_classifiers", "learned_classifiers", "train_args",
     }
@@ -563,6 +579,12 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
             include_sgd=include_sgd,
             include_torch_mlp=include_torch_mlp,
             include_plm=include_plm,
+            plm_adapter=str(_value(
+                args.plm_adapter,
+                config_values,
+                "plm_adapter",
+                DEFAULT_PROTEIN_ENCODER_ADAPTER,
+            )),
             plm_model=str(_value(
                 args.plm_model, config_values, "plm_model", DEFAULT_ESM2_MODEL
             )),
@@ -653,6 +675,7 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
                 ]
                 if feature_set == (PLM_FEATURE,):
                     feature_args.extend([
+                        "--plm-adapter", config.plm_adapter,
                         "--plm-model", config.plm_model,
                         "--plm-revision", str(config.plm_revision),
                     ])

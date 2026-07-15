@@ -21,6 +21,7 @@ train_args = ["--no-metrics-plots"]
 
 [plm]
 enabled = false
+adapter = "esm2"
 model = "facebook/esm2_t6_8M_UR50D"
 # Set an immutable Hugging Face commit when enabled = true.
 revision = ""

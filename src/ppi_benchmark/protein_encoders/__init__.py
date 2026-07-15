@@ -16,6 +16,11 @@ from .frozen import (
     ProteinEmbeddingTable,
     token_budget_batches,
 )
+from .factory import (
+    DEFAULT_PROTEIN_ENCODER_ADAPTER,
+    PROTEIN_ENCODER_ADAPTER_CHOICES,
+    create_protein_encoder,
+)
 from .huggingface_esm import (
     DEFAULT_ESM2_MODEL,
     HuggingFaceESM2Encoder,
@@ -33,9 +38,11 @@ from .representations import (
 
 __all__ = [
     "DEFAULT_ESM2_MODEL",
+    "DEFAULT_PROTEIN_ENCODER_ADAPTER",
     "PLM_POOLING_CHOICES",
     "PLM_PRECISION_CHOICES",
     "PLM_TRUNCATION_CHOICES",
+    "PROTEIN_ENCODER_ADAPTER_CHOICES",
     "CachedEmbedding",
     "EmbeddingCache",
     "EncoderSpec",
@@ -48,6 +55,7 @@ __all__ = [
     "TokenizedProteinBatch",
     "TokenRepresentationBatch",
     "TokenRepresentationEncoder",
+    "create_protein_encoder",
     "default_embedding_cache_dir",
     "normalize_protein_sequence",
     "sequence_sha256",

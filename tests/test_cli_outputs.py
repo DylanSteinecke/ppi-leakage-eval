@@ -94,6 +94,17 @@ def test_cli_help_shows_canonical_seed_flags_only(capsys):
     assert "--classifiers" not in stdout
 
 
+def test_cli_defaults_to_explicit_esm2_adapter(tmp_path, ppi_test_data):
+    pairs_path, fasta_path = ppi_test_data
+
+    args = parse_cli_args(
+        *base_cli_args(pairs_path, fasta_path, tmp_path / "adapter"),
+        "--no-metrics-plots",
+    )
+
+    assert args.plm_adapter == "esm2"
+
+
 def test_explicit_model_seeds_control_every_fit(
         tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
@@ -528,6 +539,7 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
         (first_run_dir / "performance.jsonl").read_text(encoding="utf-8"))
 
     assert first_metadata["n_proteins"] == 48
+    assert first_metadata["adapter"] == "esm2"
     assert first_metadata["n_unique_sequences"] == 10
     assert first_metadata["cache_hits"] == 0
     assert first_metadata["cache_misses"] == 10
@@ -539,6 +551,7 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     first_metrics = pd.read_csv(first_run_dir / "train_metrics.csv")
     assert first_metrics.loc[0, "encoder_fingerprint"] == (
         first_metadata["encoder_fingerprint"])
+    assert first_metrics.loc[0, "encoder_adapter"] == "esm2"
     assert bool(first_metrics.loc[0, "encoder_label_independent"]) is True
     assert pd.isna(first_metrics.loc[0, "encoder_checkpoint_sha256"])
     assert pd.isna(first_metrics.loc[0, "encoder_training_split_sha256"])

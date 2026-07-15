@@ -351,6 +351,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
     assert 'INCLUDE_SGD="${INCLUDE_SGD:-1}"' in grid_text
     assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
+    assert 'PLM_ADAPTER="${PLM_ADAPTER:-esm2}"' in grid_text
     assert (
         'INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"'
         in grid_text
@@ -469,6 +470,7 @@ source "$GRID_PATH" --no-metrics-plots "$@"
     assert "--include-torch-mlp" in laptop_torch_call
     assert "--include-plm" in laptop_plm_call
     assert "--plm-model facebook/esm2_t6_8M_UR50D" in laptop_plm_call
+    assert "--plm-adapter esm2" in laptop_plm_call
     assert "--plm-revision 0123456789abcdef" in laptop_plm_call
     assert "--embedding-cache-dir" in laptop_plm_call
     assert "--include-plm" in laptop_esm2_call

@@ -80,12 +80,14 @@ from ..performance import (
 )
 from ..protein_encoders import (
     DEFAULT_ESM2_MODEL,
+    DEFAULT_PROTEIN_ENCODER_ADAPTER,
     PLM_POOLING_CHOICES,
     PLM_PRECISION_CHOICES,
     PLM_TRUNCATION_CHOICES,
+    PROTEIN_ENCODER_ADAPTER_CHOICES,
     EmbeddingCache,
     FrozenProteinEncoder,
-    HuggingFaceESM2Encoder,
+    create_protein_encoder,
 )
 from ..results import (
     append_dataframe,
@@ -360,9 +362,17 @@ def argument_parser(
     # Frozen protein language-model args
     plm_group = parser.add_argument_group("Frozen protein encoder")
     plm_group.add_argument(
+        "--plm-adapter",
+        choices=PROTEIN_ENCODER_ADAPTER_CHOICES,
+        default=DEFAULT_PROTEIN_ENCODER_ADAPTER,
+        help=(
+            "Model-family adapter controlling tokenization, pooling, and "
+            "residue alignment"
+        ))
+    plm_group.add_argument(
         "--plm-model",
         default=DEFAULT_ESM2_MODEL,
-        help="Hugging Face ESM-2 model ID or local model directory")
+        help="Hugging Face model ID or local model directory")
     plm_group.add_argument(
         "--plm-revision",
         default=None,
@@ -784,6 +794,7 @@ def feature_metadata(
         "k": np.nan if is_featureless or is_plm else args.k,
         "bm25_k1": np.nan if is_featureless or is_plm else args.bm25_k1,
         "bm25_b": np.nan if is_featureless or is_plm else args.bm25_b,
+        "encoder_adapter": np.nan,
         "encoder_fingerprint": np.nan,
         "encoder_model": np.nan,
         "encoder_revision": np.nan,
@@ -798,6 +809,7 @@ def feature_metadata(
         encoder_metadata = args.protein_encoder_metadata
         encoder_spec = encoder_metadata["encoder_spec"]
         feature_metadata.update({
+            "encoder_adapter": encoder_metadata["adapter"],
             "encoder_fingerprint": encoder_metadata[
                 "encoder_fingerprint"],
             "encoder_model": encoder_spec["model_name"],
@@ -832,7 +844,8 @@ def build_frozen_plm_feature_matrices(
         evaluate_test_metrics: bool, args: argparse.Namespace,
     ) -> tuple[Any, Any | None, Any | None, str, dict[str, Any]]:
     """Encode unique proteins once and compose dense symmetric pair rows."""
-    encoder = HuggingFaceESM2Encoder(
+    encoder = create_protein_encoder(
+        adapter=args.plm_adapter,
         model_name=args.plm_model,
         model_revision=args.plm_revision,
         tokenizer_revision=args.plm_tokenizer_revision,
@@ -867,6 +880,7 @@ def build_frozen_plm_feature_matrices(
     )
     encoder_metadata = {
         **embedding_table.metadata,
+        "adapter": args.plm_adapter,
         "model_loaded_for_cache_misses": encoder.is_loaded,
     }
     return (
@@ -1113,6 +1127,8 @@ def train_and_evaluate_model_run(
             threshold_selection.strategy)
         predictions_df["encoder_fingerprint"] = feature_meta[
             "encoder_fingerprint"]
+        predictions_df["encoder_adapter"] = feature_meta[
+            "encoder_adapter"]
 
     model_performance = {
         "evaluation_schema_version": run_identity[

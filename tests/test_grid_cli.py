@@ -86,6 +86,7 @@ def test_profile_and_optional_model_expansion(tmp_path):
     assert len(build_run_specs(laptop_plm)) == 16
     assert laptop_plm.max_pairs == 10_000
     assert laptop_plm.include_sgd is True
+    assert laptop_plm.plm_adapter == "esm2"
     assert "torch_mlp" in laptop_plm.learned_classifiers
     plm_specs = [
         spec
@@ -93,6 +94,12 @@ def test_profile_and_optional_model_expansion(tmp_path):
         if spec.configuration_name == "features-plm"
     ]
     assert len(plm_specs) == 4
+    assert all(
+        spec.train_args[
+            spec.train_args.index("--plm-adapter") + 1
+        ] == "esm2"
+        for spec in plm_specs
+    )
     assert all("--plm-revision" in spec.train_args for spec in plm_specs)
     assert all("--embedding-cache-dir" in spec.train_args for spec in plm_specs)
 
@@ -132,6 +139,7 @@ def test_toml_config_and_cli_overrides_are_resolved(tmp_path):
             f'out_dir = "{tmp_path / "results"}"',
             'run_name = "from-config"',
             'profile = "laptop"',
+            'plm_adapter = "esm2"',
             'split_strategies = ["random", "c3"]',
             "split_seeds = [2, 5]",
             "model_seeds = [13, 17]",
@@ -157,7 +165,43 @@ def test_toml_config_and_cli_overrides_are_resolved(tmp_path):
     assert config.model_seeds == (13, 17)
     assert config.feature_sets == (("binary",),)
     assert config.learned_classifiers == ("linear_svm",)
+    assert config.plm_adapter == "esm2"
     assert config.train_args == ("--no-metrics-plots",)
+
+
+def test_nested_plm_config_selects_explicit_adapter(tmp_path):
+    config_path = tmp_path / "plm-grid.toml"
+    config_path.write_text(
+        "\n".join([
+            "[grid]",
+            f'pairs = "{tmp_path / "pairs.csv"}"',
+            f'fasta = "{tmp_path / "proteins.fasta"}"',
+            f'out_dir = "{tmp_path / "results"}"',
+            'run_name = "plm-config"',
+            'profile = "laptop"',
+            "aggregate_results = false",
+            "",
+            "[plm]",
+            "enabled = true",
+            'adapter = "esm2"',
+            'model = "local/model"',
+            'revision = "immutable-revision"',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    config = resolve_grid_config(["--config", str(config_path)])
+    plm_specs = [
+        spec
+        for spec in build_run_specs(config)
+        if spec.configuration_name == "features-plm"
+    ]
+
+    assert config.plm_adapter == "esm2"
+    assert config.plm_model == "local/model"
+    assert len(plm_specs) == 4
+    assert all("--plm-adapter" in spec.train_args for spec in plm_specs)
 
 
 def test_extra_train_args_cannot_override_grid_dimensions(tmp_path):

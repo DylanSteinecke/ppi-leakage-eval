@@ -24,6 +24,7 @@ INCLUDE_SGD="${INCLUDE_SGD:-1}"
 INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"
 INCLUDE_PLM="${INCLUDE_PLM:-0}"
 INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"
+PLM_ADAPTER="${PLM_ADAPTER:-esm2}"
 PLM_MODEL="${PLM_MODEL:-facebook/esm2_t6_8M_UR50D}"
 PLM_REVISION="${PLM_REVISION:-}"
 EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-}"
@@ -62,6 +63,14 @@ while (($#)); do
         --no-include-torch-mlp)
             INCLUDE_TORCH_MLP=0
             ;;
+        --plm-adapter)
+            if (($# < 2)); then
+                echo "--plm-adapter requires a value." >&2
+                return 2
+            fi
+            PLM_ADAPTER="$2"
+            shift
+            ;;
         --)
             shift
             PASSTHROUGH_ARGS+=("$@")
@@ -78,6 +87,10 @@ LOW_RESOURCE_ESM2_ARGS=()
 case "$INCLUDE_LOW_RESOURCE_ESM2" in
     1)
         INCLUDE_PLM=1
+        if [[ "$PLM_ADAPTER" != "esm2" ]]; then
+            echo "--include-low-resource-esm2 requires PLM_ADAPTER=esm2." >&2
+            return 2
+        fi
         if [[ -z "$PLM_REVISION" \
                 && "$PLM_MODEL" == "facebook/esm2_t6_8M_UR50D" ]]; then
             PLM_REVISION="c731040fcd8d73dceaa04b0a8e6329b345b0f5df"
@@ -212,6 +225,7 @@ case "$INCLUDE_PLM" in
         fi
         GRID_ARGS+=(
             --include-plm
+            --plm-adapter "$PLM_ADAPTER"
             --plm-model "$PLM_MODEL"
             --plm-revision "$PLM_REVISION"
         )
