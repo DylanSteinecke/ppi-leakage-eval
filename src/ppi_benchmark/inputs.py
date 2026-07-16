@@ -14,6 +14,17 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from .datasets.common import normalize_labels
+from .split_protocols import (
+    C1_SPLIT_STRATEGY as C1_SPLIT_STRATEGY,
+    C2_SPLIT_STRATEGY,
+    C3_SPLIT_STRATEGY,
+    PROTEIN_DISJOINT_SPLIT_STRATEGIES,
+    PROVIDED_SPLIT_STRATEGY as PROVIDED_SPLIT_STRATEGY,
+    RANDOM_SPLIT_STRATEGY as RANDOM_SPLIT_STRATEGY,
+    SPLIT_STRATEGY_CHOICES as SPLIT_STRATEGY_CHOICES,
+    SplitStrategySpec,
+    get_split_strategy,
+)
 from .splitters import (
     split_pairs as split_protein_disjoint_pairs,
     split_pairs_three_way as split_protein_disjoint_pairs_three_way,
@@ -26,22 +37,6 @@ EXPECTED_SPLIT_VALUES = {"train", "val", "test"}
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "val"
 TEST_SPLIT = "test"
-PROVIDED_SPLIT_STRATEGY = "provided_column"
-RANDOM_SPLIT_STRATEGY = "random"
-C1_SPLIT_STRATEGY = "c1"
-C2_SPLIT_STRATEGY = "c2"
-C3_SPLIT_STRATEGY = "c3"
-PROTEIN_DISJOINT_SPLIT_STRATEGIES = {
-    C1_SPLIT_STRATEGY,
-    C2_SPLIT_STRATEGY,
-    C3_SPLIT_STRATEGY,
-}
-SPLIT_STRATEGY_CHOICES = (
-    RANDOM_SPLIT_STRATEGY,
-    C1_SPLIT_STRATEGY,
-    C2_SPLIT_STRATEGY,
-    C3_SPLIT_STRATEGY,
-)
 LOGGER = logging.getLogger(__name__)
 SEQUENCE_CLUSTER_PROTEIN_COLUMN = "protein_id"
 SEQUENCE_CLUSTER_COLUMN = "cluster_id"
@@ -392,10 +387,28 @@ def log_split_summary(
 def load_or_make_split(
         pairs: pd.DataFrame, args: argparse.Namespace,
         protein_to_group: dict[str, str] | None = None,
+        *, split_spec: SplitStrategySpec | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
     """
     Load a pre-defined split or create one from the protein pairs.
     """
+    resolved_spec = (
+        get_split_strategy("ppi", args.effective_split_strategy)
+        if split_spec is None else split_spec
+    )
+    if resolved_spec.task_id != "ppi":
+        raise ValueError(
+            "The PPI split implementation cannot execute task "
+            f"{resolved_spec.task_id!r}."
+        )
+    if resolved_spec.strategy_name != args.effective_split_strategy:
+        raise ValueError(
+            "Resolved split strategy does not match the requested legacy "
+            f"strategy: {resolved_spec.strategy_name!r} != "
+            f"{args.effective_split_strategy!r}."
+        )
+
+    strategy_name = resolved_spec.strategy_name
     args.n_discarded_edges = 0
     args.discarded_edge_fraction = 0.0
     args.split_audit = None
@@ -410,12 +423,12 @@ def load_or_make_split(
         )
 
     # Create a C1/C2/C3 protein-disjoint split
-    elif args.effective_split_strategy in PROTEIN_DISJOINT_SPLIT_STRATEGIES:
+    elif strategy_name in PROTEIN_DISJOINT_SPLIT_STRATEGIES:
         test_size = 1.0 - args.train_size - args.val_size
         if args.val_size > 0.0:
             split_result = split_protein_disjoint_pairs_three_way(
                 pairs,
-                mode=args.effective_split_strategy,
+                mode=strategy_name,
                 val_size=args.val_size,
                 test_size=test_size,
                 seed=split_seed,
@@ -426,7 +439,7 @@ def load_or_make_split(
         else:
             split_result = split_protein_disjoint_pairs(
                 pairs,
-                mode=args.effective_split_strategy,
+                mode=strategy_name,
                 test_size=test_size,
                 seed=split_seed,
                 n_trials=args.n_split_trials,
@@ -439,7 +452,7 @@ def load_or_make_split(
         args.split_audit["grouping_type"] = (
             "sequence_cluster"
             if protein_to_group is not None
-            and args.effective_split_strategy in {
+            and strategy_name in {
                 C2_SPLIT_STRATEGY,
                 C3_SPLIT_STRATEGY,
             }

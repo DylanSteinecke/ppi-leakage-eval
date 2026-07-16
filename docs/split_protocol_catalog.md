@@ -210,6 +210,17 @@ The train-side group in every held-out edge must occur in retained training
 edges. Validation groups must not appear in test examples, and test groups must
 not appear in validation examples.
 
+Reserved projection drop reasons are:
+
+- `c2_two_validation_endpoints` for validation–validation edges;
+- `c2_two_test_endpoints` for test–test edges, including the two-way heldout
+  pattern;
+- `c2_validation_test_edge` for validation–test edges.
+
+These names define the row-level contract for future conforming artifacts.
+Legacy PPI outputs currently report aggregate discard counts rather than
+materializing all projection drops.
+
 **Forbidden:**
 
 - a held-out validation or test group in training edges;
@@ -261,6 +272,10 @@ groups are both unseen during training?
 - validation: validation–validation edges;
 - test: test–test edges;
 - dropped: every cross-partition edge.
+
+The reserved row-level drop reason for a cross-partition edge is
+`c3_cross_partition_edge`. Legacy PPI outputs currently report aggregate
+discard counts rather than materializing all projection drops.
 
 **Forbidden:**
 

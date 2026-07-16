@@ -86,47 +86,42 @@ without being mislabeled as a failed hard constraint.
 
 ## Minimal registry boundary
 
-A small registry may use a contract resembling:
+A small registry uses this compatibility contract:
 
 ```python
 @dataclass(frozen=True)
-class SplitProtocolSpec:
+class SplitStrategySpec:
+    task_id: str
+    strategy_name: str
     protocol_id: str
     protocol_version: int
-    specification_status: str
-    task_id: str
     prediction_unit: str
-    assignment_entity_kind: str
+    assignment_entity: str
     projection_kind: str
-    required_grouping_kinds: tuple[str, ...] = ()
+    default_grouping_kind: str | None = None
+    allowed_grouping_kinds: tuple[str, ...] = ()
     projection_drop_reasons: tuple[str, ...] = ()
 
 
-class TaskProjectionAdapter(Protocol):
-    task_id: str
+def get_split_strategy(
+    task_id: str,
+    strategy_name: str,
+) -> SplitStrategySpec: ...
 
-    def validate_examples(self, examples: object) -> None: ...
 
-    def project(
-        self,
-        examples: object,
-        assignments: "PartitionAssignments",
-        protocol: SplitProtocolSpec,
-    ) -> "TaskSplitResult": ...
-
-    def audit(
-        self,
-        examples: object,
-        result: "TaskSplitResult",
-        protocol: SplitProtocolSpec,
-    ) -> dict[str, object]: ...
+def registered_split_strategies(task_id: str) -> tuple[str, ...]: ...
 ```
 
-The exact API may differ. Do not implement the example API merely to match this
-document. In particular, implementation availability and conformance status
-belong in an implementation registry or report rather than in the immutable
-scientific specification. A list of allowed projection drop reasons is safer
-than a boolean because every dropped example needs one specific reason.
+The registry maps legacy strategy names to catalog definitions for compatibility
+and dispatch. Referencing a catalog ID does not by itself claim that a legacy
+result fully conforms to that protocol. Implementation availability and
+conformance status remain in the catalog or a conformance report rather than in
+the immutable scientific specification. A list of allowed projection drop
+reasons is safer than a boolean because every dropped example needs one
+specific reason.
+
+Do not add a generic task projection adapter or result wrapper until a second
+end-to-end task implementation needs that boundary.
 
 The required conceptual flow is:
 

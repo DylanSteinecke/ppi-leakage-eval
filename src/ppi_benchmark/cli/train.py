@@ -105,6 +105,7 @@ from ..sampling import (
     write_selection_manifest,
 )
 from ..schema import EVALUATION_SCHEMA_VERSION
+from ..split_protocols import get_split_strategy
 from ..splits import (
     add_source_row_index,
     append_invocation_log,
@@ -1700,6 +1701,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     performance = PerformanceTracker()
     with performance.stage("argument_parsing"):
         args = argument_parser(argv)
+        split_spec = get_split_strategy(
+            PPI_TASK.name,
+            args.effective_split_strategy,
+        )
         configure_logging(args)
 
     # Load and process input data
@@ -1784,6 +1789,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         train_df, val_df, test_df = load_or_make_split(
             protein_pairs,
             args,
+            split_spec=split_spec,
             protein_to_group=sequence_cluster_mapping,
         )
         args.has_validation_split = val_df is not None and not val_df.empty
