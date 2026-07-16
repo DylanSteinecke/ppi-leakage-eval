@@ -6,6 +6,8 @@ set -euo pipefail
 # Add frozen ESM-2 + SGD with CPU-safe batching and a shared embedding cache:
 # bash scripts/run_yeast_biogrid_ppi_example.sh --include-low-resource-esm2
 # Optional model switches: --sgd/--no-sgd and --include-torch-mlp.
+# Laptop frozen PLMs: --plm-preset esm2_8m or --plm-preset protbert.
+# Larger ESM2 sizes and ProtT5 require BENCHMARK_PROFILE=exhaustive.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

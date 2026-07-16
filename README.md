@@ -240,12 +240,36 @@ cap. The pooled protein rows are composed into symmetric PPI features using
 sum, absolute difference, and elementwise product. Dense pair matrices are
 allocated once and filled in chunks.
 
-The ESM adapter also exposes `tokenize_with_alignment` and
+Every Hugging Face adapter also exposes `tokenize_with_alignment` and
 `encode_token_batch`. Token-level results include attention masks and an exact
 zero-based residue-to-token map. Pooled encoding remains the efficient cached
 wrapper used by existing PPI runs; token tensors are produced only when a
 residue task explicitly requests them and are not added to the pooled SQLite
 cache.
+
+The benchmark runners provide exact, self-supervised encoder presets:
+
+| Preset | Adapter | Intended profile |
+| --- | --- | --- |
+| `esm2_8m` | ESM-2 8M | laptop or exhaustive |
+| `esm2_35m` | ESM-2 35M | exhaustive with an accelerator |
+| `esm2_150m` | ESM-2 150M | exhaustive with an accelerator |
+| `esm2_650m` | ESM-2 650M | exhaustive with an accelerator |
+| `esm2_3b` | ESM-2 3B | exhaustive with a large accelerator |
+| `esm2_15b` | ESM-2 15B | exhaustive with very large accelerator memory |
+| `protbert` | ProtBERT | laptop or exhaustive |
+| `prott5_xl` | ProtT5-XL encoder | exhaustive with an accelerator |
+
+Presets pin the model and tokenizer revisions and carry conservative batching,
+precision, and device defaults. The laptop profile rejects larger ESM2 sizes
+and `prott5_xl` before loading or downloading weights. The same ESM2 adapter
+accepts every size; only the preset model identity and resource defaults vary.
+ProtBERT is laptop-compatible, but appreciably
+slower and larger than ESM-2 8M. Noncanonical residues `U`, `Z`, `O`, and `B`
+are normalized to `X` for both ProtTrans adapters; ESM-2 retains its native
+tokenization. Adapter implementations are part of the cache namespace, so
+these family-specific preprocessing rules cannot produce cross-family cache
+hits.
 
 Example for one split:
 
@@ -262,22 +286,51 @@ ppi-train \
     --run-dir results/yeast_esm2
 ```
 
-Add the same frozen encoder to every split strategy in a benchmark grid with:
+Run both laptop presets over the configured split strategies with:
 
 ```bash
-INCLUDE_PLM=1 \
-PLM_REVISION=<40-character-hugging-face-commit> \
 PREPARE_YEAST_DATA=0 \
-    bash scripts/run_yeast_biogrid_ppi_example.sh
+BENCHMARK_PROFILE=laptop \
+MAX_PAIRS=1000 \
+conda run -n ppi bash scripts/run_yeast_biogrid_ppi_example.sh \
+    --plm-preset esm2_8m \
+    --plm-preset protbert \
+    --sgd \
+    --eval-test-set
 ```
 
-Set `PLM_ADAPTER`, `PLM_MODEL`, or `EMBEDDING_CACHE_DIR` to override their grid
-defaults. The low-resource ESM-2 preset intentionally requires the `esm2`
-adapter. Adding another model family requires a small adapter registered in
-`protein_encoders/factory.py`; it does not require changes to caching, pair
-composition, training backends, or evaluation.
-Frozen PLM is opt-in for both laptop and exhaustive profiles so existing grid
-sizes and runtimes remain unchanged.
+ProtT5 is available only through a non-laptop grid profile:
+
+```bash
+PREPARE_YEAST_DATA=0 \
+BENCHMARK_PROFILE=exhaustive \
+MAX_PAIRS=40000 \
+conda run -n ppi bash scripts/run_yeast_biogrid_ppi_example.sh \
+    --plm-preset prott5_xl \
+    --sgd \
+    --eval-test-set
+```
+
+Larger ESM2 sizes use the same syntax, and multiple sizes may be compared in
+one exhaustive grid:
+
+```bash
+PREPARE_YEAST_DATA=0 \
+BENCHMARK_PROFILE=exhaustive \
+MAX_PAIRS=40000 \
+conda run -n ppi bash scripts/run_yeast_biogrid_ppi_example.sh \
+    --plm-preset esm2_150m \
+    --plm-preset esm2_650m \
+    --sgd \
+    --eval-test-set
+```
+
+The singular `PLM_ADAPTER`, `PLM_MODEL`, and `PLM_REVISION` interface remains
+available for deliberate custom runs. Approved benchmark presets are limited
+to the self-supervised models above. Adding another model family requires only
+a small adapter registered in `protein_encoders/factory.py`; caching, pair
+composition, training backends, and evaluation remain shared. Frozen PLMs stay
+opt-in for both profiles, preserving existing grid size and runtime by default.
 
 ## Validation-selected thresholds
 
@@ -389,6 +442,15 @@ The canonical training CLI uses `--classifier`, `--split-seed`, and explicit
 emit deprecation warnings where applicable.
 
 ## Leakage-aware splits
+
+The normative concepts, compatibility rules, versioning policy, and extension
+contract are defined in
+[`docs/split_semantics.md`](docs/split_semantics.md). Task-specific definitions
+are in [`docs/split_protocol_catalog.md`](docs/split_protocol_catalog.md), and
+implementation boundaries and test guidance are in
+[`docs/split_engineering_guide.md`](docs/split_engineering_guide.md). Existing
+short split names remain legacy CLI identifiers until an explicit conformance
+review maps them to task-qualified protocol versions.
 
 Use `--split-strategy c1`, `c2`, or `c3` to select a standard PPI
 generalization regime:

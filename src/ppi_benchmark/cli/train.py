@@ -85,9 +85,11 @@ from ..protein_encoders import (
     PLM_PRECISION_CHOICES,
     PLM_TRUNCATION_CHOICES,
     PROTEIN_ENCODER_ADAPTER_CHOICES,
+    PROTEIN_ENCODER_PRESET_CHOICES,
     EmbeddingCache,
     FrozenProteinEncoder,
     create_protein_encoder,
+    get_protein_encoder_preset,
 )
 from ..results import (
     append_dataframe,
@@ -362,16 +364,21 @@ def argument_parser(
     # Frozen protein language-model args
     plm_group = parser.add_argument_group("Frozen protein encoder")
     plm_group.add_argument(
+        "--plm-preset",
+        choices=PROTEIN_ENCODER_PRESET_CHOICES,
+        default=None,
+        help="Approved self-supervised checkpoint and safe runtime defaults")
+    plm_group.add_argument(
         "--plm-adapter",
         choices=PROTEIN_ENCODER_ADAPTER_CHOICES,
-        default=DEFAULT_PROTEIN_ENCODER_ADAPTER,
+        default=None,
         help=(
             "Model-family adapter controlling tokenization, pooling, and "
             "residue alignment"
         ))
     plm_group.add_argument(
         "--plm-model",
-        default=DEFAULT_ESM2_MODEL,
+        default=None,
         help="Hugging Face model ID or local model directory")
     plm_group.add_argument(
         "--plm-revision",
@@ -387,37 +394,37 @@ def argument_parser(
     plm_group.add_argument(
         "--plm-pooling",
         choices=PLM_POOLING_CHOICES,
-        default="mean",
+        default=None,
         help="Pool residue representations by masked mean or CLS token")
     plm_group.add_argument(
         "--plm-max-length",
         type=positive_int,
-        default=1024,
+        default=None,
         help="Maximum tokenized length including model special tokens")
     plm_group.add_argument(
         "--plm-truncation-policy",
         choices=PLM_TRUNCATION_CHOICES,
-        default="error",
+        default=None,
         help="Fail on overlength proteins or truncate them explicitly")
     plm_group.add_argument(
         "--plm-precision",
         choices=PLM_PRECISION_CHOICES,
-        default="float32",
+        default=None,
         help="Frozen encoder compute precision and cache namespace")
     plm_group.add_argument(
         "--plm-device",
         choices=TORCH_DEVICE_CHOICES,
-        default="auto",
+        default=None,
         help="Device for frozen PLM inference")
     plm_group.add_argument(
         "--plm-max-batch-tokens",
         type=positive_int,
-        default=4096,
+        default=None,
         help="Maximum padded tokens per length-bucketed encoder batch")
     plm_group.add_argument(
         "--plm-max-batch-sequences",
         type=positive_int,
-        default=32,
+        default=None,
         help="Safety cap on sequences per token-budgeted encoder batch")
     plm_group.add_argument(
         "--embedding-cache-dir",
@@ -528,6 +535,53 @@ def argument_parser(
         ))
 
     args = parser.parse_args(argv)
+    preset = (
+        None
+        if args.plm_preset is None
+        else get_protein_encoder_preset(args.plm_preset)
+    )
+    if preset is not None:
+        identity_values = {
+            "plm_adapter": preset.adapter,
+            "plm_model": preset.model_name,
+            "plm_revision": preset.model_revision,
+        }
+        for argument_name, expected_value in identity_values.items():
+            supplied_value = getattr(args, argument_name)
+            if supplied_value is not None and supplied_value != expected_value:
+                parser.error(
+                    f"--plm-preset {preset.name} conflicts with "
+                    f"--{argument_name.replace('_', '-')}={supplied_value}."
+                )
+            setattr(args, argument_name, expected_value)
+        if args.plm_tokenizer_revision is None:
+            args.plm_tokenizer_revision = preset.model_revision
+    plm_defaults = {
+        "plm_adapter": (
+            DEFAULT_PROTEIN_ENCODER_ADAPTER
+            if preset is None else preset.adapter
+        ),
+        "plm_model": DEFAULT_ESM2_MODEL if preset is None else preset.model_name,
+        "plm_pooling": "mean" if preset is None else preset.pooling,
+        "plm_max_length": 1024 if preset is None else preset.maximum_length,
+        "plm_truncation_policy": (
+            "error" if preset is None else preset.truncation_policy
+        ),
+        "plm_precision": "float32" if preset is None else preset.precision,
+        "plm_device": "auto" if preset is None else preset.device,
+        "plm_max_batch_tokens": (
+            4096 if preset is None else preset.max_batch_tokens
+        ),
+        "plm_max_batch_sequences": (
+            32 if preset is None else preset.max_batch_sequences
+        ),
+    }
+    for argument_name, default_value in plm_defaults.items():
+        if getattr(args, argument_name) is None:
+            setattr(args, argument_name, default_value)
+    args.plm_preset_metadata = (
+        None if preset is None else preset.to_dict()
+    )
     if args.split_col and args.split_strategy:
         parser.error("--split-col and --split-strategy cannot both be set.")
     if args.split_name and not args.split_col:
@@ -870,6 +924,8 @@ def build_frozen_plm_feature_matrices(
             protein_sequences=sequences,
             protein_ids=all_protein_ids.tolist(),
         )
+    model_loaded_for_cache_misses = encoder.is_loaded
+    encoder.release_model()
     protein_ids = pd.Index(embedding_table.protein_ids)
     x_train, x_val, x_test = compose_split_feature_matrices(
         train_df=train_df,
@@ -881,7 +937,10 @@ def build_frozen_plm_feature_matrices(
     encoder_metadata = {
         **embedding_table.metadata,
         "adapter": args.plm_adapter,
-        "model_loaded_for_cache_misses": encoder.is_loaded,
+        "sequence_preprocessing": encoder.sequence_preprocessing,
+        "preset": args.plm_preset_metadata,
+        "model_loaded_for_cache_misses": model_loaded_for_cache_misses,
+        "model_released_after_encoding": model_loaded_for_cache_misses,
     }
     return (
         x_train,

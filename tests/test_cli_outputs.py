@@ -105,6 +105,30 @@ def test_cli_defaults_to_explicit_esm2_adapter(tmp_path, ppi_test_data):
     assert args.plm_adapter == "esm2"
 
 
+def test_cli_preset_resolves_identity_and_safe_defaults(
+        tmp_path, ppi_test_data, capsys):
+    pairs_path, fasta_path = ppi_test_data
+    base_args = base_cli_args(
+        pairs_path, fasta_path, tmp_path / "preset")
+
+    args = parse_cli_args(*base_args, "--plm-preset", "protbert")
+
+    assert args.plm_adapter == "protbert"
+    assert args.plm_model == "Rostlab/prot_bert"
+    assert args.plm_device == "cpu"
+    assert args.plm_max_batch_sequences == 1
+    assert args.plm_preset_metadata["pretraining_scope"] == "self_supervised"
+
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            *base_args,
+            "--plm-preset", "protbert",
+            "--plm-model", "another/model",
+        )
+    assert error.value.code == 2
+    assert "conflicts" in capsys.readouterr().err
+
+
 def test_explicit_model_seeds_control_every_fit(
         tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
@@ -544,6 +568,7 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     assert first_metadata["cache_hits"] == 0
     assert first_metadata["cache_misses"] == 10
     assert first_metadata["model_loaded_for_cache_misses"] is True
+    assert first_metadata["model_released_after_encoding"] is True
     assert set(first_performance["matrices"]) == {"train", "val"}
     assert first_performance["observations"]["protein_encoder"] == (
         first_metadata)
@@ -574,6 +599,7 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     assert second_metadata["cache_misses"] == 0
     assert second_metadata["encoded_batches"] == 0
     assert second_metadata["model_loaded_for_cache_misses"] is False
+
 
     # Freeze the first assignment, then change only held-out labels. Neither
     # cached embeddings nor train/validation model results may change.
@@ -624,6 +650,63 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
         invariant_metrics[1],
         check_exact=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("adapter", "model_fixture", "preprocessing"),
+    [
+        (
+            "protbert",
+            "tiny_protbert_model",
+            "prottrans_space_separated_map_uzob_to_x",
+        ),
+        (
+            "prott5",
+            "tiny_prott5_model",
+            "prottrans_space_separated_map_uzob_to_x",
+        ),
+    ],
+)
+def test_prottrans_adapters_run_end_to_end_without_network(
+        tmp_path, ppi_test_data, run_train, request,
+        adapter, model_fixture, preprocessing):
+    pytest.importorskip("torch")
+    pairs_path, fasta_path = ppi_test_data
+    model_path = request.getfixturevalue(model_fixture)
+    run_dir = tmp_path / adapter
+
+    run_train(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--classifier", "sgd_logistic",
+        "--features", "plm",
+        "--plm-adapter", adapter,
+        "--plm-model", model_path,
+        "--plm-revision", "local-test-revision",
+        "--plm-device", "cpu",
+        "--plm-max-length", "32",
+        "--plm-max-batch-tokens", "64",
+        "--plm-max-batch-sequences", "4",
+        "--embedding-cache-dir", tmp_path / "cache",
+        "--max-iter", "20",
+        "--train-size", "0.50",
+        "--val-size", "0.25",
+        "--eval-test-set",
+        "--model-seeds", "17",
+        "--no-metrics-plots",
+    )
+
+    metadata = json.loads(
+        (run_dir / "protein_encoder.json").read_text(encoding="utf-8"))
+    metrics = pd.read_csv(run_dir / "test_metrics.csv")
+    predictions = pd.read_csv(run_dir / "predictions.csv")
+    assert metadata["adapter"] == adapter
+    assert metadata["sequence_preprocessing"] == preprocessing
+    assert metadata["model_loaded_for_cache_misses"] is True
+    assert metadata["model_released_after_encoding"] is True
+    assert metrics.loc[0, "encoder_adapter"] == adapter
+    assert set(predictions["encoder_adapter"]) == {adapter}
 
 
 def test_split_and_model_seeds_are_independent(

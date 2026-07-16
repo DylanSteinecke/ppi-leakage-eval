@@ -21,12 +21,23 @@ from .factory import (
     PROTEIN_ENCODER_ADAPTER_CHOICES,
     create_protein_encoder,
 )
-from .huggingface_esm import (
+from .huggingface import (
     DEFAULT_ESM2_MODEL,
-    HuggingFaceESM2Encoder,
     PLM_POOLING_CHOICES,
     PLM_PRECISION_CHOICES,
     PLM_TRUNCATION_CHOICES,
+    HuggingFaceESM2Encoder,
+    HuggingFaceProtBertEncoder,
+    HuggingFaceProtT5Encoder,
+    prepare_prottrans_sequence,
+)
+from .presets import (
+    ACCELERATOR_RESOURCE_TIER,
+    LAPTOP_RESOURCE_TIER,
+    PROTEIN_ENCODER_PRESET_CHOICES,
+    PROTEIN_ENCODER_PRESETS,
+    ProteinEncoderPreset,
+    get_protein_encoder_preset,
 )
 from .representations import (
     ResidueAlignmentProvider,
@@ -37,6 +48,7 @@ from .representations import (
 )
 
 __all__ = [
+    "ACCELERATOR_RESOURCE_TIER",
     "DEFAULT_ESM2_MODEL",
     "DEFAULT_PROTEIN_ENCODER_ADAPTER",
     "PLM_POOLING_CHOICES",
@@ -48,8 +60,14 @@ __all__ = [
     "EncoderSpec",
     "FrozenProteinEncoder",
     "HuggingFaceESM2Encoder",
+    "HuggingFaceProtBertEncoder",
+    "HuggingFaceProtT5Encoder",
+    "LAPTOP_RESOURCE_TIER",
     "ProteinEmbeddingTable",
     "ProteinEncoder",
+    "ProteinEncoderPreset",
+    "PROTEIN_ENCODER_PRESET_CHOICES",
+    "PROTEIN_ENCODER_PRESETS",
     "ResidueAlignmentProvider",
     "ResidueTokenAlignment",
     "TokenizedProteinBatch",
@@ -57,7 +75,9 @@ __all__ = [
     "TokenRepresentationEncoder",
     "create_protein_encoder",
     "default_embedding_cache_dir",
+    "get_protein_encoder_preset",
     "normalize_protein_sequence",
+    "prepare_prottrans_sequence",
     "sequence_sha256",
     "token_budget_batches",
 ]

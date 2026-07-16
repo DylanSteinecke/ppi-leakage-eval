@@ -6,7 +6,11 @@ from collections.abc import Callable
 from typing import Any
 
 from .base import ProteinEncoder
-from .huggingface_esm import HuggingFaceESM2Encoder
+from .huggingface import (
+    HuggingFaceESM2Encoder,
+    HuggingFaceProtBertEncoder,
+    HuggingFaceProtT5Encoder,
+)
 
 
 DEFAULT_PROTEIN_ENCODER_ADAPTER = "esm2"
@@ -15,6 +19,8 @@ EncoderFactory = Callable[..., ProteinEncoder]
 
 _ENCODER_ADAPTERS: dict[str, EncoderFactory] = {
     "esm2": HuggingFaceESM2Encoder,
+    "protbert": HuggingFaceProtBertEncoder,
+    "prott5": HuggingFaceProtT5Encoder,
 }
 
 PROTEIN_ENCODER_ADAPTER_CHOICES = tuple(sorted(_ENCODER_ADAPTERS))

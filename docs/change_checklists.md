@@ -67,18 +67,35 @@ Current runner env vars include:
 - `YEAST_FASTA`
 - `NEGATIVE_RATIO`
 
-## When Adding a Split Strategy
+## When Adding or Changing a Split Strategy or Protocol
 
-- Add the strategy constant and choice in `src/ppi_benchmark/inputs.py`.
-- Implement split creation logic in or near `load_or_make_split()`.
-- Ensure train/val/test behavior is correct.
-- Ensure provided split behavior remains unchanged.
-- Add validation for empty splits and binary labels.
-- Add metadata fields if the strategy has strategy-specific diagnostics.
-- Add or update split diagnostics if the strategy changes leakage assumptions.
-- Add tests for generated splits, validation splits, and failure cases.
-- Add the strategy to `scripts/_run_ppi_benchmark_grid.sh` only if it
-  should be part of the default benchmark grid.
+- Decide whether the change is a legacy implementation option, a new public
+  protocol, or an implementation of an existing cataloged protocol. A CLI name
+  alone does not establish protocol conformance.
+- For a public protocol, add or update its entry and implementation status in
+  `docs/split_protocol_catalog.md` before claiming the protocol ID in outputs.
+- Determine whether the change affects scientific meaning. Update the protocol
+  version for changes to allowed or forbidden overlap, projection membership,
+  eligibility, negative-label meaning, or the generalization claim.
+- Update `docs/split_semantics.md` only when a cross-protocol concept,
+  conformance rule, or extension requirement changes.
+- Update `docs/split_engineering_guide.md` only when architecture, artifact,
+  migration, or reusable conformance-test guidance changes.
+- Add the strategy constant and choice in `src/ppi_benchmark/inputs.py` when it
+  is exposed through the current CLI.
+- Implement split creation in the task-appropriate adapter or splitter; do not
+  infer task compatibility from a similar strategy name.
+- Validate task/protocol compatibility before expensive loading or grouping.
+- Preserve provided and legacy behavior, or document and test the intentional
+  compatibility migration.
+- Emit the protocol ID, implementation revision, grouping configuration,
+  accounting, and required audits when claiming versioned conformance.
+- Add tests for canonicalization, projection, hard invariants, drop reasons,
+  two- or three-way behavior as applicable, and actionable failure cases.
+- Update diagnostics when leakage assumptions change and aggregation only for
+  fields needed in cross-run comparisons.
+- Add the strategy to `scripts/_run_ppi_benchmark_grid.sh` only if it should be
+  part of the default benchmark grid.
 
 ## When Adding a Split Diagnostic
 

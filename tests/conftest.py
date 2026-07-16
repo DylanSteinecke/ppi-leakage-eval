@@ -57,6 +57,78 @@ def tiny_esm_model(tmp_path_factory):
     return model_dir
 
 
+@pytest.fixture(scope="session")
+def tiny_protbert_model(tmp_path_factory):
+    """Write a network-free BERT model with a protein residue vocabulary."""
+    transformers = pytest.importorskip("transformers")
+    vocab = [
+        "[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]",
+        "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M",
+        "N", "P", "Q", "R", "S", "T", "V", "W", "Y", "X",
+    ]
+    model_dir = tmp_path_factory.mktemp("models") / "tiny_protbert"
+    model_dir.mkdir()
+    vocab_path = model_dir / "vocab.txt"
+    vocab_path.write_text("\n".join(vocab) + "\n", encoding="utf-8")
+    tokenizer = transformers.BertTokenizer(
+        vocab=str(vocab_path),
+        do_lower_case=False,
+    )
+    tokenizer.save_pretrained(model_dir)
+    # The real Rostlab/prot_bert checkpoint predates tokenizer.json.
+    (model_dir / "tokenizer.json").unlink(missing_ok=True)
+    config = transformers.BertConfig(
+        vocab_size=len(vocab),
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        max_position_embeddings=64,
+        pad_token_id=vocab.index("[PAD]"),
+    )
+    transformers.BertModel(
+        config,
+        add_pooling_layer=False,
+    ).save_pretrained(model_dir)
+    return model_dir
+
+
+@pytest.fixture(scope="session")
+def tiny_prott5_model(tmp_path_factory):
+    """Write a network-free encoder-only T5 protein model."""
+    pytest.importorskip("sentencepiece")
+    transformers = pytest.importorskip("transformers")
+    model_dir = tmp_path_factory.mktemp("models") / "tiny_prott5"
+    model_dir.mkdir()
+    residues = "ACDEFGHIKLMNPQRSTVWYX"
+    vocab_scores = [
+        ("<pad>", 0.0),
+        ("</s>", 0.0),
+        ("<unk>", 0.0),
+        ("▁", -2.0),
+        *((f"▁{residue}", 0.0) for residue in residues),
+    ]
+    tokenizer = transformers.T5Tokenizer(
+        vocab=vocab_scores,
+        extra_ids=0,
+    )
+    tokenizer.save_pretrained(model_dir)
+    config = transformers.T5Config(
+        vocab_size=tokenizer.vocab_size,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        decoder_start_token_id=tokenizer.pad_token_id,
+    )
+    transformers.T5EncoderModel(config).save_pretrained(model_dir)
+    return model_dir
+
+
 @pytest.fixture
 def ppi_test_data(tmp_path):
     """

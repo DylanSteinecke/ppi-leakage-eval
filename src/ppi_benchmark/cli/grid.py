@@ -22,6 +22,8 @@ from ..protein_encoders import (
     DEFAULT_ESM2_MODEL,
     DEFAULT_PROTEIN_ENCODER_ADAPTER,
     PROTEIN_ENCODER_ADAPTER_CHOICES,
+    PROTEIN_ENCODER_PRESET_CHOICES,
+    get_protein_encoder_preset,
 )
 
 
@@ -47,6 +49,7 @@ GRID_OWNED_TRAIN_FLAGS = frozenset({
     "--pairs",
     "--plm-model",
     "--plm-adapter",
+    "--plm-preset",
     "--plm-revision",
     "--protein-metadata",
     "--run-dir",
@@ -122,6 +125,7 @@ class BenchmarkGridConfig:
     include_sgd: bool
     include_torch_mlp: bool
     include_plm: bool
+    plm_presets: tuple[str, ...]
     plm_adapter: str
     plm_model: str
     plm_revision: str | None
@@ -223,7 +227,16 @@ class BenchmarkGridConfig:
             raise ValueError(
                 "include_plm must match whether ['plm'] is in feature_sets."
             )
-        if plm_requested and not self.plm_revision:
+        if len(set(self.plm_presets)) != len(self.plm_presets):
+            raise ValueError("plm_presets cannot contain duplicates.")
+        unknown_presets = (
+            set(self.plm_presets) - set(PROTEIN_ENCODER_PRESET_CHOICES)
+        )
+        if unknown_presets:
+            raise ValueError(
+                f"Unknown protein encoder presets: {sorted(unknown_presets)}"
+            )
+        if plm_requested and not self.plm_presets and not self.plm_revision:
             raise ValueError("PLM grids require an immutable plm_revision.")
         if self.plm_adapter not in PROTEIN_ENCODER_ADAPTER_CHOICES:
             raise ValueError(
@@ -234,6 +247,24 @@ class BenchmarkGridConfig:
                 "PLM features require at least one learned classifier. "
                 "Enable SGD or another learned backend."
             )
+        if self.profile == "laptop":
+            accelerator_presets = [
+                preset_name
+                for preset_name in self.plm_presets
+                if get_protein_encoder_preset(
+                    preset_name).resource_tier == "accelerator"
+            ]
+            if accelerator_presets:
+                raise ValueError(
+                    "The laptop profile rejects accelerator-only PLM "
+                    f"presets before download: {accelerator_presets}"
+                )
+            if plm_requested and not self.plm_presets and (
+                    self.plm_adapter == "prott5"):
+                raise ValueError(
+                    "The laptop profile rejects the ProtT5 adapter before "
+                    "download; use the exhaustive profile."
+                )
         _validate_extra_train_args(self.train_args)
 
     @property
@@ -288,6 +319,7 @@ def _load_toml(path: str | Path | None) -> dict[str, Any]:
     plm_values = document.get("plm", {})
     plm_key_map = {
         "enabled": "include_plm",
+        "presets": "plm_presets",
         "adapter": "plm_adapter",
         "model": "plm_model",
         "revision": "plm_revision",
@@ -350,6 +382,12 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plm-adapter",
         choices=PROTEIN_ENCODER_ADAPTER_CHOICES,
+        default=None,
+    )
+    parser.add_argument(
+        "--plm-presets",
+        nargs="+",
+        choices=PROTEIN_ENCODER_PRESET_CHOICES,
         default=None,
     )
     parser.add_argument("--plm-model", default=None)
@@ -418,7 +456,8 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         "split_strategies", "split_seeds", "model_seeds",
         "n_split_trials", "max_iter", "k", "include_sgd",
         "include_torch_mlp",
-        "include_plm", "plm_adapter", "plm_model", "plm_revision",
+        "include_plm", "plm_presets", "plm_adapter", "plm_model",
+        "plm_revision",
         "embedding_cache_dir", "aggregate_results", "feature_sets",
         "baseline_classifiers", "learned_classifiers", "train_args",
     }
@@ -486,7 +525,14 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         )
     include_torch_mlp = "torch_mlp" in learned_classifiers
 
-    if args.include_plm is not None:
+    plm_presets = tuple(str(value) for value in _value(
+        args.plm_presets, config_values, "plm_presets", ()
+    ))
+    if plm_presets and args.include_plm is False:
+        parser.error("--no-include-plm cannot be combined with --plm-presets.")
+    if plm_presets:
+        include_plm = True
+    elif args.include_plm is not None:
         include_plm = args.include_plm
     elif "include_plm" in config_values:
         include_plm = bool(config_values["include_plm"])
@@ -579,6 +625,7 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
             include_sgd=include_sgd,
             include_torch_mlp=include_torch_mlp,
             include_plm=include_plm,
+            plm_presets=plm_presets,
             plm_adapter=str(_value(
                 args.plm_adapter,
                 config_values,
@@ -664,34 +711,49 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
             for feature_set in config.feature_sets:
                 if not config.learned_classifiers:
                     continue
-                configuration_name = _feature_name(feature_set)
-                run_dir = split_root / configuration_name
-                feature_args = [
-                    *common_args,
-                    "--run-dir", str(run_dir),
-                    "--model-seeds", *(str(seed) for seed in config.model_seeds),
-                    "--features", *feature_set,
-                    "--classifier", *config.learned_classifiers,
-                ]
-                if feature_set == (PLM_FEATURE,):
-                    feature_args.extend([
-                        "--plm-adapter", config.plm_adapter,
-                        "--plm-model", config.plm_model,
-                        "--plm-revision", str(config.plm_revision),
-                    ])
-                    if config.embedding_cache_dir is not None:
-                        feature_args.extend([
-                            "--embedding-cache-dir",
-                            str(config.embedding_cache_dir),
-                        ])
-                feature_args.extend(config.train_args)
-                specs.append(GridRunSpec(
-                    split_strategy=split_strategy,
-                    split_seed=split_seed,
-                    configuration_name=configuration_name,
-                    run_dir=run_dir,
-                    train_args=tuple(feature_args),
-                ))
+                preset_names: tuple[str | None, ...] = (
+                    tuple(config.plm_presets)
+                    if feature_set == (PLM_FEATURE,) and config.plm_presets
+                    else (None,)
+                )
+                for preset_name in preset_names:
+                    configuration_name = _feature_name(feature_set)
+                    if preset_name is not None:
+                        configuration_name += f"-{preset_name}"
+                    run_dir = split_root / configuration_name
+                    feature_args = [
+                        *common_args,
+                        "--run-dir", str(run_dir),
+                        "--model-seeds",
+                        *(str(seed) for seed in config.model_seeds),
+                        "--features", *feature_set,
+                        "--classifier", *config.learned_classifiers,
+                    ]
+                    if feature_set == (PLM_FEATURE,):
+                        if preset_name is None:
+                            feature_args.extend([
+                                "--plm-adapter", config.plm_adapter,
+                                "--plm-model", config.plm_model,
+                                "--plm-revision", str(config.plm_revision),
+                            ])
+                        else:
+                            feature_args.extend(
+                                get_protein_encoder_preset(
+                                    preset_name).train_args()
+                            )
+                        if config.embedding_cache_dir is not None:
+                            feature_args.extend([
+                                "--embedding-cache-dir",
+                                str(config.embedding_cache_dir),
+                            ])
+                    feature_args.extend(config.train_args)
+                    specs.append(GridRunSpec(
+                        split_strategy=split_strategy,
+                        split_seed=split_seed,
+                        configuration_name=configuration_name,
+                        run_dir=run_dir,
+                        train_args=tuple(feature_args),
+                    ))
     return tuple(specs)
 
 

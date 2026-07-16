@@ -57,3 +57,20 @@ should explain the behavior and scientific/leakage implications, list commands
 run, and link relevant issues. Include sample CLI output or plots when output
 formats change. Do not commit credentials, large biological archives, embedding
 caches, checkpoints, or generated benchmark results.
+
+Before modifying split construction, grouping, negative sampling,
+canonicalization, or leakage audits, read `docs/split_semantics.md` and the
+relevant task, protocol, and grouping sections of
+`docs/split_protocol_catalog.md`. Read the entire catalog when a change affects
+cross-cutting rules, protocol selection or registration, or multiple protocols.
+Read `docs/split_engineering_guide.md` only for split architecture, artifact,
+migration, or conformance-test changes.
+
+When adding or changing a split strategy or public protocol, follow the
+connected-change checklist in `docs/change_checklists.md` and update the
+protocol catalog entry or implementation status as applicable.
+
+Preserve the selected protocol's prediction unit, assignment entity, projection
+rules, forbidden overlaps, drop accounting, audit requirements, and semantic
+version. Do not claim that a protocol is implemented unless its required
+invariants have regression tests.

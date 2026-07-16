@@ -25,6 +25,7 @@ INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"
 INCLUDE_PLM="${INCLUDE_PLM:-0}"
 INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"
 PLM_ADAPTER="${PLM_ADAPTER:-esm2}"
+PLM_PRESETS="${PLM_PRESETS:-}"
 PLM_MODEL="${PLM_MODEL:-facebook/esm2_t6_8M_UR50D}"
 PLM_REVISION="${PLM_REVISION:-}"
 EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-}"
@@ -35,6 +36,8 @@ PLM_MAX_LENGTH="${PLM_MAX_LENGTH:-1024}"
 PLM_TRUNCATION_POLICY="${PLM_TRUNCATION_POLICY:-truncate}"
 PLM_MAX_BATCH_TOKENS="${PLM_MAX_BATCH_TOKENS:-1024}"
 PLM_MAX_BATCH_SEQUENCES="${PLM_MAX_BATCH_SEQUENCES:-8}"
+
+read -r -a PLM_PRESET_VALUES <<< "$PLM_PRESETS"
 
 PASSTHROUGH_ARGS=()
 while (($#)); do
@@ -71,6 +74,14 @@ while (($#)); do
             PLM_ADAPTER="$2"
             shift
             ;;
+        --plm-preset)
+            if (($# < 2)); then
+                echo "--plm-preset requires a value." >&2
+                return 2
+            fi
+            PLM_PRESET_VALUES+=("$2")
+            shift
+            ;;
         --)
             shift
             PASSTHROUGH_ARGS+=("$@")
@@ -84,6 +95,11 @@ while (($#)); do
 done
 
 LOW_RESOURCE_ESM2_ARGS=()
+if [[ "$INCLUDE_LOW_RESOURCE_ESM2" == "1" \
+        && "${#PLM_PRESET_VALUES[@]}" -gt 0 ]]; then
+    echo "--include-low-resource-esm2 cannot be combined with --plm-preset." >&2
+    return 2
+fi
 case "$INCLUDE_LOW_RESOURCE_ESM2" in
     1)
         INCLUDE_PLM=1
@@ -114,6 +130,9 @@ case "$INCLUDE_LOW_RESOURCE_ESM2" in
         return 2
         ;;
 esac
+if [[ "${#PLM_PRESET_VALUES[@]}" -gt 0 ]]; then
+    INCLUDE_PLM=1
+fi
 USER_ARGS=("${LOW_RESOURCE_ESM2_ARGS[@]}" "${PASSTHROUGH_ARGS[@]}")
 
 read -r -a SPLIT_STRATEGY_VALUES <<< "$SPLIT_STRATEGIES"
@@ -219,16 +238,20 @@ case "$INCLUDE_SGD" in
 esac
 case "$INCLUDE_PLM" in
     1)
-        if [[ -z "$PLM_REVISION" ]]; then
-            echo "INCLUDE_PLM=1 requires an immutable PLM_REVISION." >&2
-            return 2
+        GRID_ARGS+=(--include-plm)
+        if [[ "${#PLM_PRESET_VALUES[@]}" -gt 0 ]]; then
+            GRID_ARGS+=(--plm-presets "${PLM_PRESET_VALUES[@]}")
+        else
+            if [[ -z "$PLM_REVISION" ]]; then
+                echo "INCLUDE_PLM=1 requires an immutable PLM_REVISION." >&2
+                return 2
+            fi
+            GRID_ARGS+=(
+                --plm-adapter "$PLM_ADAPTER"
+                --plm-model "$PLM_MODEL"
+                --plm-revision "$PLM_REVISION"
+            )
         fi
-        GRID_ARGS+=(
-            --include-plm
-            --plm-adapter "$PLM_ADAPTER"
-            --plm-model "$PLM_MODEL"
-            --plm-revision "$PLM_REVISION"
-        )
         if [[ -n "$EMBEDDING_CACHE_DIR" ]]; then
             GRID_ARGS+=(--embedding-cache-dir "$EMBEDDING_CACHE_DIR")
         fi
@@ -246,6 +269,9 @@ echo "Split seeds: ${SPLIT_SEED_VALUES[*]}"
 echo "Model seeds: ${MODEL_SEED_VALUES[*]}"
 if [[ "$INCLUDE_LOW_RESOURCE_ESM2" == "1" ]]; then
     echo "Low-resource ESM-2: enabled (device=$PLM_DEVICE, token budget=$PLM_MAX_BATCH_TOKENS)"
+fi
+if [[ "${#PLM_PRESET_VALUES[@]}" -gt 0 ]]; then
+    echo "PLM presets: ${PLM_PRESET_VALUES[*]}"
 fi
 
 ppi-grid "${GRID_ARGS[@]}" -- "${USER_ARGS[@]}"

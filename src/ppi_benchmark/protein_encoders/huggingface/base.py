@@ -1,31 +1,31 @@
-"""Lazy frozen ESM-2 adapter implemented with Hugging Face Transformers."""
+"""Shared lazy inference mechanics for Hugging Face protein encoders."""
 
 from __future__ import annotations
 
+import gc
 import re
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 
-from ..torch_utils import resolve_torch_device
-from .base import EncoderSpec, normalize_protein_sequence
-from .representations import (
+from ...torch_utils import resolve_torch_device
+from ..base import EncoderSpec, normalize_protein_sequence
+from ..representations import (
     ResidueTokenAlignment,
     TokenizedProteinBatch,
     TokenRepresentationBatch,
 )
 
 
-DEFAULT_ESM2_MODEL = "facebook/esm2_t6_8M_UR50D"
 PLM_POOLING_CHOICES = ("mean", "cls")
 PLM_PRECISION_CHOICES = ("float32", "float16", "bfloat16")
 PLM_TRUNCATION_CHOICES = ("error", "truncate")
 HUGGINGFACE_COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
-ESM_SEQUENCE_SPECIAL_TOKENS = 2
 
 
-def _validate_revision(model_name: str, revision: str) -> None:
+def validate_huggingface_revision(model_name: str, revision: str) -> None:
+    """Require immutable revisions for remote Hugging Face repositories."""
     if Path(model_name).expanduser().exists():
         return
     if not HUGGINGFACE_COMMIT_PATTERN.fullmatch(revision):
@@ -36,8 +36,14 @@ def _validate_revision(model_name: str, revision: str) -> None:
         )
 
 
-class HuggingFaceESM2Encoder:
-    """Frozen ESM-2 encoder that loads weights only for cache misses."""
+class HuggingFaceProteinEncoderBase:
+    """Common frozen inference for one-token-per-residue model adapters."""
+
+    implementation = ""
+    expected_model_type = ""
+    sequence_preprocessing = ""
+    n_special_tokens = 0
+    supports_cls_pooling = False
 
     def __init__(
             self, model_name: str, model_revision: str,
@@ -52,27 +58,38 @@ class HuggingFaceESM2Encoder:
             str(model_path.resolve()) if model_path.exists() else model_name
         )
         tokenizer_revision = tokenizer_revision or model_revision
-        _validate_revision(normalized_model_name, model_revision)
-        _validate_revision(normalized_model_name, tokenizer_revision)
+        validate_huggingface_revision(normalized_model_name, model_revision)
+        validate_huggingface_revision(
+            normalized_model_name, tokenizer_revision)
         if HUGGINGFACE_COMMIT_PATTERN.fullmatch(model_revision):
             model_revision = model_revision.lower()
         if HUGGINGFACE_COMMIT_PATTERN.fullmatch(tokenizer_revision):
             tokenizer_revision = tokenizer_revision.lower()
-        if pooling not in PLM_POOLING_CHOICES:
+        allowed_pooling = (
+            PLM_POOLING_CHOICES
+            if self.supports_cls_pooling
+            else ("mean",)
+        )
+        if pooling not in allowed_pooling:
             raise ValueError(
-                f"pooling must be one of: {', '.join(PLM_POOLING_CHOICES)}."
+                f"{type(self).__name__} pooling must be one of: "
+                f"{', '.join(allowed_pooling)}."
             )
         if precision not in PLM_PRECISION_CHOICES:
             raise ValueError(
                 "precision must be one of: "
                 f"{', '.join(PLM_PRECISION_CHOICES)}."
             )
+        if maximum_length <= self.n_special_tokens:
+            raise ValueError(
+                "maximum_length must leave room for at least one residue."
+            )
         label_independent = (
             checkpoint_sha256 is None
             and training_split_sha256 is None
         )
         self.spec = EncoderSpec(
-            implementation="huggingface_esm2_v1",
+            implementation=self.implementation,
             model_name=normalized_model_name,
             model_revision=model_revision,
             tokenizer_revision=tokenizer_revision,
@@ -107,19 +124,37 @@ class HuggingFaceESM2Encoder:
 
     def _ensure_tokenizer(self):
         if self._tokenizer is None:
-            _, auto_tokenizer = self._transformers_imports()
-            self._tokenizer = auto_tokenizer.from_pretrained(
-                self.spec.model_name,
-                revision=self.spec.tokenizer_revision,
-            )
+            self._tokenizer = self._load_tokenizer()
         return self._tokenizer
+
+    def _load_tokenizer(self):
+        """Load the family tokenizer; adapters may override legacy formats."""
+        _, auto_tokenizer = self._transformers_imports()
+        return auto_tokenizer.from_pretrained(
+            self.spec.model_name,
+            revision=self.spec.tokenizer_revision,
+        )
+
+    def _torch_dtype(self):
+        import torch
+
+        return {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }[self.spec.precision]
+
+    def _load_model(self, dtype):
+        auto_model, _ = self._transformers_imports()
+        return auto_model.from_pretrained(
+            self.spec.model_name,
+            revision=self.spec.model_revision,
+            torch_dtype=dtype,
+        )
 
     def _ensure_model(self):
         if self._model is not None:
             return self._model
-        import torch
-
-        auto_model, _ = self._transformers_imports()
         self._device = resolve_torch_device(self.requested_device)
         if self._device.type == "cpu" and self.spec.precision == "float16":
             raise ValueError(
@@ -131,72 +166,54 @@ class HuggingFaceESM2Encoder:
                 "bfloat16 PLM inference on MPS is not supported; use "
                 "float16 or float32."
             )
-        dtype = {
-            "float32": torch.float32,
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-        }[self.spec.precision]
-        self._model = auto_model.from_pretrained(
-            self.spec.model_name,
-            revision=self.spec.model_revision,
-            torch_dtype=dtype,
-        )
-        if getattr(self._model.config, "model_type", None) != "esm":
+        dtype = self._torch_dtype()
+        model = self._load_model(dtype)
+        observed_model_type = getattr(model.config, "model_type", None)
+        if observed_model_type != self.expected_model_type:
             raise ValueError(
-                "HuggingFaceESM2Encoder requires an ESM/ESM-2 model."
+                f"{type(self).__name__} requires model_type="
+                f"{self.expected_model_type!r}, got {observed_model_type!r}."
             )
-        self._model.to(device=self._device, dtype=dtype)
-        self._model.eval()
-        for parameter in self._model.parameters():
+        model.to(device=self._device, dtype=dtype)
+        model.eval()
+        for parameter in model.parameters():
             parameter.requires_grad_(False)
-        return self._model
+        self._model = model
+        return model
 
-    def _tokenize(self, sequences: Sequence[str]):
-        tokenizer = self._ensure_tokenizer()
-        normalized = [
+    def release_model(self) -> None:
+        """Release materialized weights after pooled embeddings are cached."""
+        device_type = (
+            None if self._device is None else self._device.type
+        )
+        self._model = None
+        self._device = None
+        gc.collect()
+        if device_type == "cuda":
+            import torch
+
+            torch.cuda.empty_cache()
+
+    def _prepare_for_tokenizer(self, sequence: str) -> str:
+        """Return the model-family-specific tokenizer input."""
+        return sequence
+
+    def _normalized_sequences(
+            self, sequences: Sequence[str],
+        ) -> tuple[str, ...]:
+        return tuple(
             normalize_protein_sequence(sequence)
             for sequence in sequences
-        ]
-        truncate = self.spec.truncation_policy == "truncate"
-        tokenizer_options = {
-            "add_special_tokens": True,
-            "padding": True,
-            "truncation": truncate,
-            "return_special_tokens_mask": True,
-            "return_tensors": "pt",
-        }
-        if truncate:
-            tokenizer_options["max_length"] = self.spec.maximum_length
-        encoded = tokenizer(
-            normalized,
-            **tokenizer_options,
         )
-        lengths = encoded["attention_mask"].sum(dim=1).cpu().numpy()
-        if (
-            self.spec.truncation_policy == "error"
-            and np.any(lengths > self.spec.maximum_length)
-        ):
-            longest = int(np.max(lengths))
-            raise ValueError(
-                f"A protein tokenizes to {longest} tokens, exceeding "
-                f"maximum_length={self.spec.maximum_length}. Increase the "
-                "limit or use truncation_policy='truncate'."
-            )
-        return encoded, np.asarray(lengths, dtype=np.int64)
 
     def token_lengths(self, sequences: Sequence[str]) -> np.ndarray:
-        """Return exact ESM residue-plus-special-token sequence lengths."""
+        """Return exact residue-plus-special-token lengths without loading."""
         lengths = np.asarray([
-            len(normalize_protein_sequence(sequence))
-            + ESM_SEQUENCE_SPECIAL_TOKENS
+            len(normalize_protein_sequence(sequence)) + self.n_special_tokens
             for sequence in sequences
         ], dtype=np.int64)
         if self.spec.truncation_policy == "truncate":
-            np.minimum(
-                lengths,
-                self.spec.maximum_length,
-                out=lengths,
-            )
+            np.minimum(lengths, self.spec.maximum_length, out=lengths)
         elif len(lengths) and np.max(lengths) > self.spec.maximum_length:
             longest = int(np.max(lengths))
             raise ValueError(
@@ -209,19 +226,37 @@ class HuggingFaceESM2Encoder:
     def tokenize_with_alignment(
             self, sequences: Sequence[str],
         ) -> TokenizedProteinBatch:
-        """Tokenize ESM sequences and preserve exact residue-token indexes."""
+        """Tokenize sequences while preserving exact residue positions."""
         if not sequences:
             raise ValueError("Cannot tokenize an empty sequence batch.")
-        normalized = tuple(
-            normalize_protein_sequence(sequence)
-            for sequence in sequences
+        normalized = self._normalized_sequences(sequences)
+        tokenizer_inputs = [
+            self._prepare_for_tokenizer(sequence)
+            for sequence in normalized
+        ]
+        truncate = self.spec.truncation_policy == "truncate"
+        tokenizer_options = {
+            "add_special_tokens": True,
+            "padding": True,
+            "truncation": truncate,
+            "return_special_tokens_mask": True,
+            "return_tensors": "pt",
+        }
+        if truncate:
+            tokenizer_options["max_length"] = self.spec.maximum_length
+        encoded = self._ensure_tokenizer()(
+            tokenizer_inputs,
+            **tokenizer_options,
         )
-        encoded, observed_lengths = self._tokenize(normalized)
+        observed_lengths = np.asarray(
+            encoded["attention_mask"].sum(dim=1).cpu().numpy(),
+            dtype=np.int64,
+        )
         planned_lengths = self.token_lengths(normalized)
         if not np.array_equal(observed_lengths, planned_lengths):
             raise ValueError(
-                "The selected tokenizer is not compatible with standard "
-                "one-token-per-residue ESM-2 batching."
+                f"The selected tokenizer is not compatible with "
+                f"one-token-per-residue {type(self).__name__} batching."
             )
         special_tokens_mask = encoded.pop("special_tokens_mask").bool()
         token_attention_mask = encoded["attention_mask"].bool()
@@ -230,30 +265,30 @@ class HuggingFaceESM2Encoder:
             token_attention_mask.cpu().numpy(),
             residue_token_mask.cpu().numpy(),
         )
-        represented_residues = alignment.residue_counts
         sequence_lengths = np.asarray(
             [len(sequence) for sequence in normalized],
             dtype=np.int64,
         )
-        if np.any(represented_residues > sequence_lengths):
-            raise ValueError(
-                "Tokenizer produced more residue tokens than input residues."
+        expected_residue_counts = sequence_lengths.copy()
+        if truncate:
+            np.minimum(
+                expected_residue_counts,
+                self.spec.maximum_length - self.n_special_tokens,
+                out=expected_residue_counts,
             )
-        if (
-            self.spec.truncation_policy == "error"
-            and not np.array_equal(represented_residues, sequence_lengths)
-        ):
+        if not np.array_equal(
+                alignment.residue_counts, expected_residue_counts):
             raise ValueError(
-                "ESM tokenizer did not preserve one token per input residue."
+                f"{type(self).__name__} tokenizer did not preserve exactly "
+                "one token per represented input residue."
             )
         return TokenizedProteinBatch(
             sequences=normalized,
-            model_inputs={key: value for key, value in encoded.items()},
+            model_inputs=dict(encoded),
             alignment=alignment,
         )
 
     def _hidden_states(self, tokenized: TokenizedProteinBatch):
-        """Run frozen inference while retaining token-level hidden states."""
         import torch
 
         model = self._ensure_model()
@@ -262,11 +297,9 @@ class HuggingFaceESM2Encoder:
             for key, value in tokenized.model_inputs.items()
         }
         with torch.inference_mode():
-            hidden = model(**model_inputs).last_hidden_state
-        return hidden
+            return model(**model_inputs).last_hidden_state
 
     def _numpy_precision(self, tensor):
-        """Move representations to CPU in a NumPy-compatible precision."""
         import torch
 
         tensor = tensor.cpu()

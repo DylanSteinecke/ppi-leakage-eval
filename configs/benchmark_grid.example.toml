@@ -21,6 +21,9 @@ train_args = ["--no-metrics-plots"]
 
 [plm]
 enabled = false
+# Optional approved checkpoints; sizes above ESM2 8M require exhaustive mode.
+# Example: ["esm2_150m", "esm2_650m"]
+presets = []
 adapter = "esm2"
 model = "facebook/esm2_t6_8M_UR50D"
 # Set an immutable Hugging Face commit when enabled = true.

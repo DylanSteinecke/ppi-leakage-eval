@@ -6,16 +6,21 @@ import pytest
 from ppi_benchmark.features import compose_pair_features
 from ppi_benchmark.protein_encoders import (
     DEFAULT_PROTEIN_ENCODER_ADAPTER,
+    PROTEIN_ENCODER_PRESET_CHOICES,
     PROTEIN_ENCODER_ADAPTER_CHOICES,
     CachedEmbedding,
     EmbeddingCache,
     EncoderSpec,
     FrozenProteinEncoder,
     HuggingFaceESM2Encoder,
+    HuggingFaceProtBertEncoder,
+    HuggingFaceProtT5Encoder,
     ProteinEncoder,
     ResidueTokenAlignment,
     TokenRepresentationEncoder,
     create_protein_encoder,
+    get_protein_encoder_preset,
+    prepare_prottrans_sequence,
     sequence_sha256,
     token_budget_batches,
 )
@@ -71,7 +76,8 @@ def test_encoder_fingerprint_covers_cache_changing_configuration():
 
 def test_encoder_factory_selects_explicit_model_family(tiny_esm_model):
     assert DEFAULT_PROTEIN_ENCODER_ADAPTER == "esm2"
-    assert PROTEIN_ENCODER_ADAPTER_CHOICES == ("esm2",)
+    assert PROTEIN_ENCODER_ADAPTER_CHOICES == (
+        "esm2", "protbert", "prott5")
 
     encoder = create_protein_encoder(
         adapter="esm2",
@@ -87,6 +93,83 @@ def test_encoder_factory_selects_explicit_model_family(tiny_esm_model):
 
     with pytest.raises(ValueError, match="Unknown protein encoder adapter"):
         create_protein_encoder(adapter="unknown")
+
+
+def test_approved_presets_are_self_supervised_and_resource_scoped():
+    assert PROTEIN_ENCODER_PRESET_CHOICES == (
+        "esm2_8m", "esm2_35m", "esm2_150m", "esm2_650m", "esm2_3b",
+        "esm2_15b", "protbert", "prott5_xl")
+    for preset_name in PROTEIN_ENCODER_PRESET_CHOICES:
+        preset = get_protein_encoder_preset(preset_name)
+        assert preset.pretraining_scope == "self_supervised"
+        assert len(preset.model_revision) == 40
+    esm2_presets = [
+        get_protein_encoder_preset(name)
+        for name in PROTEIN_ENCODER_PRESET_CHOICES
+        if name.startswith("esm2_")
+    ]
+    assert all(preset.adapter == "esm2" for preset in esm2_presets)
+    assert all(
+        preset.model_name.startswith("facebook/esm2_")
+        for preset in esm2_presets
+    )
+    assert get_protein_encoder_preset("esm2_8m").resource_tier == "laptop"
+    assert all(
+        preset.resource_tier == "accelerator"
+        for preset in esm2_presets[1:]
+    )
+    assert get_protein_encoder_preset("protbert").resource_tier == "laptop"
+    assert get_protein_encoder_preset("prott5_xl").resource_tier == (
+        "accelerator")
+
+
+def test_protbert_adapter_maps_rare_residues_and_preserves_alignment(
+        tiny_protbert_model):
+    pytest.importorskip("torch")
+    assert prepare_prottrans_sequence("AUZOB") == "A X X X X"
+    encoder = HuggingFaceProtBertEncoder(
+        model_name=str(tiny_protbert_model),
+        model_revision="local-test-revision",
+        maximum_length=32,
+        device="cpu",
+    )
+
+    assert encoder.token_lengths(["AUZOB"]).tolist() == [7]
+    tokenized = encoder.tokenize_with_alignment(["AUZOB"])
+    observed = encoder.encode_batch(["AUZOB"])
+    mapped = encoder.encode_batch(["AXXXX"])
+
+    assert tokenized.alignment.residue_counts.tolist() == [5]
+    assert tokenized.alignment.token_index(0, 0) == 1
+    assert observed.shape == (1, 8)
+    np.testing.assert_allclose(observed, mapped, atol=0.0, rtol=0.0)
+
+
+def test_prott5_adapter_is_mean_only_and_preserves_alignment(
+        tiny_prott5_model):
+    pytest.importorskip("torch")
+    with pytest.raises(ValueError, match="pooling must be one of: mean"):
+        HuggingFaceProtT5Encoder(
+            model_name=str(tiny_prott5_model),
+            model_revision="local-test-revision",
+            pooling="cls",
+        )
+    encoder = HuggingFaceProtT5Encoder(
+        model_name=str(tiny_prott5_model),
+        model_revision="local-test-revision",
+        maximum_length=32,
+        device="cpu",
+    )
+
+    assert encoder.token_lengths(["AUZOB"]).tolist() == [6]
+    tokenized = encoder.tokenize_with_alignment(["AUZOB"])
+    observed = encoder.encode_batch(["AUZOB"])
+    mapped = encoder.encode_batch(["AXXXX"])
+
+    assert tokenized.alignment.residue_counts.tolist() == [5]
+    assert tokenized.alignment.token_index(0, 0) == 0
+    assert observed.shape == (1, 8)
+    np.testing.assert_allclose(observed, mapped, atol=0.0, rtol=0.0)
 
 
 def test_fine_tuned_cache_identity_requires_checkpoint_and_split_scope(

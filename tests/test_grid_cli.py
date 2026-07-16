@@ -104,6 +104,86 @@ def test_profile_and_optional_model_expansion(tmp_path):
     assert all("--embedding-cache-dir" in spec.train_args for spec in plm_specs)
 
 
+def test_multiple_approved_plms_expand_as_independent_grid_configs(tmp_path):
+    config = grid_config(
+        tmp_path,
+        "--profile", "laptop",
+        "--plm-presets", "esm2_8m", "protbert",
+        "--split-strategies", "random",
+        "--no-aggregate-results",
+    )
+
+    specs = build_run_specs(config)
+
+    assert config.plm_presets == ("esm2_8m", "protbert")
+    assert [spec.configuration_name for spec in specs] == [
+        "baselines",
+        "features-tfidf",
+        "features-count",
+        "features-plm-esm2_8m",
+        "features-plm-protbert",
+    ]
+    plm_specs = specs[-2:]
+    assert all("--plm-preset" in spec.train_args for spec in plm_specs)
+    assert "--plm-device" in plm_specs[0].train_args
+    assert "--plm-max-batch-sequences" in plm_specs[1].train_args
+
+
+@pytest.mark.parametrize("preset_name", ["esm2_35m", "prott5_xl"])
+def test_laptop_rejects_accelerator_presets(
+        tmp_path, capsys, preset_name):
+    with pytest.raises(SystemExit) as error:
+        grid_config(
+            tmp_path,
+            "--profile", "laptop",
+            "--plm-presets", preset_name,
+        )
+    assert error.value.code == 2
+    assert "rejects accelerator-only" in capsys.readouterr().err
+
+
+def test_exhaustive_profile_selects_larger_esm2_size(tmp_path):
+    exhaustive = grid_config(
+        tmp_path,
+        "--profile", "exhaustive",
+        "--plm-presets", "esm2_650m",
+        "--split-strategies", "random",
+        "--no-aggregate-results",
+    )
+    esm2_spec = next(
+        spec
+        for spec in build_run_specs(exhaustive)
+        if spec.configuration_name == "features-plm-esm2_650m"
+    )
+    assert esm2_spec.train_args[
+        esm2_spec.train_args.index("--plm-model") + 1
+    ] == "facebook/esm2_t33_650M_UR50D"
+    assert esm2_spec.train_args[
+        esm2_spec.train_args.index("--plm-device") + 1
+    ] == "cuda"
+
+
+def test_exhaustive_profile_selects_prott5(tmp_path):
+    exhaustive = grid_config(
+        tmp_path,
+        "--profile", "exhaustive",
+        "--plm-presets", "prott5_xl",
+        "--split-strategies", "random",
+        "--no-aggregate-results",
+    )
+    prott5_spec = next(
+        spec
+        for spec in build_run_specs(exhaustive)
+        if spec.configuration_name == "features-plm-prott5_xl"
+    )
+    assert prott5_spec.train_args[
+        prott5_spec.train_args.index("--plm-device") + 1
+    ] == "cuda"
+    assert prott5_spec.train_args[
+        prott5_spec.train_args.index("--plm-precision") + 1
+    ] == "float16"
+
+
 def test_sgd_model_family_can_be_disabled_independently(tmp_path):
     baseline_only = grid_config(
         tmp_path,

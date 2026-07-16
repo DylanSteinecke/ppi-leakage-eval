@@ -352,6 +352,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert 'INCLUDE_SGD="${INCLUDE_SGD:-1}"' in grid_text
     assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
     assert 'PLM_ADAPTER="${PLM_ADAPTER:-esm2}"' in grid_text
+    assert 'PLM_PRESETS="${PLM_PRESETS:-}"' in grid_text
     assert (
         'INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"'
         in grid_text
@@ -455,6 +456,10 @@ source "$GRID_PATH" --no-metrics-plots "$@"
         "laptop",
         runner_args=("--no-sgd",),
     )
+    laptop_protbert_call = wrapper_command(
+        "laptop",
+        runner_args=("--plm-preset", "protbert"),
+    )
     exhaustive_call = wrapper_command("exhaustive")
 
     assert "--profile laptop" in laptop_call
@@ -467,6 +472,8 @@ source "$GRID_PATH" --no-metrics-plots "$@"
     assert "--no-include-torch-mlp" in laptop_call
     assert "--include-sgd" in laptop_call
     assert "--no-include-sgd" in laptop_no_sgd_call
+    assert "--plm-presets protbert" in laptop_protbert_call
+    assert "--include-plm" in laptop_protbert_call
     assert "--include-torch-mlp" in laptop_torch_call
     assert "--include-plm" in laptop_plm_call
     assert "--plm-model facebook/esm2_t6_8M_UR50D" in laptop_plm_call
