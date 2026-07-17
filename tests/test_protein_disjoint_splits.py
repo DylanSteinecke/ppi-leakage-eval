@@ -77,6 +77,29 @@ def test_c1_is_edge_disjoint_and_all_test_proteins_appear_in_train():
     assert result.audit["all_invariants_passed"] is True
 
 
+def test_sparse_c1_repair_preserves_legacy_seeded_assignment():
+    pairs = pd.DataFrame(
+        [
+            ("A", "B", 0),
+            ("B", "C", 1),
+            ("A", "C", 0),
+            *((f"L{index}", "A", index % 2) for index in range(12)),
+        ],
+        columns=["protein_a", "protein_b", "label"],
+    )
+
+    result = split_pairs(
+        pairs,
+        mode="c1",
+        test_size=0.5,
+        seed=2,
+        n_trials=1,
+    )
+
+    assert result.train.index.tolist() == [1, *range(3, 15)]
+    assert result.test.index.tolist() == [0, 2]
+
+
 def test_c2_has_exactly_one_train_group_per_test_edge():
     pairs = complete_graph_pairs()
     protein_to_group = paired_group_mapping()
@@ -226,6 +249,26 @@ def test_three_way_c1_is_edge_disjoint_with_all_endpoints_seen_in_train():
     assert proteins(result.test) <= proteins(result.train)
     assert result.dropped.empty
     assert result.audit["all_invariants_passed"] is True
+
+
+def test_three_way_c1_preserves_legacy_seeded_assignment():
+    result = split_pairs_three_way(
+        complete_graph_pairs(10),
+        mode="c1",
+        val_size=0.2,
+        test_size=0.2,
+        seed=3,
+        n_trials=1,
+    )
+
+    assert result.train.index.tolist() == [
+        0, 1, 5, 6, 7, 8, 9, 10, 13, 14, 15, 16, 19, 22, 25, 26, 27,
+        29, 30, 32, 33, 34, 35, 36, 39, 40, 42,
+    ]
+    assert result.val.index.tolist() == [2, 4, 12, 20, 28, 37, 38, 41, 43]
+    assert result.test.index.tolist() == [
+        3, 11, 17, 18, 21, 23, 24, 31, 44,
+    ]
 
 
 def test_three_way_c2_uses_distinct_validation_and_test_novel_proteins():

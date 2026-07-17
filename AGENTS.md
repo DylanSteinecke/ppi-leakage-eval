@@ -11,6 +11,8 @@ points in `cli/`, source-specific loading in `datasets/`, framework adapters in
 and plot generation in `reporting/`, and evaluation in `evaluation/`. Shared
 feature construction remains in `features.py`. Tests are in `tests/` and
 generally mirror these modules.
+Generic artifact hashing and locked writers live in `artifact_io.py`; do not
+import dataset preparation or reporting modules solely for those primitives.
 Use `scripts/` for thin runnable workflows, `configs/` for versioned benchmark
 settings, and `docs/` for connected-change checklists. Generated datasets,
 embeddings, checkpoints, and benchmark outputs belong in ignored `processed/`

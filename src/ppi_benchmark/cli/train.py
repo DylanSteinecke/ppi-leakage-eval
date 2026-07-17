@@ -11,7 +11,6 @@ in focused helper modules so future pipeline variants can reuse them.
 import argparse
 import json
 import logging
-import math
 import re
 import shutil
 import uuid
@@ -23,6 +22,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..artifact_io import (
+    append_dataframe,
+    reset_output_file,
+    write_dataframe_threadsafe,
+)
 from ..backends import (
     TORCH_BACKEND,
     backend_name_for_classifier,
@@ -33,8 +37,10 @@ from ..backends.models import (
     is_baseline_classifier,
 )
 from ..datasets.common import (
+    discover_dataset_metadata_path,
     discover_protein_metadata_path,
     FASTA_ID_FORMAT_CHOICES,
+    read_dataset_provenance,
     read_fasta_with_taxa,
 )
 from ..evaluation import (
@@ -50,11 +56,6 @@ from ..features import (
     make_feature_name,
     normalize_feature_types,
     unique_protein_ids,
-)
-from ..reporting.io import (
-    append_dataframe,
-    reset_output_file,
-    write_dataframe_threadsafe,
 )
 from ..reporting.performance import (
     PERFORMANCE_FILENAME,
@@ -104,6 +105,7 @@ from ..splitting.grouping import (
     SequenceClusterParameters,
     resolve_sequence_clusters,
 )
+from ..splitting.negative_sampling import normalize_negative_construction
 from ..splitting.preparation import prepare_input_data
 from ..splitting.protocols import (
     PROVIDED_SPLIT_STRATEGY,
@@ -128,6 +130,17 @@ from ..schema import EVALUATION_SCHEMA_VERSION
 from ..tasks import PPI_TASK
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
 from ..training import TaskSplitData, fit_and_evaluate_task
+from .arg_types import (
+    auto_or_cluster_mode,
+    auto_or_positive_float,
+    non_empty_string,
+    nonnegative_float,
+    nonnegative_proportion,
+    positive_float,
+    positive_int,
+    proportion,
+    unit_interval,
+)
 
 FEATURELESS_FEATURE = "none"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -179,117 +192,6 @@ TRAINING_HISTORY_COLUMNS = (
 #######
 # CLI #
 #######
-def positive_int(value: str) -> int:
-    """
-    Parse a positive integer argparse value.
-    """
-    parsed_value = int(value)
-    if parsed_value < 1:
-        raise argparse.ArgumentTypeError("value must be at least 1")
-    return parsed_value
-
-
-def finite_float(value: str) -> float:
-    """
-    Parse a finite float argparse value.
-    """
-    parsed_value = float(value)
-    if not math.isfinite(parsed_value):
-        raise argparse.ArgumentTypeError("value must be finite")
-
-    return parsed_value
-
-
-def positive_float(value: str) -> float:
-    """
-    Parse a positive float argparse value.
-    """
-    parsed_value = finite_float(value)
-    if parsed_value <= 0.0:
-        raise argparse.ArgumentTypeError("value must be greater than 0")
-
-    return parsed_value
-
-
-def auto_or_positive_float(value: str) -> float | None:
-    """Parse ``auto`` or a positive finite float."""
-    if value.strip().lower() == "auto":
-        return None
-    return positive_float(value)
-
-
-def auto_or_cluster_mode(value: str) -> int | None:
-    """Parse ``auto`` or an MMseqs2 cluster mode from 0 through 3."""
-    if value.strip().lower() == "auto":
-        return None
-    try:
-        parsed_value = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "value must be 'auto' or an integer from 0 through 3"
-        ) from exc
-    if parsed_value not in range(4):
-        raise argparse.ArgumentTypeError(
-            "value must be 'auto' or an integer from 0 through 3"
-        )
-    return parsed_value
-
-
-def nonnegative_float(value: str) -> float:
-    """
-    Parse a nonnegative float argparse value.
-    """
-    parsed_value = finite_float(value)
-    if parsed_value < 0.0:
-        raise argparse.ArgumentTypeError("value must be nonnegative")
-
-    return parsed_value
-
-
-def unit_interval(value: str) -> float:
-    """
-    Parse a float value between 0 and 1, inclusive.
-    """
-    parsed_value = finite_float(value)
-    if (parsed_value < 0.0) or (parsed_value > 1.0):
-        raise argparse.ArgumentTypeError("value must be between 0 and 1")
-
-    return parsed_value
-
-
-def proportion(value: str) -> float:
-    """
-    Parse a float proportion between 0 and 1.
-    """
-    parsed_value = finite_float(value)
-    if (parsed_value <= 0.0) or (parsed_value >= 1.0):
-        raise argparse.ArgumentTypeError("value must be between 0 and 1")
-
-    return parsed_value
-
-
-def nonnegative_proportion(value: str) -> float:
-    """
-    Parse a float proportion between 0 and 1, inclusive of 0 only.
-    """
-    parsed_value = finite_float(value)
-    if (parsed_value < 0.0) or (parsed_value >= 1.0):
-        raise argparse.ArgumentTypeError("value must be at least 0 and less than 1")
-
-    return parsed_value
-
-
-def non_empty_string(value: str) -> str:
-    """
-    Parse a non-empty argparse string after trimming whitespace.
-    """
-    parsed_value = value.strip()
-    if not parsed_value:
-        raise argparse.ArgumentTypeError("value must not be empty")
-
-    return parsed_value
-
-
 def argument_parser(
         argv: Sequence[str] | None = None,
     ) -> argparse.Namespace:
@@ -310,6 +212,14 @@ def argument_parser(
     input_group.add_argument(
         "--pairs", required=True,
         help="CSV with columns for protein_a, protein_b, label")
+    input_group.add_argument(
+        "--dataset-metadata",
+        default=None,
+        help=(
+            "Optional ppi-prepare dataset_metadata.json. A canonical sidecar "
+            "beside pairs.csv is discovered automatically."
+        ),
+    )
     input_group.add_argument(
         "--fasta", required=True,
         help="FASTA file of protein sequences")
@@ -1870,6 +1780,33 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Load and process input data
     with performance.stage("load_pairs"):
+        dataset_metadata_path = discover_dataset_metadata_path(
+            pairs_path=args.pairs,
+            explicit_path=args.dataset_metadata,
+        )
+        negative_construction = None
+        try:
+            dataset_provenance = read_dataset_provenance(
+                pairs_path=args.pairs,
+                metadata_path=dataset_metadata_path,
+            )
+            if dataset_provenance.metadata is not None:
+                negative_construction = normalize_negative_construction(
+                    dataset_provenance.metadata
+                )
+                if dataset_provenance.pairs_binding == "legacy_path_only":
+                    LOGGER.warning(
+                        "Dataset metadata is bound to pairs by a legacy path "
+                        "only; regenerate it with ppi-prepare to add a "
+                        "cryptographic output hash."
+                    )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise SystemExit(str(exc)) from None
+        args.dataset_metadata = (
+            None
+            if dataset_metadata_path is None
+            else str(dataset_metadata_path)
+        )
         protein_pairs = pd.read_csv(
             args.pairs,
             dtype={"protein_a": "string", "protein_b": "string"},
@@ -1996,6 +1933,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             sampling_metadata=sampling_metadata,
             protein_taxa=fasta_data.taxon_ids,
             protein_metadata_path=protein_metadata_path,
+            dataset_provenance=dataset_provenance,
+            negative_construction=negative_construction,
             task_name=PPI_TASK.name,
         )
         try:

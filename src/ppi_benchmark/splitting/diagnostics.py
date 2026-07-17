@@ -243,6 +243,25 @@ def unordered_ppi_pairs(
     return pairs
 
 
+def ppi_pair_sets(
+        split_df: pd.DataFrame | None,
+    ) -> tuple[
+        set[tuple[Hashable, Hashable]],
+        set[tuple[Hashable, Hashable]],
+    ]:
+    """Build ordered and unordered pair sets in one pass."""
+    ordered_pairs = set()
+    unordered_pairs = set()
+    if split_df is None:
+        return ordered_pairs, unordered_pairs
+
+    for protein_a, protein_b in zip(
+            split_df["protein_a"], split_df["protein_b"]):
+        ordered_pairs.add((protein_a, protein_b))
+        unordered_pairs.add(tuple(sorted((protein_a, protein_b), key=str)))
+    return ordered_pairs, unordered_pairs
+
+
 def split_dataframe_mapping(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame,
@@ -276,6 +295,7 @@ def compute_ppi_split_diagnostics(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame, args: Any | None = None,
         protein_pairs: pd.DataFrame | None = None,
+        split_to_proteins: Mapping[str, set[Hashable]] | None = None,
     ) -> dict[str, Any]:
     """
     Return non-fatal PPI split diagnostics as JSON-serializable values.
@@ -289,10 +309,11 @@ def compute_ppi_split_diagnostics(
         diagnostics["n_unique_proteins_total_after_filtering"] = int(
             len(protein_ids_in_pairs(protein_pairs)))
 
-    split_to_proteins = {
-        split_name: ppi_protein_ids(split_df)
-        for split_name, split_df in split_dfs.items()
-    }
+    if split_to_proteins is None:
+        split_to_proteins = {
+            split_name: ppi_protein_ids(split_df)
+            for split_name, split_df in split_dfs.items()
+        }
     diagnostics.update(
         unique_value_count_diagnostics(split_to_proteins, "proteins"))
     diagnostics.update(
@@ -302,21 +323,17 @@ def compute_ppi_split_diagnostics(
             example_prefix="shared_proteins",
         ))
 
-    split_to_ordered_pairs = {
-        split_name: ordered_ppi_pairs(split_df)
-        for split_name, split_df in split_dfs.items()
-    }
-    split_to_unordered_pairs = {
-        split_name: unordered_ppi_pairs(split_df)
+    pair_sets = {
+        split_name: ppi_pair_sets(split_df)
         for split_name, split_df in split_dfs.items()
     }
     split_to_ordered_pair_sets = {
-        split_name: set(pairs)
-        for split_name, pairs in split_to_ordered_pairs.items()
+        split_name: sets[0]
+        for split_name, sets in pair_sets.items()
     }
     split_to_unordered_pair_sets = {
-        split_name: set(pairs)
-        for split_name, pairs in split_to_unordered_pairs.items()
+        split_name: sets[1]
+        for split_name, sets in pair_sets.items()
     }
 
     diagnostics.update(
@@ -343,16 +360,14 @@ def compute_ppi_split_diagnostics(
             example_prefix="unordered_pair_overlap",
             example_key_style="before_splits",
         ))
-    diagnostics.update(
-        duplicate_value_diagnostics(
-            split_to_ordered_pairs,
-            "ordered_pairs",
-        ))
-    diagnostics.update(
-        duplicate_value_diagnostics(
-            split_to_unordered_pairs,
-            "unordered_pairs",
-        ))
+    for split_name, split_df in split_dfs.items():
+        n_rows = 0 if split_df is None else len(split_df)
+        diagnostics[f"n_duplicate_ordered_pairs_{split_name}"] = int(
+            n_rows - len(split_to_ordered_pair_sets[split_name])
+        )
+        diagnostics[f"n_duplicate_unordered_pairs_{split_name}"] = int(
+            n_rows - len(split_to_unordered_pair_sets[split_name])
+        )
 
     def has_pairwise_overlap(count_prefix: str) -> bool:
         return any(

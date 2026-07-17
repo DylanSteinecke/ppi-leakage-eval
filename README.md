@@ -110,7 +110,10 @@ compares all six configurations. Set
 explicitly empty `MAX_PAIRS` uses the entire eligible cohort. `SAMPLING_SEED`
 controls cohort selection independently of the data-split seed. `SPLIT_SEEDS`
 accepts a quoted, space-separated list. `MODEL_SEEDS` explicitly lists every
-independent model-fit seed.
+independent model-fit seed. Negative construction has its own
+`NEGATIVE_SAMPLING_SEED`; it is not controlled by `SAMPLING_SEED`.
+`NEGATIVE_SAMPLING_POLICY` selects `taxon_pair_matched` (the default) or
+`global` when the yeast dataset is prepared.
 
 The grouped child accepts `SEQUENCE_CLUSTER_MIN_SEQ_ID`,
 `SEQUENCE_CLUSTER_COVERAGE`, `SEQUENCE_CLUSTER_COV_MODE`,
@@ -182,10 +185,36 @@ protein without repeating species data on every interaction row. The benchmark
 also accepts it directly with `--protein-metadata`; a sidecar beside canonical
 `pairs.csv` is discovered automatically.
 
-The loader reads the large archive in chunks. Sampled negatives are unobserved
-protein pairs from taxonomy-pair strata represented by positives, not
-experimentally confirmed non-interactions. The archive member includes a
+The loader reads the large archive in chunks. The archive member includes a
 BioGRID release number and must be updated when the `LATEST` download changes.
+
+### PPI negative construction
+
+The generated-negative flags are grouped under **Negative construction** in
+`ppi-prepare`: `--sample-negatives`, `--negative-sampling-policy`,
+`--negative-ratio`, and `--negative-sampling-seed`. The generic edge loader can
+instead accept source rows with `--negative-pairs`.
+
+`taxon_pair_matched` is the generated default. It samples unobserved unordered
+pairs from taxonomy-pair strata represented by positives and requires a
+`taxon_id` for every eligible protein; incomplete taxonomy fails rather than
+silently switching policies. `global` is an explicit opt-in that samples from
+the full eligible unordered-pair space. In both cases, label 0 means a sampled
+unobserved pair under the recorded evidence snapshot, not an experimentally
+confirmed non-interaction.
+
+Generated negatives are currently prepared before split assignment. C1/C2/C3
+then project positive and generated examples by the same rules, but this is not
+partition-aware negative construction and does not establish full protocol
+conformance. `dataset_metadata.json` records the policy, timing
+(`before_split`), ratio, seed, candidate universe, and realized counts.
+
+To compare policies, prepare two immutable dataset directories with different
+dataset names, keep the evidence snapshot, ratio, negative-sampling seed,
+split seeds, and model seeds fixed, then report the results as separate
+negative-construction conditions. Use a multi-taxon dataset: on the yeast
+single-taxon example, `taxon_pair_matched` and `global` have the same candidate
+space and are not an informative comparison.
 
 ## Sample a whole benchmark cohort
 

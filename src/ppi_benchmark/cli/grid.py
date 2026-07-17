@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import shutil
 import subprocess
@@ -30,6 +29,12 @@ from ..protein_encoders import (
     PROTEIN_ENCODER_ADAPTER_CHOICES,
     PROTEIN_ENCODER_PRESET_CHOICES,
     get_protein_encoder_preset,
+)
+from .arg_types import (
+    auto_or_cluster_mode as _auto_or_cluster_mode,
+    auto_or_positive_float as _auto_or_positive_float,
+    positive_float as _positive_float,
+    unit_interval as _unit_interval,
 )
 
 
@@ -388,42 +393,6 @@ class GridRunSpec:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-
-
-def _unit_interval(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
-        raise argparse.ArgumentTypeError("value must be between 0 and 1")
-    return parsed
-
-
-def _positive_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed) or parsed <= 0.0:
-        raise argparse.ArgumentTypeError("value must be greater than 0")
-    return parsed
-
-
-def _auto_or_positive_float(value: str) -> float | None:
-    if value.strip().lower() == "auto":
-        return None
-    return _positive_float(value)
-
-
-def _auto_or_cluster_mode(value: str) -> int | None:
-    if value.strip().lower() == "auto":
-        return None
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "value must be 'auto' or an integer from 0 through 3"
-        ) from exc
-    if parsed not in range(4):
-        raise argparse.ArgumentTypeError(
-            "value must be 'auto' or an integer from 0 through 3"
-        )
-    return parsed
 
 
 def _normalized_auto_positive_float(value: Any) -> float | None:

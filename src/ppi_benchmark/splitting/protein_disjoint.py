@@ -52,6 +52,7 @@ class _PairArrays:
     group_b: np.ndarray
     labels: np.ndarray
     label_values: tuple[Any, ...]
+    label_rates: np.ndarray
     n_proteins: int
     n_groups: int
 
@@ -91,6 +92,53 @@ class _EdgeUnits:
 
     row_codes: np.ndarray
     sizes: np.ndarray
+    protein_a: np.ndarray
+    protein_b: np.ndarray
+    protein_unit_offsets: np.ndarray
+    protein_units: np.ndarray
+
+
+class _ActiveIndexes:
+    """Order-statistic set for uniformly selecting active integer indexes."""
+
+    def __init__(self, active: np.ndarray) -> None:
+        self.active = active.copy()
+        prefix = np.concatenate((
+            np.zeros(1, dtype=np.int64),
+            np.cumsum(active, dtype=np.int64),
+        ))
+        indexes = np.arange(1, len(active) + 1, dtype=np.int64)
+        low_bits = indexes & -indexes
+        self.tree = np.zeros(len(active) + 1, dtype=np.int64)
+        self.tree[1:] = prefix[indexes] - prefix[indexes - low_bits]
+        self.count = int(prefix[-1])
+
+    def discard(self, index: int) -> None:
+        """Remove an index when it is active."""
+        if not self.active[index]:
+            return
+        self.active[index] = False
+        self.count -= 1
+        tree_index = index + 1
+        while tree_index < len(self.tree):
+            self.tree[tree_index] -= 1
+            tree_index += tree_index & -tree_index
+
+    def index_at(self, rank: int) -> int:
+        """Return the zero-based index at an active-order rank."""
+        target = rank + 1
+        tree_index = 0
+        step = 1 << (len(self.active).bit_length() - 1)
+        while step:
+            next_index = tree_index + step
+            if (
+                next_index < len(self.tree)
+                and self.tree[next_index] < target
+            ):
+                tree_index = next_index
+                target -= int(self.tree[next_index])
+            step >>= 1
+        return tree_index
 
 
 def _native_value(value: Any) -> Any:
@@ -199,13 +247,19 @@ def _encode_pairs(
 
     label_codes, label_values = pd.factorize(pairs["label"], sort=False)
 
+    label_codes = label_codes.astype(np.int64, copy=False)
+    label_rates = np.bincount(
+        label_codes,
+        minlength=len(label_values),
+    ) / len(label_codes)
     return _PairArrays(
         protein_a=protein_a,
         protein_b=protein_b,
         group_a=protein_group_codes[protein_a],
         group_b=protein_group_codes[protein_b],
-        labels=label_codes.astype(np.int64, copy=False),
+        labels=label_codes,
         label_values=tuple(_native_value(value) for value in label_values),
+        label_rates=label_rates,
         n_proteins=n_proteins,
         n_groups=n_groups,
     )
@@ -218,17 +272,13 @@ def _label_balance_error(
     Return total train/test class-rate deviation from the input rates.
     """
     n_labels = len(arrays.label_values)
-    input_rates = np.bincount(
-        arrays.labels,
-        minlength=n_labels,
-    ) / len(arrays.labels)
     error = 0.0
     for mask in (train_mask, test_mask):
         split_rates = np.bincount(
             arrays.labels[mask],
             minlength=n_labels,
         ) / int(mask.sum())
-        error += float(np.abs(split_rates - input_rates).sum())
+        error += float(np.abs(split_rates - arrays.label_rates).sum())
 
     return error
 
@@ -272,17 +322,26 @@ def _degree_distribution_distance(
 def _candidate_score(
         arrays: _PairArrays, train_mask: np.ndarray, test_mask: np.ndarray,
         test_size: float,
-    ) -> tuple[int, float, float, float]:
+        incumbent: tuple[int, float, float, float] | None = None,
+    ) -> tuple[int, float, float, float] | None:
     """
     Return the requested lexicographic candidate score.
     """
     n_retained = int(train_mask.sum() + test_mask.sum())
     actual_test_size = int(test_mask.sum()) / n_retained
-
-    return (
+    prefix = (
         n_retained,
         -abs(actual_test_size - test_size),
-        -_label_balance_error(arrays, train_mask, test_mask),
+    )
+    if incumbent is not None and prefix < incumbent[:2]:
+        return None
+
+    label_score = -_label_balance_error(arrays, train_mask, test_mask)
+    if incumbent is not None and (*prefix, label_score) < incumbent[:3]:
+        return None
+    return (
+        *prefix,
+        label_score,
         -_degree_distribution_distance(arrays, train_mask, test_mask),
     )
 
@@ -290,7 +349,8 @@ def _candidate_score(
 def _three_way_candidate_score(
         arrays: _PairArrays, train_mask: np.ndarray, val_mask: np.ndarray,
         test_mask: np.ndarray, val_size: float, test_size: float,
-    ) -> tuple[int, float, float, float]:
+        incumbent: tuple[int, float, float, float] | None = None,
+    ) -> tuple[int, float, float, float] | None:
     """
     Return a lexicographic score for a retained three-way partition.
     """
@@ -302,12 +362,11 @@ def _three_way_candidate_score(
         abs(actual_val_size - val_size)
         + abs(actual_test_size - test_size)
     )
+    prefix = (n_retained, -size_error)
+    if incumbent is not None and prefix < incumbent[:2]:
+        return None
 
     n_labels = len(arrays.label_values)
-    input_rates = np.bincount(
-        arrays.labels,
-        minlength=n_labels,
-    ) / len(arrays.labels)
     label_balance_error = 0.0
     for mask in masks:
         split_rates = np.bincount(
@@ -315,7 +374,10 @@ def _three_way_candidate_score(
             minlength=n_labels,
         ) / int(mask.sum())
         label_balance_error += float(
-            np.abs(split_rates - input_rates).sum())
+            np.abs(split_rates - arrays.label_rates).sum())
+    label_score = -label_balance_error
+    if incumbent is not None and (*prefix, label_score) < incumbent[:3]:
+        return None
 
     degree_distance = (
         _degree_distribution_distance(arrays, train_mask, val_mask)
@@ -323,9 +385,8 @@ def _three_way_candidate_score(
     )
 
     return (
-        n_retained,
-        -size_error,
-        -label_balance_error,
+        *prefix,
+        label_score,
         -degree_distance,
     )
 
@@ -353,21 +414,38 @@ def _edge_units(arrays: _PairArrays) -> _EdgeUnits:
     lower_proteins = np.minimum(arrays.protein_a, arrays.protein_b)
     upper_proteins = np.maximum(arrays.protein_a, arrays.protein_b)
     pair_keys = lower_proteins * arrays.n_proteins + upper_proteins
-    _, row_codes, sizes = np.unique(
+    unit_keys, row_codes, sizes = np.unique(
         pair_keys,
         return_inverse=True,
         return_counts=True,
     )
+    unit_protein_a, unit_protein_b = divmod(unit_keys, arrays.n_proteins)
+    unit_indexes = np.arange(len(unit_keys), dtype=np.int64)
+    incident_proteins = np.concatenate((unit_protein_a, unit_protein_b))
+    incident_units = np.concatenate((unit_indexes, unit_indexes))
+    incident_order = np.argsort(incident_proteins, kind="stable")
+    incident_counts = np.bincount(
+        incident_proteins,
+        minlength=arrays.n_proteins,
+    )
+    protein_unit_offsets = np.empty(arrays.n_proteins + 1, dtype=np.int64)
+    protein_unit_offsets[0] = 0
+    np.cumsum(incident_counts, out=protein_unit_offsets[1:])
 
     return _EdgeUnits(
         row_codes=row_codes.astype(np.int64, copy=False),
         sizes=sizes.astype(np.int64, copy=False),
+        protein_a=unit_protein_a.astype(np.int64, copy=False),
+        protein_b=unit_protein_b.astype(np.int64, copy=False),
+        protein_unit_offsets=protein_unit_offsets,
+        protein_units=incident_units[incident_order],
     )
 
 
 def _make_c1_candidate(
         arrays: _PairArrays, edge_units: _EdgeUnits, test_size: float,
         rng: np.random.Generator,
+        incumbent: tuple[int, float, float, float] | None = None,
     ) -> _Candidate | None:
     """
     Make an edge-disjoint candidate with every test protein seen in train.
@@ -386,41 +464,76 @@ def _make_c1_candidate(
 
     test_mask = selected_units[edge_units.row_codes]
 
-    # Move whole edge units back to train until every test endpoint is seen.
-    while test_mask.any():
-        train_mask = ~test_mask
-        train_proteins = np.zeros(arrays.n_proteins, dtype=bool)
-        train_proteins[arrays.protein_a[train_mask]] = True
-        train_proteins[arrays.protein_b[train_mask]] = True
-        missing_test_proteins = np.zeros(arrays.n_proteins, dtype=bool)
-        missing_test_proteins[arrays.protein_a[test_mask]] = True
-        missing_test_proteins[arrays.protein_b[test_mask]] = True
-        missing_test_proteins &= ~train_proteins
-        if not missing_test_proteins.any():
-            break
+    train_mask = ~test_mask
+    train_proteins = np.zeros(arrays.n_proteins, dtype=bool)
+    train_proteins[arrays.protein_a[train_mask]] = True
+    train_proteins[arrays.protein_b[train_mask]] = True
+    missing_test_proteins = np.zeros(arrays.n_proteins, dtype=bool)
+    missing_test_proteins[arrays.protein_a[test_mask]] = True
+    missing_test_proteins[arrays.protein_b[test_mask]] = True
+    missing_test_proteins &= ~train_proteins
 
-        missing_endpoint_rows = test_mask & (
-            missing_test_proteins[arrays.protein_a]
-            | missing_test_proteins[arrays.protein_b]
+    movable = _ActiveIndexes(
+        selected_units
+        & (
+            missing_test_proteins[edge_units.protein_a]
+            | missing_test_proteins[edge_units.protein_b]
         )
-        movable_units = np.unique(edge_units.row_codes[missing_endpoint_rows])
-        if not len(movable_units):
+    )
+    while missing_test_proteins.any():
+        if movable.count == 0:
             return None
-        selected_units[rng.choice(movable_units)] = False
-        test_mask = selected_units[edge_units.row_codes]
+        unit_index = movable.index_at(int(rng.integers(movable.count)))
+        selected_units[unit_index] = False
+        movable.discard(unit_index)
+
+        endpoints = (
+            int(edge_units.protein_a[unit_index]),
+            int(edge_units.protein_b[unit_index]),
+        )
+        resolved_proteins = {
+            protein
+            for protein in endpoints
+            if missing_test_proteins[protein]
+        }
+        for protein in resolved_proteins:
+            missing_test_proteins[protein] = False
+        for protein in resolved_proteins:
+            start = edge_units.protein_unit_offsets[protein]
+            stop = edge_units.protein_unit_offsets[protein + 1]
+            for incident_unit in edge_units.protein_units[start:stop]:
+                incident_unit = int(incident_unit)
+                if not movable.active[incident_unit]:
+                    continue
+                if not (
+                    missing_test_proteins[edge_units.protein_a[incident_unit]]
+                    or missing_test_proteins[edge_units.protein_b[incident_unit]]
+                ):
+                    movable.discard(incident_unit)
+
+    test_mask = selected_units[edge_units.row_codes]
 
     if not test_mask.any() or test_mask.all():
         return None
 
     train_mask = ~test_mask
     dropped_mask = np.zeros(len(arrays.labels), dtype=bool)
+    score = _candidate_score(
+        arrays,
+        train_mask,
+        test_mask,
+        test_size,
+        incumbent,
+    )
+    if score is None:
+        return None
 
     return _Candidate(
         train_mask=train_mask,
         test_mask=test_mask,
         dropped_mask=dropped_mask,
         heldout_groups=frozenset(),
-        score=_candidate_score(arrays, train_mask, test_mask, test_size),
+        score=score,
     )
 
 
@@ -440,6 +553,7 @@ def _heldout_group_fraction(mode: SplitMode, test_size: float) -> float:
 def _make_group_candidate(
         arrays: _PairArrays, mode: Literal["c2", "c3"], test_size: float,
         rng: np.random.Generator,
+        incumbent: tuple[int, float, float, float] | None = None,
     ) -> _Candidate | None:
     """
     Make one C2 or C3 candidate from an atomic group assignment.
@@ -479,13 +593,22 @@ def _make_group_candidate(
     dropped_mask = ~(train_mask | test_mask)
     if not train_mask.any() or not test_mask.any():
         return None
+    score = _candidate_score(
+        arrays,
+        train_mask,
+        test_mask,
+        test_size,
+        incumbent,
+    )
+    if score is None:
+        return None
 
     return _Candidate(
         train_mask=train_mask,
         test_mask=test_mask,
         dropped_mask=dropped_mask,
         heldout_groups=heldout_groups,
-        score=_candidate_score(arrays, train_mask, test_mask, test_size),
+        score=score,
     )
 
 
@@ -493,6 +616,7 @@ def _make_three_way_c1_candidate(
         arrays: _PairArrays, edge_units: _EdgeUnits,
         val_size: float, test_size: float,
         rng: np.random.Generator,
+        incumbent: tuple[int, float, float, float] | None = None,
     ) -> _ThreeWayCandidate | None:
     """
     Split a C1 heldout edge set into validation and test edge units.
@@ -539,6 +663,17 @@ def _make_three_way_c1_candidate(
             or not _masks_contain_all_labels(arrays, masks)
             ):
         return None
+    score = _three_way_candidate_score(
+        arrays,
+        train_mask,
+        val_mask,
+        test_mask,
+        val_size,
+        test_size,
+        incumbent,
+    )
+    if score is None:
+        return None
 
     return _ThreeWayCandidate(
         train_mask=train_mask,
@@ -546,14 +681,7 @@ def _make_three_way_c1_candidate(
         test_mask=test_mask,
         dropped_mask=dropped_mask,
         group_partitions=None,
-        score=_three_way_candidate_score(
-            arrays,
-            train_mask,
-            val_mask,
-            test_mask,
-            val_size,
-            test_size,
-        ),
+        score=score,
     )
 
 
@@ -601,6 +729,7 @@ def _make_three_way_group_candidate(
         arrays: _PairArrays, mode: Literal["c2", "c3"],
         val_size: float, test_size: float,
         rng: np.random.Generator,
+        incumbent: tuple[int, float, float, float] | None = None,
     ) -> _ThreeWayCandidate | None:
     """
     Make one C2/C3 candidate from atomic train/val/test group assignments.
@@ -657,6 +786,17 @@ def _make_three_way_group_candidate(
             or not _masks_contain_all_labels(arrays, masks)
             ):
         return None
+    score = _three_way_candidate_score(
+        arrays,
+        train_mask,
+        val_mask,
+        test_mask,
+        val_size,
+        test_size,
+        incumbent,
+    )
+    if score is None:
+        return None
 
     return _ThreeWayCandidate(
         train_mask=train_mask,
@@ -664,14 +804,7 @@ def _make_three_way_group_candidate(
         test_mask=test_mask,
         dropped_mask=dropped_mask,
         group_partitions=group_partitions,
-        score=_three_way_candidate_score(
-            arrays,
-            train_mask,
-            val_mask,
-            test_mask,
-            val_size,
-            test_size,
-        ),
+        score=score,
     )
 
 
@@ -1150,6 +1283,7 @@ def split_pairs(
                 edge_units,
                 test_size,
                 rng,
+                None if best_candidate is None else best_candidate.score,
             )
         else:
             candidate = _make_group_candidate(
@@ -1157,6 +1291,7 @@ def split_pairs(
                 mode,
                 test_size,
                 rng,
+                None if best_candidate is None else best_candidate.score,
             )
         if candidate is not None and (
                 best_candidate is None
@@ -1236,6 +1371,9 @@ def split_pairs_three_way(
                 val_size=val_size,
                 test_size=test_size,
                 rng=rng,
+                incumbent=(
+                    None if best_candidate is None else best_candidate.score
+                ),
             )
         else:
             candidate = _make_three_way_group_candidate(
@@ -1244,6 +1382,9 @@ def split_pairs_three_way(
                 val_size=val_size,
                 test_size=test_size,
                 rng=rng,
+                incumbent=(
+                    None if best_candidate is None else best_candidate.score
+                ),
             )
         if candidate is not None and (
                 best_candidate is None

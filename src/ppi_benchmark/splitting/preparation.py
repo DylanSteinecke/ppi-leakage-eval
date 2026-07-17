@@ -4,7 +4,7 @@ import logging
 
 import pandas as pd
 
-from ..datasets.common import normalize_labels
+from ..datasets.pairs import normalize_labels
 
 
 REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}

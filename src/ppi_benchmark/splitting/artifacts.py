@@ -15,8 +15,8 @@ from typing import Any
 
 import pandas as pd
 
-from ..datasets.common import file_sha256, protein_taxon_summary, taxon_pair_name
-from ..reporting.io import output_lock
+from ..artifact_io import file_sha256, output_lock
+from ..datasets.common import DatasetProvenance, protein_taxon_summary
 from ..schema import EVALUATION_SCHEMA_VERSION
 from .diagnostics import (
     compute_ppi_split_diagnostics,
@@ -24,6 +24,7 @@ from .diagnostics import (
     native_value,
 )
 from .dispatch import protein_ids_in_pairs, TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT
+from .negative_sampling import taxon_pair_name
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"
@@ -38,6 +39,7 @@ INVOCATIONS_FILENAME = "invocations.jsonl"
 INPUT_HASH_FIELDS = (
     "pairs_file_sha256",
     "fasta_file_sha256",
+    "dataset_metadata_file_sha256",
     "protein_metadata_file_sha256",
     "sequence_clusters_file_sha256",
 )
@@ -210,11 +212,12 @@ def split_protein_ids(split_df: pd.DataFrame | None) -> set[str]:
 
 def split_species_summary(
         split_df: pd.DataFrame | None, protein_taxa: dict[str, str],
+        proteins: set[str] | None = None,
     ) -> dict[str, Any]:
     """
     Return compact protein and pair taxon counts for one optional split.
     """
-    proteins = split_protein_ids(split_df)
+    proteins = split_protein_ids(split_df) if proteins is None else proteins
     summary = protein_taxon_summary(proteins, protein_taxa)
     pair_counts: dict[str, int] = {}
     n_pairs_with_unknown_taxon = 0
@@ -243,15 +246,34 @@ def species_audit_metadata(
         protein_pairs: pd.DataFrame, train_df: pd.DataFrame,
         val_df: pd.DataFrame | None, test_df: pd.DataFrame,
         protein_taxa: dict[str, str],
+        split_to_proteins: dict[str, set[str]] | None = None,
+        total_proteins: set[str] | None = None,
     ) -> dict[str, Any]:
     """
     Return species coverage summaries without repeating per-pair metadata.
     """
+    split_to_proteins = split_to_proteins or {}
     return {
-        "total": split_species_summary(protein_pairs, protein_taxa),
-        "train": split_species_summary(train_df, protein_taxa),
-        "val": split_species_summary(val_df, protein_taxa),
-        "test": split_species_summary(test_df, protein_taxa),
+        "total": split_species_summary(
+            protein_pairs,
+            protein_taxa,
+            total_proteins,
+        ),
+        "train": split_species_summary(
+            train_df,
+            protein_taxa,
+            split_to_proteins.get(TRAIN_SPLIT),
+        ),
+        "val": split_species_summary(
+            val_df,
+            protein_taxa,
+            split_to_proteins.get(VAL_SPLIT),
+        ),
+        "test": split_species_summary(
+            test_df,
+            protein_taxa,
+            split_to_proteins.get(TEST_SPLIT),
+        ),
     }
 
 
@@ -273,6 +295,8 @@ def compute_split_metadata(
         sampling_metadata: dict[str, Any] | None = None,
         protein_taxa: dict[str, str] | None = None,
         protein_metadata_path: str | Path | None = None,
+        dataset_provenance: DatasetProvenance | None = None,
+        negative_construction: dict[str, Any] | None = None,
         task_name: str = "ppi",
     ) -> dict[str, Any]:
     """
@@ -294,6 +318,11 @@ def compute_split_metadata(
     train_proteins = split_protein_ids(train_df)
     val_proteins = split_protein_ids(val_df)
     test_proteins = split_protein_ids(test_df)
+    split_to_proteins = {
+        TRAIN_SPLIT: train_proteins,
+        VAL_SPLIT: val_proteins,
+        TEST_SPLIT: test_proteins,
+    }
     working_directory = Path.cwd()
     protein_taxa = protein_taxa or {}
     diagnostics = compute_ppi_split_diagnostics(
@@ -302,6 +331,7 @@ def compute_split_metadata(
         test_df=test_df,
         args=args,
         protein_pairs=protein_pairs,
+        split_to_proteins=split_to_proteins,
     )
     legacy_seed = getattr(args, "seed", 0)
     legacy_seed = 0 if legacy_seed is None else legacy_seed
@@ -329,13 +359,18 @@ def compute_split_metadata(
         "fasta_path": str(fasta_path),
         "pairs_file_size_bytes": pairs_path.stat().st_size,
         "fasta_file_size_bytes": fasta_path.stat().st_size,
-        "pairs_file_sha256": file_sha256(pairs_path),
+        "pairs_file_sha256": (
+            file_sha256(pairs_path)
+            if dataset_provenance is None
+            else dataset_provenance.pairs_sha256
+        ),
         "fasta_file_sha256": file_sha256(fasta_path),
         "n_input_pairs_before_filtering": n_input_pairs_before_filtering,
         "n_pairs_after_filtering": len(eligible_protein_pairs),
         "n_pairs_in_sampled_cohort": len(protein_pairs),
         "n_dropped_pairs": len(dropped_pairs),
         "sampling": sampling_metadata,
+        "negative_construction": negative_construction,
         "split_strategy": args.effective_split_strategy,
         "split_name": args.split_name,
         "split_col": args.split_col,
@@ -375,6 +410,8 @@ def compute_split_metadata(
             val_df=val_df,
             test_df=test_df,
             protein_taxa=protein_taxa,
+            split_to_proteins=split_to_proteins,
+            total_proteins=cohort_proteins,
         ),
         "diagnostics": diagnostics,
         "sequence_clusters": getattr(
@@ -445,6 +482,23 @@ def compute_split_metadata(
         if sequence_cluster_assignments_path is not None:
             metadata["sequence_cluster_assignments_path"] = path_string(
                 sequence_cluster_assignments_path)
+    if (
+        dataset_provenance is not None
+        and dataset_provenance.metadata_path is not None
+    ):
+        dataset_metadata_path = dataset_provenance.metadata_path
+        metadata.update({
+            "dataset_metadata_path": str(dataset_metadata_path),
+            "dataset_metadata_file_size_bytes": (
+                dataset_metadata_path.stat().st_size
+            ),
+            "dataset_metadata_file_sha256": (
+                dataset_provenance.metadata_sha256
+            ),
+            "dataset_metadata_pairs_binding": (
+                dataset_provenance.pairs_binding
+            ),
+        })
     return metadata
 
 

@@ -67,6 +67,45 @@ PTM preparation must analogously reconcile the declared protein identity,
 residue coordinate system, residue identity, and PTM type before assigning the
 canonical protein-site-PTM-type example.
 
+## PPI negative construction
+
+A generated label-0 PPI example means `sampled_unobserved_pair` under the
+declared positive-evidence snapshot. It is not evidence that the proteins do
+not interact. A source-provided label-0 row remains `source_provided`, with its
+biological meaning determined by the source rather than inferred by this
+repository.
+
+The current dataset-preparation boundary supports two generated policies:
+
+- `taxon_pair_matched` (default) samples only from taxon-pair strata represented
+  by positive examples. It allocates samples in proportion to positive stratum
+  counts, subject to candidate capacity. Every eligible endpoint must have a
+  `taxon_id`; missing taxonomy is an error and must not trigger a fallback to
+  global sampling.
+- `global` samples from the full unordered candidate-pair space without taxon
+  matching, even when taxonomy is available. It is an explicit sensitivity
+  baseline, not the default biological assumption.
+
+Both policies use proteins with sequences that occur in the eligible positive
+snapshot, exclude self-pairs and positives in that snapshot, and sample without
+replacement for a declared ratio and seed. They do not exclude undiscovered
+interactions or positives absent from the declared evidence snapshot.
+
+Generated negatives are currently constructed during dataset preparation,
+before split assignment (`before_split`). The later PPI splitter applies the
+same projection and drop rules to positive and generated examples. This
+compatibility behavior is not partition-aware negative construction and does
+not, by itself, establish conformance with any cataloged PPI protocol.
+
+Prepared-dataset metadata must record a `negative_construction` object with the
+label meaning, source or generated policy, evidence/input snapshot, timing, and
+realized ratio. Generated policies must additionally record the candidate
+universe, requested ratio, sampling seed, eligible-positive and protein counts,
+available-candidate count, sampled count, and taxon-pair summaries when
+applicable. Source-provided fields that are not known or applicable may be null.
+Downstream benchmark artifacts must retain enough of this identity to prevent
+results from different negative policies being pooled silently.
+
 ## Protocol invariants and optimization policy
 
 The projection and forbidden-overlap rules below define protocol membership.

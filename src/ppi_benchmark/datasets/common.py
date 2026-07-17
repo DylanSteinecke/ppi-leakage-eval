@@ -8,15 +8,11 @@ canonicalization, FASTA filtering, metadata, and output writing steps.
 
 import bz2
 import gzip
-import hashlib
 import json
 import lzma
-import math
-import random
 import shlex
 import sys
 import zipfile
-from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,14 +21,32 @@ from typing import Any, Iterable, Iterator, TextIO
 
 import pandas as pd
 
+from ..artifact_io import bytes_sha256, file_sha256
+from ..splitting.negative_sampling import (
+    finalize_negative_construction,
+    IndexedPairSpace as IndexedPairSpace,
+    NEGATIVE_SAMPLING_POLICY_CHOICES,
+    PPINegativeSamplingSpec,
+    require_taxonomy_for_negative_sampling as require_taxonomy_for_negative_sampling,
+    sample_negative_pairs as sample_negative_pairs,
+    TAXON_PAIR_MATCHED_POLICY,
+    taxon_pair_name as taxon_pair_name,
+    validate_negative_ratio as validate_negative_ratio,
+)
+from .pairs import (
+    normalize_labels as normalize_labels,
+    prepare_pair_columns,
+    validate_pair_columns as validate_pair_columns,
+)
+
 
 PAIRS_FILENAME = "pairs.csv"
 FASTA_FILENAME = "proteins.fasta"
 PROTEIN_METADATA_FILENAME = "protein_metadata.csv"
 METADATA_FILENAME = "dataset_metadata.json"
+DATASET_PAIRS_BINDING_FIELD = "_pairs_binding"
 CANONICAL_PAIR_COLUMNS = ["pair_id", "protein_a", "protein_b", "label"]
 PROTEIN_METADATA_COLUMNS = ["protein_id", "taxon_id"]
-REQUIRED_PAIR_COLUMNS = {"protein_a", "protein_b", "label"}
 SUPPORTED_TABLE_SUFFIXES = {
     ".csv": ",",
     ".tab": "\t",
@@ -59,6 +73,17 @@ class FastaData:
     """
     sequences: dict[str, str]
     taxon_ids: dict[str, str]
+
+
+@dataclass(frozen=True)
+class DatasetProvenance:
+    """Verified identity and optional preparation metadata for a pair file."""
+
+    pairs_sha256: str
+    metadata_path: Path | None = None
+    metadata_sha256: str | None = None
+    metadata: dict[str, Any] | None = None
+    pairs_binding: str | None = None
 
 
 def open_text_auto(input_path: str | Path) -> TextIO:
@@ -336,6 +361,22 @@ def discover_protein_metadata_path(
     return None
 
 
+def discover_dataset_metadata_path(
+        pairs_path: str | Path,
+        explicit_path: str | Path | None = None,
+    ) -> Path | None:
+    """Return an explicit dataset manifest or discover its canonical sidecar."""
+    if explicit_path is not None:
+        return Path(explicit_path)
+
+    pairs_path = Path(pairs_path)
+    candidate = pairs_path.with_name(METADATA_FILENAME)
+    if pairs_path.name == PAIRS_FILENAME and candidate.exists():
+        return candidate
+
+    return None
+
+
 def write_fasta(
         sequences: dict[str, str], protein_ids: Iterable[str],
         fasta_path: str | Path,
@@ -399,16 +440,85 @@ def protein_taxon_summary(
     return summary
 
 
-def file_sha256(input_path: str | Path) -> str:
-    """
-    Return the SHA256 digest for a file.
-    """
-    digest = hashlib.sha256()
-    with Path(input_path).open("rb") as fin:
-        for chunk in iter(lambda: fin.read(1024 * 1024), b""):
-            digest.update(chunk)
+def _read_dataset_metadata_with_hash(
+        metadata_path: str | Path, pairs_path: str | Path,
+        pairs_sha256: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+    """Read metadata once and verify its binding to the pair artifact."""
+    metadata_path = Path(metadata_path)
+    metadata_bytes = metadata_path.read_bytes()
+    metadata = json.loads(metadata_bytes.decode("utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            f"Dataset metadata must contain a JSON object: {metadata_path}"
+        )
 
-    return digest.hexdigest()
+    expected_sha256 = metadata.get("output_pairs_file_sha256")
+    if expected_sha256 is not None:
+        actual_sha256 = pairs_sha256 or file_sha256(pairs_path)
+        if expected_sha256 != actual_sha256:
+            raise ValueError(
+                f"Dataset metadata {metadata_path} does not describe "
+                f"{pairs_path}: output_pairs_file_sha256 does not match."
+            )
+        metadata[DATASET_PAIRS_BINDING_FIELD] = "sha256"
+        return metadata, bytes_sha256(metadata_bytes)
+
+    legacy_pairs_path = metadata.get("output_pairs_path")
+    if legacy_pairs_path is None:
+        raise ValueError(
+            f"Dataset metadata {metadata_path} is missing "
+            "output_pairs_file_sha256 and cannot be bound to the requested "
+            "pairs file. Regenerate it with the current ppi-prepare."
+        )
+    legacy_pairs_path = Path(legacy_pairs_path)
+    if not legacy_pairs_path.is_absolute():
+        working_directory = metadata.get("working_directory", Path.cwd())
+        legacy_pairs_path = Path(working_directory) / legacy_pairs_path
+    if legacy_pairs_path.resolve() != Path(pairs_path).resolve():
+        raise ValueError(
+            f"Legacy dataset metadata {metadata_path} does not identify "
+            f"{pairs_path}. Regenerate it with the current ppi-prepare."
+        )
+    metadata[DATASET_PAIRS_BINDING_FIELD] = "legacy_path_only"
+    return metadata, bytes_sha256(metadata_bytes)
+
+
+def read_dataset_metadata(
+        metadata_path: str | Path, pairs_path: str | Path,
+        pairs_sha256: str | None = None,
+    ) -> dict[str, Any]:
+    """Read dataset metadata and verify its binding to the pair artifact."""
+    metadata, _ = _read_dataset_metadata_with_hash(
+        metadata_path=metadata_path,
+        pairs_path=pairs_path,
+        pairs_sha256=pairs_sha256,
+    )
+    return metadata
+
+
+def read_dataset_provenance(
+        pairs_path: str | Path,
+        metadata_path: str | Path | None = None,
+    ) -> DatasetProvenance:
+    """Hash a pair artifact once and verify its optional metadata sidecar."""
+    pairs_sha256 = file_sha256(pairs_path)
+    if metadata_path is None:
+        return DatasetProvenance(pairs_sha256=pairs_sha256)
+
+    metadata_path = Path(metadata_path)
+    metadata, metadata_sha256 = _read_dataset_metadata_with_hash(
+        metadata_path=metadata_path,
+        pairs_path=pairs_path,
+        pairs_sha256=pairs_sha256,
+    )
+    return DatasetProvenance(
+        pairs_sha256=pairs_sha256,
+        metadata_path=metadata_path,
+        metadata_sha256=metadata_sha256,
+        metadata=metadata,
+        pairs_binding=metadata[DATASET_PAIRS_BINDING_FIELD],
+    )
 
 
 def file_size_bytes(input_path: str | Path) -> int:
@@ -563,103 +673,78 @@ def add_common_loader_args(parser: Any) -> None:
         help="Optional NCBI taxonomy ID applied to every FASTA record.",
     )
     parser.add_argument("--out-dir", default="processed")
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
 
 
-def validate_negative_ratio(negative_ratio: float) -> float:
+def add_negative_construction_args(
+        parser: Any, allow_source_pairs: bool = False,
+    ) -> None:
     """
-    Validate a finite positive negative-sampling ratio.
+    Add explicit negative-construction arguments to a loader parser.
     """
-    negative_ratio = float(negative_ratio)
-    if not math.isfinite(negative_ratio) or negative_ratio <= 0.0:
-        raise ValueError("negative_ratio must be finite and greater than 0.")
-
-    return negative_ratio
-
-
-def target_negative_count(n_positive: int, negative_ratio: float) -> int:
-    """
-    Return the requested number of sampled negatives.
-    """
-    negative_ratio = validate_negative_ratio(negative_ratio)
-    if n_positive <= 0:
-        raise ValueError("Cannot sample negatives without positive pairs.")
-
-    target_n_negatives = round(negative_ratio * n_positive)
-    target_n_negatives = max(1, target_n_negatives)
-
-    return int(target_n_negatives)
-
-
-def unordered_pair_key(protein_a: str, protein_b: str) -> tuple[str, str]:
-    """
-    Return the canonical unordered key for one protein pair.
-    """
-    return tuple(sorted((protein_a, protein_b)))
-
-
-def validate_pair_columns(pairs: pd.DataFrame) -> None:
-    """
-    Raise if required canonical pair columns are absent.
-    """
-    missing_columns = sorted(REQUIRED_PAIR_COLUMNS - set(pairs.columns))
-    if missing_columns:
-        raise ValueError(
-            "Pair table is missing required columns: "
-            f"{missing_columns}")
-
-
-def normalize_labels(
-        labels: pd.Series, context: str = "Pair table",
-    ) -> pd.Series:
-    """
-    Return labels as integer 0/1 values.
-    """
-    if labels.isna().any():
-        raise ValueError(f"{context} label column contains missing values.")
-
-    try:
-        numeric_labels = pd.to_numeric(labels, errors="raise")
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{context} label column must contain only 0/1 values.") from exc
-
-    unexpected_values = sorted(
-        value for value in pd.unique(numeric_labels) if value not in {0, 1})
-    if unexpected_values:
-        raise ValueError(
-            f"{context} label column must contain only 0/1 values. "
-            f"Found: {unexpected_values}")
-
-    return numeric_labels.astype(int)
-
-
-def prepare_pair_columns(pairs: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return normalized protein and label columns before pair canonicalization.
-    """
-    validate_pair_columns(pairs)
-    work = pairs[["protein_a", "protein_b", "label"]].copy()
-    missing_id_mask = (
-        work["protein_a"].isna()
-        | work["protein_b"].isna()
+    group = parser.add_argument_group("Negative construction")
+    construction = group.add_mutually_exclusive_group(
+        required=allow_source_pairs,
     )
-    work["protein_a"] = work["protein_a"].astype(str).str.strip()
-    work["protein_b"] = work["protein_b"].astype(str).str.strip()
-    missing_id_mask = (
-        missing_id_mask
-        | work["protein_a"].eq("")
-        | work["protein_b"].eq("")
+    if allow_source_pairs:
+        construction.add_argument(
+            "--negative-pairs",
+            default=None,
+            help="Source-provided negative edge list.",
+        )
+    construction.add_argument(
+        "--sample-negatives",
+        action="store_true",
+        help="Generate sampled-unobserved negative pairs.",
     )
-    if missing_id_mask.any():
-        raise ValueError(
-            f"Pair table contains {int(missing_id_mask.sum())} rows with "
-            "missing protein IDs.")
+    group.add_argument(
+        "--negative-sampling-policy",
+        choices=NEGATIVE_SAMPLING_POLICY_CHOICES,
+        default=None,
+        help=(
+            "Generated-negative policy (default: taxon_pair_matched). "
+            "Use global explicitly to sample without taxonomy matching."
+        ),
+    )
+    group.add_argument(
+        "--negative-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Requested generated-negative to positive-pair ratio "
+            "(default: 1.0)."
+        ),
+    )
+    group.add_argument(
+        "--negative-sampling-seed",
+        "--seed",
+        dest="negative_sampling_seed",
+        type=int,
+        default=None,
+        help=(
+            "Generated-negative seed (default: 0); --seed is a "
+            "compatibility alias."
+        ),
+    )
 
-    work["label"] = normalize_labels(work["label"])
 
-    return work
+def resolve_generated_negative_spec(args: Any) -> PPINegativeSamplingSpec:
+    """Resolve generated-negative defaults and normalize a loader namespace."""
+    spec = PPINegativeSamplingSpec(
+        policy=args.negative_sampling_policy or TAXON_PAIR_MATCHED_POLICY,
+        negative_ratio=(
+            1.0 if args.negative_ratio is None else args.negative_ratio
+        ),
+        seed=(
+            0
+            if args.negative_sampling_seed is None
+            else args.negative_sampling_seed
+        ),
+    )
+    args.negative_sampling_policy = spec.policy
+    args.negative_ratio = spec.negative_ratio
+    args.negative_sampling_seed = spec.seed
+    return spec
 
 
 def require_mapping_columns(
@@ -831,7 +916,9 @@ def contradiction_examples(
     return examples
 
 
-def canonicalize_pairs(pairs: pd.DataFrame) -> PairProcessingResult:
+def canonicalize_pairs(
+        pairs: pd.DataFrame, sort_output: bool = True,
+    ) -> PairProcessingResult:
     """
     Canonicalize unordered protein pairs and count removed rows.
     """
@@ -859,9 +946,12 @@ def canonicalize_pairs(pairs: pd.DataFrame) -> PairProcessingResult:
             f"Found {len(contradictions)} unordered protein pairs with "
             f"contradictory labels. Examples: {examples}")
 
-    canonical_pairs = deduped.sort_values(
-        ["label", "protein_a", "protein_b"],
-    ).reset_index(drop=True)
+    if sort_output:
+        canonical_pairs = deduped.sort_values(
+            ["label", "protein_a", "protein_b"],
+        ).reset_index(drop=True)
+    else:
+        canonical_pairs = deduped.reset_index(drop=True)
     metadata = {
         "n_self_pairs_removed": n_self_pairs_removed,
         "n_duplicate_pairs_removed": n_duplicate_pairs_removed,
@@ -936,402 +1026,6 @@ def input_protein_count(pairs: pd.DataFrame) -> int:
     return int(len(proteins))
 
 
-def observed_pair_keys(pairs: pd.DataFrame) -> set[tuple[str, str]]:
-    """
-    Return non-self unordered pair keys from a pair table.
-    """
-    prepared = prepare_pair_columns(pairs)
-    keys = {
-        unordered_pair_key(protein_a, protein_b)
-        for protein_a, protein_b in zip(
-            prepared["protein_a"],
-            prepared["protein_b"],
-        )
-        if protein_a != protein_b
-    }
-
-    return keys
-
-
-def complement_index_from_rank(
-        allowed_rank: int, forbidden_indexes: list[int],
-    ) -> int:
-    """
-    Map a rank in a complement to its full candidate-space index.
-    """
-    lower = allowed_rank
-    upper = allowed_rank + len(forbidden_indexes)
-    while lower < upper:
-        midpoint = (lower + upper) // 2
-        n_allowed_through_midpoint = (
-            midpoint + 1 - bisect_right(forbidden_indexes, midpoint)
-        )
-        if n_allowed_through_midpoint <= allowed_rank:
-            lower = midpoint + 1
-        else:
-            upper = midpoint
-
-    return lower
-
-
-def sample_complement_indexes(
-        n_candidates: int, forbidden_indexes: Iterable[int],
-        n_samples: int, rng: random.Random,
-    ) -> list[int]:
-    """
-    Sample indexes without materializing the allowed candidate complement.
-    """
-    forbidden_indexes = sorted(set(forbidden_indexes))
-    n_available = n_candidates - len(forbidden_indexes)
-    if n_samples > n_available:
-        raise ValueError(
-            f"Requested {n_samples} samples from {n_available} candidates.")
-
-    sampled_ranks = rng.sample(range(n_available), n_samples)
-
-    return [
-        complement_index_from_rank(rank, forbidden_indexes)
-        for rank in sampled_ranks
-    ]
-
-
-class IndexedPairSpace:
-    """
-    Indexed combinations or Cartesian products of protein IDs.
-    """
-    def __init__(
-            self, protein_a_ids: list[str],
-            protein_b_ids: list[str] | None = None,
-        ) -> None:
-        self.protein_a_ids = protein_a_ids
-        self.protein_b_ids = protein_b_ids
-        self.protein_a_indexes = {
-            protein_id: index
-            for index, protein_id in enumerate(protein_a_ids)
-        }
-        if protein_b_ids is None:
-            n_proteins = len(protein_a_ids)
-            self.offsets = [
-                index * (2 * n_proteins - index - 1) // 2
-                for index in range(n_proteins)
-            ]
-            self.protein_b_indexes = None
-            self.n_candidates = n_proteins * (n_proteins - 1) // 2
-        else:
-            self.offsets = None
-            self.protein_b_indexes = {
-                protein_id: index
-                for index, protein_id in enumerate(protein_b_ids)
-            }
-            self.n_candidates = len(protein_a_ids) * len(protein_b_ids)
-
-    def pair_index(self, protein_a: str, protein_b: str) -> int:
-        """
-        Encode one candidate pair as an integer index.
-        """
-        if self.protein_b_ids is None:
-            item_a_index = self.protein_a_indexes[protein_a]
-            item_b_index = self.protein_a_indexes[protein_b]
-            if item_a_index > item_b_index:
-                item_a_index, item_b_index = item_b_index, item_a_index
-            return (
-                self.offsets[item_a_index]
-                + item_b_index
-                - item_a_index
-                - 1
-            )
-
-        if protein_a in self.protein_a_indexes:
-            left_id, right_id = protein_a, protein_b
-        else:
-            left_id, right_id = protein_b, protein_a
-
-        return (
-            self.protein_a_indexes[left_id] * len(self.protein_b_ids)
-            + self.protein_b_indexes[right_id]
-        )
-
-    def pair_from_index(self, pair_index: int) -> tuple[str, str]:
-        """
-        Decode one integer index as a canonical protein pair.
-        """
-        if self.protein_b_ids is None:
-            item_a_index = bisect_right(self.offsets, pair_index) - 1
-            item_b_index = (
-                item_a_index + 1 + pair_index - self.offsets[item_a_index]
-            )
-            return (
-                self.protein_a_ids[item_a_index],
-                self.protein_a_ids[item_b_index],
-            )
-
-        item_a_index, item_b_index = divmod(
-            pair_index,
-            len(self.protein_b_ids),
-        )
-
-        return unordered_pair_key(
-            self.protein_a_ids[item_a_index],
-            self.protein_b_ids[item_b_index],
-        )
-
-
-def sample_pair_space(
-        pair_space: IndexedPairSpace,
-        forbidden_pairs: set[tuple[str, str]],
-        n_samples: int, rng: random.Random,
-    ) -> tuple[list[tuple[str, str]], int]:
-    """
-    Sample from an indexed pair space while excluding observed pairs.
-    """
-    forbidden_indexes = [
-        pair_space.pair_index(*pair)
-        for pair in forbidden_pairs
-    ]
-    sampled_indexes = sample_complement_indexes(
-        n_candidates=pair_space.n_candidates,
-        forbidden_indexes=forbidden_indexes,
-        n_samples=n_samples,
-        rng=rng,
-    )
-
-    return (
-        [pair_space.pair_from_index(index) for index in sampled_indexes],
-        pair_space.n_candidates - len(forbidden_pairs),
-    )
-
-
-def allocate_stratified_samples(
-        weights: dict[tuple[str, str], int],
-        capacities: dict[tuple[str, str], int],
-        target_count: int,
-    ) -> dict[tuple[str, str], int]:
-    """
-    Allocate an exact sample target proportionally across bounded strata.
-    """
-    allocations = {key: 0 for key in weights}
-    remaining = target_count
-    while remaining:
-        active = [
-            key for key in sorted(weights)
-            if allocations[key] < capacities[key]
-        ]
-        if not active:
-            raise ValueError(
-                f"Cannot allocate {target_count} samples across the available "
-                "strata.")
-
-        total_weight = sum(weights[key] for key in active)
-        quotas = {
-            key: remaining * weights[key] / total_weight
-            for key in active
-        }
-        grants = {
-            key: min(
-                capacities[key] - allocations[key],
-                int(quotas[key]),
-            )
-            for key in active
-        }
-        n_granted = sum(grants.values())
-        if n_granted == 0:
-            ranked_keys = sorted(
-                active,
-                key=lambda key: (-quotas[key], key),
-            )
-            for key in ranked_keys[:remaining]:
-                grants[key] = 1
-            n_granted = sum(grants.values())
-
-        for key, count in grants.items():
-            allocations[key] += count
-        remaining -= n_granted
-
-    return allocations
-
-
-def taxon_pair_key(taxon_a: str, taxon_b: str) -> tuple[str, str]:
-    """
-    Return a canonical unordered taxonomy-pair key.
-    """
-    return tuple(sorted((taxon_a, taxon_b)))
-
-
-def taxon_pair_name(taxon_pair: tuple[str, str]) -> str:
-    """
-    Return a compact JSON key for one taxonomy-pair stratum.
-    """
-    return "|".join(taxon_pair)
-
-
-def sample_taxon_stratified_negative_keys(
-        protein_ids: list[str], positive_keys: set[tuple[str, str]],
-        protein_taxa: dict[str, str], target_count: int,
-        rng: random.Random,
-    ) -> tuple[list[tuple[str, str]], dict[str, dict[str, int]]]:
-    """
-    Sample within taxonomy-pair strata represented by positive interactions.
-    """
-    missing_taxa = sorted(
-        protein_id for protein_id in protein_ids
-        if protein_id not in protein_taxa
-    )
-    if missing_taxa:
-        raise ValueError(
-            "Species-aware negative sampling requires a taxon_id for every "
-            f"eligible protein. Missing {len(missing_taxa)}; examples: "
-            f"{missing_taxa[:10]}")
-
-    proteins_by_taxon: dict[str, list[str]] = {}
-    for protein_id in protein_ids:
-        proteins_by_taxon.setdefault(
-            protein_taxa[protein_id],
-            [],
-        ).append(protein_id)
-
-    positives_by_stratum: dict[
-        tuple[str, str], set[tuple[str, str]]
-    ] = {}
-    for protein_a, protein_b in positive_keys:
-        stratum = taxon_pair_key(
-            protein_taxa[protein_a],
-            protein_taxa[protein_b],
-        )
-        positives_by_stratum.setdefault(stratum, set()).add(
-            (protein_a, protein_b))
-
-    capacities: dict[tuple[str, str], int] = {}
-    weights: dict[tuple[str, str], int] = {}
-    for stratum, stratum_positives in positives_by_stratum.items():
-        taxon_a, taxon_b = stratum
-        if taxon_a == taxon_b:
-            n_proteins = len(proteins_by_taxon[taxon_a])
-            n_candidates = n_proteins * (n_proteins - 1) // 2
-        else:
-            n_candidates = (
-                len(proteins_by_taxon[taxon_a])
-                * len(proteins_by_taxon[taxon_b])
-            )
-        capacities[stratum] = n_candidates - len(stratum_positives)
-        weights[stratum] = len(stratum_positives)
-
-    if sum(capacities.values()) < target_count:
-        raise ValueError(
-            "Not enough possible negative pairs in the observed taxon-pair "
-            f"strata. Requested {target_count}, available "
-            f"{sum(capacities.values())}.")
-    allocations = allocate_stratified_samples(
-        weights=weights,
-        capacities=capacities,
-        target_count=target_count,
-    )
-
-    sampled_keys = []
-    for stratum in sorted(positives_by_stratum):
-        taxon_a, taxon_b = stratum
-        protein_a_ids = proteins_by_taxon[taxon_a]
-        if taxon_a == taxon_b:
-            protein_b_ids = None
-        else:
-            protein_b_ids = proteins_by_taxon[taxon_b]
-        stratum_samples, _ = sample_pair_space(
-            pair_space=IndexedPairSpace(protein_a_ids, protein_b_ids),
-            forbidden_pairs=positives_by_stratum[stratum],
-            n_samples=allocations[stratum],
-            rng=rng,
-        )
-        sampled_keys.extend(stratum_samples)
-
-    metadata = {
-        "positive_pairs_by_taxon_pair": {
-            taxon_pair_name(key): weights[key]
-            for key in sorted(weights)
-        },
-        "sampled_negatives_by_taxon_pair": {
-            taxon_pair_name(key): allocations[key]
-            for key in sorted(allocations)
-        },
-        "available_negatives_by_taxon_pair": {
-            taxon_pair_name(key): capacities[key]
-            for key in sorted(capacities)
-        },
-    }
-
-    return sampled_keys, metadata
-
-
-def sample_negative_pairs(
-        positive_pairs: pd.DataFrame, negative_ratio: float,
-        seed: int, allowed_protein_ids: Iterable[str] | None = None,
-        protein_taxa: dict[str, str] | None = None,
-    ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """
-    Sample unobserved pairs globally or within observed taxon-pair strata.
-    """
-    prepared = prepare_pair_columns(positive_pairs)
-    prepared = prepared.loc[prepared["protein_a"] != prepared["protein_b"]]
-    if allowed_protein_ids is not None:
-        allowed_protein_ids = set(allowed_protein_ids)
-        allowed_mask = (
-            prepared["protein_a"].isin(allowed_protein_ids)
-            & prepared["protein_b"].isin(allowed_protein_ids)
-        )
-        prepared = prepared.loc[allowed_mask]
-    if prepared.empty:
-        raise ValueError(
-            "Cannot sample negatives without positive pairs whose proteins "
-            "have FASTA sequences.")
-
-    protein_ids = sorted(set(prepared["protein_a"]) | set(prepared["protein_b"]))
-    positive_keys = observed_pair_keys(prepared)
-    target_n_negatives = target_negative_count(
-        len(positive_keys),
-        negative_ratio,
-    )
-    n_proteins = len(protein_ids)
-    rng = random.Random(seed)
-    taxon_metadata: dict[str, Any] = {}
-    if protein_taxa:
-        sampled_keys, taxon_metadata = sample_taxon_stratified_negative_keys(
-            protein_ids=protein_ids,
-            positive_keys=positive_keys,
-            protein_taxa=protein_taxa,
-            target_count=target_n_negatives,
-            rng=rng,
-        )
-        n_available_negatives = sum(
-            taxon_metadata["available_negatives_by_taxon_pair"].values()
-        )
-    else:
-        n_possible_pairs = n_proteins * (n_proteins - 1) // 2
-        n_available_negatives = n_possible_pairs - len(positive_keys)
-        if n_available_negatives < target_n_negatives:
-            raise ValueError(
-                "Not enough possible negative pairs to satisfy "
-                f"negative_ratio={negative_ratio}. Requested "
-                f"{target_n_negatives}, available {n_available_negatives}.")
-        sampled_keys, n_available_negatives = sample_pair_space(
-            pair_space=IndexedPairSpace(protein_ids),
-            forbidden_pairs=positive_keys,
-            n_samples=target_n_negatives,
-            rng=rng,
-        )
-
-    sampled_pairs = pd.DataFrame(sampled_keys, columns=["protein_a", "protein_b"])
-    sampled_pairs["label"] = 0
-    metadata = {
-        "target_n_negatives": int(target_n_negatives),
-        "n_sampled_negatives": int(len(sampled_pairs)),
-        "n_positive_pairs_for_sampling": int(len(positive_keys)),
-        "n_proteins_for_sampling": int(n_proteins),
-        "n_available_negative_pairs": int(n_available_negatives),
-        "species_aware_sampling": bool(protein_taxa),
-        **taxon_metadata,
-    }
-
-    return sampled_pairs, metadata
-
-
 def prepare_output_dir(
         out_dir: str | Path, dataset_name: str, overwrite: bool,
     ) -> Path:
@@ -1400,7 +1094,7 @@ def canonicalize_filter_and_assign(
     """
     Run pair canonicalization, FASTA filtering, and final pair ID assignment.
     """
-    canonicalized = canonicalize_pairs(raw_pairs)
+    canonicalized = canonicalize_pairs(raw_pairs, sort_output=False)
     filtered = filter_pairs_missing_sequences(canonicalized.pairs, sequences)
     if filtered.pairs.empty:
         raise ValueError("No pairs remain after missing-sequence filtering.")
@@ -1455,6 +1149,22 @@ def write_prepared_dataset(
     write_protein_metadata(proteins, protein_taxa, protein_metadata_path)
     input_paths_json, input_sha256, input_sizes = input_path_metadata(
         input_paths)
+    negative_construction = finalize_negative_construction(
+        construction=loader_metadata.get("negative_construction"),
+        pairs=processed.pairs,
+        protein_taxa=protein_taxa,
+        input_sha256=input_sha256,
+    )
+    if negative_construction is not None:
+        loader_metadata = {
+            **loader_metadata,
+            "negative_construction": negative_construction,
+        }
+    negative_sampling_seed = (
+        negative_construction.get("seed")
+        if negative_construction is not None
+        else getattr(args, "negative_sampling_seed", None)
+    )
     metadata = {
         "dataset_name": args.dataset_name,
         "loader_name": loader_name,
@@ -1467,7 +1177,9 @@ def write_prepared_dataset(
         "input_file_sha256": input_sha256,
         "input_file_size_bytes": input_sizes,
         **output_path_metadata,
-        "seed": int(args.seed),
+        "output_pairs_file_sha256": file_sha256(pairs_path),
+        "seed": negative_sampling_seed,
+        "negative_sampling_seed": negative_sampling_seed,
         **loader_metadata,
         **processed.metadata,
         "species": protein_taxon_summary(proteins, protein_taxa),

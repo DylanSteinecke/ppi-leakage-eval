@@ -1,6 +1,7 @@
 import gzip
 import json
 import math
+import random
 import zipfile
 from itertools import combinations, product
 
@@ -12,16 +13,23 @@ from ppi_benchmark.datasets.common import (
     apply_id_mapping_to_pairs,
     canonicalize_filter_and_assign,
     canonicalize_pairs,
-    IndexedPairSpace,
     infer_separator,
     read_fasta,
     read_fasta_data,
     read_fasta_with_taxa,
     read_protein_taxa,
     read_table,
-    sample_negative_pairs,
-    validate_negative_ratio,
     write_fasta,
+)
+from ppi_benchmark.splitting.negative_sampling import (
+    GLOBAL_POLICY,
+    IndexedPairSpace,
+    PPINegativeSamplingResult,
+    PPINegativeSamplingSpec,
+    sample_complement_indexes,
+    sample_negative_pairs,
+    TAXON_PAIR_MATCHED_POLICY,
+    validate_negative_ratio,
 )
 
 
@@ -56,6 +64,15 @@ def pair_frame(rows):
     return pd.DataFrame(
         rows,
         columns=["protein_a", "protein_b", "label"],
+    )
+
+
+def negative_spec(policy=GLOBAL_POLICY, ratio=1.0, seed=0):
+    """Return a compact explicit negative-sampling specification."""
+    return PPINegativeSamplingSpec(
+        policy=policy,
+        negative_ratio=ratio,
+        seed=seed,
     )
 
 
@@ -203,10 +220,69 @@ def test_read_table_selects_member_from_multi_file_zip(tmp_path):
         read_table(archive_path)
 
 
-@pytest.mark.parametrize("negative_ratio", [0.0, -1.0, math.inf, math.nan])
+@pytest.mark.parametrize(
+    "negative_ratio",
+    [0.0, -1.0, math.inf, math.nan, True, "1"],
+)
 def test_negative_ratio_must_be_finite_positive(negative_ratio):
     with pytest.raises(ValueError, match="negative_ratio"):
         validate_negative_ratio(negative_ratio)
+
+
+def test_negative_sampling_spec_rejects_unknown_policy():
+    with pytest.raises(ValueError, match="Unknown negative sampling policy"):
+        PPINegativeSamplingSpec(policy="easy_random")
+
+
+@pytest.mark.parametrize("seed", [True, 1.5, "3"])
+def test_negative_sampling_spec_requires_integer_seed(seed):
+    with pytest.raises(ValueError, match="seed must be an integer"):
+        PPINegativeSamplingSpec(seed=seed)
+
+
+@pytest.mark.parametrize(
+    "loader_args",
+    [
+        ("generic_edges", "--positive-pairs", "missing.csv"),
+        ("biogrid", "--interactions", "missing.tsv"),
+    ],
+)
+def test_loaders_reject_invalid_negative_ratio_before_input_loading(
+        tmp_path, loader_args):
+    loader, input_flag, input_name = loader_args
+
+    with pytest.raises(SystemExit, match="negative_ratio"):
+        run_prep_cli(
+            loader,
+            "--dataset-name", "invalid_ratio",
+            input_flag, tmp_path / input_name,
+            "--fasta", tmp_path / "missing.fasta",
+            "--sample-negatives",
+            "--negative-ratio", "0",
+        )
+
+
+@pytest.mark.parametrize(
+    "loader_args",
+    [
+        ("generic_edges", "--positive-pairs", "missing.csv"),
+        ("biogrid", "--interactions", "missing.tsv"),
+    ],
+)
+def test_matched_loaders_reject_absent_taxonomy_before_pair_loading(
+        tmp_path, loader_args):
+    fasta_path = tmp_path / "proteins.fasta"
+    write_test_fasta(fasta_path, ["A", "B"])
+    loader, input_flag, input_name = loader_args
+
+    with pytest.raises(SystemExit, match="requires taxonomy metadata"):
+        run_prep_cli(
+            loader,
+            "--dataset-name", "missing_taxonomy",
+            input_flag, tmp_path / input_name,
+            "--fasta", fasta_path,
+            "--sample-negatives",
+        )
 
 
 def test_self_pairs_are_removed_and_counted():
@@ -271,11 +347,11 @@ def test_sampled_negatives_do_not_overlap_positives():
         ("C", "D", 1),
     ])
 
-    negatives, metadata = sample_negative_pairs(
+    result = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=1.0,
-        seed=7,
+        spec=negative_spec(seed=7),
     )
+    negatives, metadata = result
     positive_keys = {
         tuple(sorted((row.protein_a, row.protein_b)))
         for row in positives.itertuples()
@@ -286,6 +362,9 @@ def test_sampled_negatives_do_not_overlap_positives():
     }
 
     assert metadata["target_n_negatives"] == 2
+    assert isinstance(result, PPINegativeSamplingResult)
+    assert result.pairs is negatives
+    assert result.metadata is metadata
     assert len(negative_keys) == 2
     assert positive_keys.isdisjoint(negative_keys)
 
@@ -299,8 +378,7 @@ def test_negative_sampling_uses_only_proteins_with_sequences():
 
     negatives, metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=1.0,
-        seed=3,
+        spec=negative_spec(seed=3),
         allowed_protein_ids={"A", "B", "C", "D"},
     )
 
@@ -319,8 +397,7 @@ def test_negative_sampling_scales_without_materializing_pair_universe():
 
     negatives, metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=0.001,
-        seed=9,
+        spec=negative_spec(ratio=0.001, seed=9),
     )
 
     assert len(negatives) == 5
@@ -364,6 +441,22 @@ def test_indexed_cross_taxon_pair_space_matches_explicit_pairs():
         assert pair_space.pair_index(*reversed(pair)) == index
 
 
+def test_complement_sampling_matches_materialized_rank_reference():
+    forbidden = [1, 2, 7, 11, 13]
+    allowed = [index for index in range(18) if index not in forbidden]
+    sampled_ranks = random.Random(23).sample(range(len(allowed)), 8)
+    expected = [allowed[rank] for rank in sampled_ranks]
+
+    observed = sample_complement_indexes(
+        n_candidates=18,
+        forbidden_indexes=forbidden,
+        n_samples=8,
+        rng=random.Random(23),
+    )
+
+    assert observed == expected
+
+
 def test_negative_sampling_stays_within_positive_species_strata():
     positives = pair_frame([
         ("A", "B", 1),
@@ -378,8 +471,7 @@ def test_negative_sampling_stays_within_positive_species_strata():
 
     negatives, metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=1.0,
-        seed=5,
+        spec=negative_spec(TAXON_PAIR_MATCHED_POLICY, seed=5),
         protein_taxa=protein_taxa,
     )
 
@@ -407,8 +499,7 @@ def test_negative_sampling_preserves_observed_cross_species_stratum():
 
     negatives, metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=1.0,
-        seed=7,
+        spec=negative_spec(TAXON_PAIR_MATCHED_POLICY, seed=7),
         protein_taxa=protein_taxa,
     )
 
@@ -437,14 +528,20 @@ def test_negative_sampling_handles_mixed_taxon_pair_strata_reproducibly():
 
     first_negatives, first_metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=0.5,
-        seed=17,
+        spec=negative_spec(
+            TAXON_PAIR_MATCHED_POLICY,
+            ratio=0.5,
+            seed=17,
+        ),
         protein_taxa=protein_taxa,
     )
     second_negatives, second_metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=0.5,
-        seed=17,
+        spec=negative_spec(
+            TAXON_PAIR_MATCHED_POLICY,
+            ratio=0.5,
+            seed=17,
+        ),
         protein_taxa=protein_taxa,
     )
 
@@ -466,10 +563,48 @@ def test_species_aware_negative_sampling_rejects_missing_taxa():
     with pytest.raises(ValueError, match="taxon_id for every eligible protein"):
         sample_negative_pairs(
             positive_pairs=positives,
-            negative_ratio=1.0,
-            seed=0,
+            spec=negative_spec(TAXON_PAIR_MATCHED_POLICY),
             protein_taxa={"A": "1", "B": "1", "C": "1"},
         )
+
+
+@pytest.mark.parametrize("protein_taxa", [None, {}])
+def test_taxon_pair_matched_sampling_rejects_absent_taxonomy(protein_taxa):
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+    ])
+
+    with pytest.raises(ValueError, match="--negative-sampling-policy global"):
+        sample_negative_pairs(
+            positive_pairs=positives,
+            spec=negative_spec(TAXON_PAIR_MATCHED_POLICY),
+            protein_taxa=protein_taxa,
+        )
+
+
+def test_global_negative_sampling_ignores_supplied_taxonomy():
+    positives = pair_frame([
+        ("A", "B", 1),
+        ("C", "D", 1),
+    ])
+    protein_taxa = {"A": "1", "B": "1", "C": "2", "D": "2"}
+
+    negatives, metadata = sample_negative_pairs(
+        positive_pairs=positives,
+        spec=negative_spec(GLOBAL_POLICY, seed=5),
+        protein_taxa=protein_taxa,
+    )
+
+    assert len(negatives) == 2
+    assert metadata["negative_sampling_policy"] == GLOBAL_POLICY
+    assert metadata["species_aware_sampling"] is False
+    assert metadata["taxon_composition"]["sampled_negative_pairs"] == {
+        "n_same_taxon": 0,
+        "n_cross_taxon": 2,
+        "n_missing_taxon": 0,
+        "counts_by_taxon_pair": {"1|2": 2},
+    }
 
 
 def test_negative_sampling_redistributes_from_saturated_species_strata():
@@ -485,8 +620,7 @@ def test_negative_sampling_redistributes_from_saturated_species_strata():
 
     negatives, metadata = sample_negative_pairs(
         positive_pairs=positives,
-        negative_ratio=1.0,
-        seed=3,
+        spec=negative_spec(TAXON_PAIR_MATCHED_POLICY, seed=3),
         allowed_protein_ids=protein_taxa,
         protein_taxa=protein_taxa,
     )
@@ -508,8 +642,7 @@ def test_negative_sampling_fails_when_not_enough_candidates():
     with pytest.raises(ValueError, match="Not enough possible negative pairs"):
         sample_negative_pairs(
             positive_pairs=positives,
-            negative_ratio=1.0,
-            seed=0,
+            spec=negative_spec(),
         )
 
 
@@ -637,6 +770,44 @@ def test_generic_edges_positive_negative_cli_writes_canonical_outputs(tmp_path):
     assert metadata["loader_name"] == "generic_edges"
     assert metadata["n_positive_input"] == 2
     assert metadata["n_negative_input"] == 2
+    assert metadata["negative_construction"]["policy"] == "source_provided"
+    assert (
+        metadata["negative_construction"]["label_meaning"]
+        == "source_provided_negative"
+    )
+    assert metadata["negative_construction"]["seed"] is None
+    assert metadata["negative_sampling_seed"] is None
+    assert metadata["seed"] is None
+    assert len(metadata["output_pairs_file_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "sampling_args",
+    [
+        ("--negative-sampling-policy", "global"),
+        ("--negative-ratio", "1.0"),
+        ("--negative-sampling-seed", "0"),
+    ],
+)
+def test_generic_source_negatives_reject_generated_sampling_options(
+        tmp_path, sampling_args):
+    fasta_path = tmp_path / "proteins.fasta"
+    positives_path = tmp_path / "positives.csv"
+    negatives_path = tmp_path / "negatives.csv"
+    write_test_fasta(fasta_path, ["A", "B", "C", "D"])
+    write_text(positives_path, "protein_a,protein_b\nA,B\n")
+    write_text(negatives_path, "protein_a,protein_b\nC,D\n")
+
+    with pytest.raises(SystemExit, match="can only be used"):
+        run_prep_cli(
+            "generic_edges",
+            "--dataset-name", "invalid_source_options",
+            "--positive-pairs", positives_path,
+            "--negative-pairs", negatives_path,
+            *sampling_args,
+            "--fasta", fasta_path,
+            "--out-dir", tmp_path / "processed",
+        )
 
 
 def test_generic_edges_sampled_negatives_are_reproducible(tmp_path):
@@ -653,15 +824,49 @@ def test_generic_edges_sampled_negatives_are_reproducible(tmp_path):
         "--out-dir", out_dir,
         "--sample-negatives",
         "--negative-ratio", "1.0",
-        "--seed", "13",
+        "--negative-sampling-policy", "global",
     ]
-    run_prep_cli(*common_args, "--dataset-name", "sampled_one")
-    run_prep_cli(*common_args, "--dataset-name", "sampled_two")
+    run_prep_cli(
+        *common_args,
+        "--dataset-name", "sampled_one",
+        "--seed", "13",
+    )
+    run_prep_cli(
+        *common_args,
+        "--dataset-name", "sampled_two",
+        "--negative-sampling-seed", "13",
+    )
 
     first_pairs = pd.read_csv(out_dir / "sampled_one" / "pairs.csv")
     second_pairs = pd.read_csv(out_dir / "sampled_two" / "pairs.csv")
+    metadata = json.loads(
+        (out_dir / "sampled_two" / "dataset_metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     pd.testing.assert_frame_equal(first_pairs, second_pairs)
+    assert metadata["negative_sampling_policy"] == GLOBAL_POLICY
+    assert metadata["negative_sampling_seed"] == 13
+    assert metadata["negative_construction"]["policy"] == GLOBAL_POLICY
+    assert metadata["negative_construction"]["seed"] == 13
+
+
+def test_generic_edges_default_matched_policy_requires_taxonomy(tmp_path):
+    fasta_path = tmp_path / "proteins.fasta"
+    positives_path = tmp_path / "positives.csv"
+    write_test_fasta(fasta_path, ["A", "B", "C", "D"])
+    write_text(positives_path, "protein_a,protein_b\nA,B\nC,D\n")
+
+    with pytest.raises(SystemExit, match="--negative-sampling-policy global"):
+        run_prep_cli(
+            "generic_edges",
+            "--dataset-name", "missing_taxonomy",
+            "--positive-pairs", positives_path,
+            "--fasta", fasta_path,
+            "--out-dir", tmp_path / "processed",
+            "--sample-negatives",
+        )
 
 
 def test_prepared_protein_metadata_contains_only_surviving_proteins(tmp_path):
@@ -831,6 +1036,12 @@ def test_biogrid_cli_filters_model_organism_and_writes_metadata(tmp_path):
     assert metadata["id_mapping_used"] is False
     assert set(protein_metadata["taxon_id"]) == {"559292"}
     assert metadata["species_aware_sampling"] is True
+    assert (
+        metadata["negative_construction"]["policy"]
+        == TAXON_PAIR_MATCHED_POLICY
+    )
+    assert metadata["negative_construction"]["timing"] == "before_split"
+    assert metadata["negative_construction"]["partition_aware"] is False
     assert metadata["sampled_negatives_by_taxon_pair"] == {
         "559292|559292": 3,
     }
@@ -940,6 +1151,7 @@ def test_biogrid_id_map_maps_before_deduplication(tmp_path):
         "--map-to-col", "canonical_id",
         "--sample-negatives",
         "--negative-ratio", "1.0",
+        "--negative-sampling-policy", "global",
         "--seed", "7",
     )
 
@@ -966,6 +1178,7 @@ def test_biogrid_id_map_maps_before_deduplication(tmp_path):
     assert metadata["n_pairs_after_id_mapping"] == 3
     assert metadata["n_duplicate_pairs_removed"] == 1
     assert metadata["n_positive_after_id_mapping"] == 3
+    assert metadata["negative_construction"]["policy"] == GLOBAL_POLICY
 
 
 def test_biogrid_id_map_drops_and_counts_unmapped_and_ambiguous_ids(tmp_path):
@@ -1006,6 +1219,7 @@ def test_biogrid_id_map_drops_and_counts_unmapped_and_ambiguous_ids(tmp_path):
         "--map-to-col", "canonical_id",
         "--sample-negatives",
         "--negative-ratio", "1.0",
+        "--negative-sampling-policy", "global",
         "--seed", "11",
     )
 
@@ -1089,6 +1303,7 @@ def test_biogrid_fails_when_id_columns_cannot_be_inferred(tmp_path):
             "--fasta", fasta_path,
             "--out-dir", out_dir,
             "--sample-negatives",
+            "--negative-sampling-policy", "global",
         )
 
 
@@ -1113,4 +1328,5 @@ def test_biogrid_fails_on_ambiguous_multi_id_values(tmp_path):
             "--protein-a-col", "Interactor A",
             "--protein-b-col", "Interactor B",
             "--sample-negatives",
+            "--negative-sampling-policy", "global",
         )

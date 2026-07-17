@@ -16,6 +16,49 @@ from .plot_common import (
 )
 
 
+NOT_RECORDED = "not_recorded"
+NEGATIVE_CONTEXT_COLUMNS = (
+    "negative_sampling_policy",
+    "negative_ratio_requested",
+    "negative_ratio_realized",
+)
+
+
+def _normalize_negative_context(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Fill legacy negative-construction context with a stable marker."""
+    summary_df = summary_df.copy()
+    for column in NEGATIVE_CONTEXT_COLUMNS:
+        if column not in summary_df.columns:
+            summary_df[column] = NOT_RECORDED
+            continue
+        summary_df[column] = (
+            summary_df[column]
+            .fillna(NOT_RECORDED)
+            .astype(str)
+            .replace("", NOT_RECORDED)
+        )
+    return summary_df
+
+
+def _negative_context_label(
+    policy: str,
+    requested_ratio: str,
+    realized_ratio: str,
+) -> str:
+    """Return a concise plot label for one negative-construction instance."""
+    if policy == NOT_RECORDED:
+        return ""
+    label = policy.replace("_", " ").title()
+    if requested_ratio != NOT_RECORDED:
+        label += f"; requested ratio={requested_ratio}"
+    if (
+        realized_ratio != NOT_RECORDED
+        and realized_ratio != requested_ratio
+    ):
+        label += f"; realized ratio={realized_ratio}"
+    return label
+
+
 def _benchmark_train_val_f1_data(
     summary_df: pd.DataFrame,
     execution_id_prefix: str | None = None,
@@ -30,7 +73,7 @@ def _benchmark_train_val_f1_data(
     if required_columns - set(summary_df.columns):
         return pd.DataFrame()
 
-    summary_df = summary_df.copy()
+    summary_df = _normalize_negative_context(summary_df)
     if execution_id_prefix is not None:
         if "execution_id" not in summary_df.columns:
             return pd.DataFrame()
@@ -67,6 +110,7 @@ def _benchmark_train_val_f1_data(
             "split_grouping_instance",
             "split_grouping_label",
             "model_name",
+            *NEGATIVE_CONTEXT_COLUMNS,
         ],
         columns="summary_split",
         values="f1_mean",
@@ -110,7 +154,23 @@ def plot_benchmark_train_val_f1(
     if plot_df.empty:
         return False
 
-    observed_strategies = set(plot_df["split_strategy"].astype(str))
+    panel_columns = [
+        "split_strategy",
+        "split_grouping_instance",
+        "split_grouping_label",
+        *NEGATIVE_CONTEXT_COLUMNS,
+    ]
+    for column in panel_columns:
+        plot_df[column] = plot_df[column].astype(str)
+    panel_groups = {
+        key: group
+        for key, group in plot_df.groupby(
+            panel_columns,
+            sort=False,
+            dropna=False,
+        )
+    }
+    observed_strategies = set(plot_df["split_strategy"])
     strategies = [
         strategy
         for strategy in SPLIT_STRATEGY_ORDER
@@ -118,21 +178,17 @@ def plot_benchmark_train_val_f1(
     ]
     strategies.extend(sorted(observed_strategies - set(strategies)))
 
-    panel_keys = []
+    panel_keys: list[tuple[str, ...]] = []
     for strategy in strategies:
-        strategy_panels = (
-            plot_df[plot_df["split_strategy"].astype(str) == strategy][
-                ["split_grouping_instance", "split_grouping_label"]
-            ]
-            .drop_duplicates()
-            .sort_values(
-                ["split_grouping_instance", "split_grouping_label"],
-                kind="stable",
-            )
-        )
         panel_keys.extend(
-            (strategy, row.split_grouping_instance, row.split_grouping_label)
-            for row in strategy_panels.itertuples(index=False)
+            sorted(
+                (
+                    key
+                    for key in panel_groups
+                    if key[0] == strategy
+                ),
+                key=lambda key: key[1:],
+            )
         )
 
     model_order = (
@@ -161,27 +217,28 @@ def plot_benchmark_train_val_f1(
     axes = axes.ravel()
 
     for axis, panel_key in zip(axes, panel_keys):
-        strategy, grouping_instance, grouping_label = panel_key
-        strategy_df = (
-            plot_df[
-                (plot_df["split_strategy"].astype(str) == strategy)
-                & (
-                    plot_df["split_grouping_instance"].astype(str)
-                    == grouping_instance
-                )
-                & (
-                    plot_df["split_grouping_label"].astype(str)
-                    == grouping_label
-                )
-            ]
-            .set_index("model_name")
-        )
+        (
+            strategy,
+            grouping_instance,
+            grouping_label,
+            negative_policy,
+            requested_ratio,
+            realized_ratio,
+        ) = panel_key
+        strategy_df = panel_groups[panel_key].set_index("model_name")
         strategy_label = SPLIT_STRATEGY_LABELS.get(
             strategy,
             strategy.replace("_", " ").title(),
         )
         if grouping_instance not in {"legacy", "not_applicable"}:
             strategy_label = f"{strategy_label} — {grouping_label}"
+        negative_label = _negative_context_label(
+            policy=negative_policy,
+            requested_ratio=requested_ratio,
+            realized_ratio=realized_ratio,
+        )
+        if negative_label:
+            strategy_label = f"{strategy_label} — {negative_label}"
         axis.set_title(
             strategy_label,
             fontsize=11,

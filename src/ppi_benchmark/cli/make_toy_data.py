@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .arg_types import positive_float, positive_int
+
 AA = "ACDEFGHIKLMNPQRSTVWY"
 FAMILY_MOTIFS = (
     "ACDEFG",
@@ -108,28 +110,6 @@ class PairCandidate:
 #######
 # CLI #
 #######
-def positive_int(value: str) -> int:
-    """
-    Parse a positive integer argparse value.
-    """
-    parsed_value = int(value)
-    if parsed_value < 1:
-        raise argparse.ArgumentTypeError("value must be at least 1")
-
-    return parsed_value
-
-
-def positive_float(value: str) -> float:
-    """
-    Parse a positive float argparse value.
-    """
-    parsed_value = float(value)
-    if not math.isfinite(parsed_value) or parsed_value <= 0.0:
-        raise argparse.ArgumentTypeError("value must be greater than 0")
-
-    return parsed_value
-
-
 def probability(value: str) -> float:
     """
     Parse a probability argparse value.

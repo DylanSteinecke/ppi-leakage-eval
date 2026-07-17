@@ -17,7 +17,7 @@ import pandas as pd
 from scipy import sparse
 
 from ..schema import EVALUATION_SCHEMA_VERSION
-from .io import output_lock
+from ..artifact_io import output_lock
 
 
 PERFORMANCE_FILENAME = "performance.jsonl"

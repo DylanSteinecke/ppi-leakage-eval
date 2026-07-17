@@ -66,6 +66,27 @@ Current runner env vars include:
 - `BIOGRID_ARCHIVE_MEMBER`
 - `YEAST_FASTA`
 - `NEGATIVE_RATIO`
+- `NEGATIVE_SAMPLING_POLICY`
+- `NEGATIVE_SAMPLING_SEED`
+
+## When Adding or Changing Negative Construction
+
+- Read the negative-construction rules in `docs/split_semantics.md` and the
+  task policy in `docs/split_protocol_catalog.md`.
+- Declare the negative-label meaning, evidence snapshot, candidate universe,
+  construction timing, sampling policy, ratio, and independent seed.
+- Update the runtime sampling specification and relevant dataset loaders; do
+  not select a policy implicitly from optional metadata or silently fall back
+  when required metadata are missing.
+- Emit structured prepared-dataset metadata and propagate its identity into
+  split metadata and aggregation fields used for cross-run comparison.
+- Verify generated examples obey the selected split's grouping and projection
+  constraints, and keep source-provided negatives distinct from generated
+  policies.
+- Add deterministic, infeasible-space, missing-metadata, positive-overlap, and
+  end-to-end artifact tests for every supported policy.
+- Update the README, example-runner variables, and task catalog entry. Update
+  `split_semantics.md` only if the cross-protocol contract changes.
 
 ## When Adding or Changing a Split Strategy or Protocol
 

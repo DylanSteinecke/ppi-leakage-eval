@@ -18,7 +18,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..reporting.io import output_lock
+from ..artifact_io import file_sha256, output_lock
 
 
 SEQUENCE_CLUSTER_PROTEIN_COLUMN = "protein_id"
@@ -111,14 +111,6 @@ class SequenceClusterResult:
     protein_to_group: dict[str, str]
     assignments: pd.DataFrame
     metadata: dict[str, Any]
-
-
-def _file_sha256(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as input_file:
-        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def default_sequence_cluster_cache_dir() -> Path:
@@ -560,7 +552,7 @@ def _result_from_cache(
             f"Corrupt sequence-cluster assignments at {assignments_path}. "
             "Remove the entry and rerun clustering."
         ) from exc
-    observed_hash = _file_sha256(assignments_path)
+    observed_hash = file_sha256(assignments_path)
     if observed_hash != metadata.get("mapping_file_sha256"):
         raise ValueError(
             f"Sequence-cluster mapping hash mismatch at {assignments_path}. "
@@ -632,7 +624,7 @@ def _generate_cached_result(
                 temporary_path / SEQUENCE_CLUSTER_ASSIGNMENTS_FILENAME
             )
             assignments.to_csv(assignments_path, index=False)
-            mapping_hash = _file_sha256(assignments_path)
+            mapping_hash = file_sha256(assignments_path)
             normalized_mapping_hash = _mapping_sha256(assignments)
             counts = {
                 "n_mapped_proteins": int(len(assignments)),
@@ -728,7 +720,7 @@ def resolve_sequence_clusters(
             mapping_path,
             required_proteins=required_proteins,
         )
-        mapping_hash = _file_sha256(mapping_path)
+        mapping_hash = file_sha256(mapping_path)
         metadata = {
             "grouping_kind": "sequence_cluster",
             "grouping_source": "supplied_csv",

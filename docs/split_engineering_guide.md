@@ -123,6 +123,47 @@ specific reason.
 Do not add a generic task projection adapter or result wrapper until a second
 end-to-end task implementation needs that boundary.
 
+## Minimal PPI negative-construction boundary
+
+Generated PPI negatives use a small runtime contract rather than an implicit
+branch on whether taxonomy metadata happen to be present:
+
+```python
+@dataclass(frozen=True)
+class PPINegativeSamplingSpec:
+    policy: Literal["taxon_pair_matched", "global"]
+    negative_ratio: float
+    seed: int
+
+
+@dataclass(frozen=True)
+class PPINegativeSamplingResult:
+    pairs: pd.DataFrame
+    metadata: dict[str, Any]
+```
+
+The preparation CLI resolves the default policy to `taxon_pair_matched`,
+validates the complete specification before sampling, and passes it to the PPI
+sampler. The sampler returns both canonical label-0 pairs and the structured
+`negative_construction` metadata required by the catalog. Source-provided
+negatives remain a loader concern and do not masquerade as either generated
+policy.
+
+The contract, indexed candidate-space implementation, policy dispatch, and
+negative-construction diagnostics live together in
+`splitting/negative_sampling.py`. Dataset loaders only expose arguments,
+resolve defaults, and provide source-specific inputs. Canonical pair-column
+normalization remains in `datasets/pairs.py` so the sampler does not depend on
+the broader dataset-I/O module.
+
+This contract is executable input validation, dispatch, and provenance; it is
+not merely a class definition for documentation readers. It is deliberately
+PPI-specific and separate from `SplitStrategySpec`: choosing how candidate
+label-0 pairs are constructed does not choose a split protocol or establish
+protocol conformance. The current implementation records construction timing
+as `before_split`; a future partition-aware implementation must use a distinct,
+versioned timing value and preserve the selected protocol's projection rules.
+
 The required conceptual flow is:
 
 ```text

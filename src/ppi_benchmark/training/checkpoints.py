@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ..datasets.common import file_sha256
+from ..artifact_io import file_sha256
 
 
 TORCH_CHECKPOINT_FORMAT_VERSION = 3

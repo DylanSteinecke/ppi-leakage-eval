@@ -1081,6 +1081,166 @@ def test_canonical_protein_metadata_is_discovered_and_audited(
     assert species["total"]["n_pairs_with_unknown_taxon"] == 0
 
 
+def test_canonical_dataset_metadata_is_discovered_and_audited(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    dataset_metadata_path = tmp_path / "dataset_metadata.json"
+    negative_construction = {
+        "label_meaning": "sampled_unobserved_pair",
+        "policy": "taxon_pair_matched",
+        "negative_ratio_requested": 1.0,
+        "negative_ratio_realized": 1.0,
+        "seed": 17,
+        "timing": "before_split",
+        "partition_aware": False,
+    }
+    dataset_metadata_path.write_text(
+        json.dumps({
+            "output_pairs_file_sha256": hashlib.sha256(
+                pairs_path.read_bytes()
+            ).hexdigest(),
+            "negative_construction": negative_construction,
+        }),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "dataset_metadata_run"
+
+    run_train(
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--no-metrics-plots",
+    )
+
+    metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["dataset_metadata_path"] == str(dataset_metadata_path)
+    assert metadata["resolved_args"]["dataset_metadata"] == str(
+        dataset_metadata_path
+    )
+    assert len(metadata["dataset_metadata_file_sha256"]) == 64
+    assert metadata["dataset_metadata_pairs_binding"] == "sha256"
+    assert metadata["negative_construction"] == negative_construction
+
+
+def test_dataset_metadata_rejects_mismatched_pairs_hash(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    dataset_metadata_path = tmp_path / "metadata.json"
+    dataset_metadata_path.write_text(
+        json.dumps({"output_pairs_file_sha256": "not-the-pairs-hash"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="output_pairs_file_sha256"):
+        run_train(
+            *base_cli_args(
+                pairs_path,
+                fasta_path,
+                tmp_path / "mismatched_metadata",
+            ),
+            "--dataset-metadata", dataset_metadata_path,
+            "--no-metrics-plots",
+        )
+
+
+def test_dataset_metadata_rejects_unbound_legacy_manifest(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    dataset_metadata_path = tmp_path / "metadata.json"
+    dataset_metadata_path.write_text(
+        json.dumps({
+            "sampled_negatives": True,
+            "species_aware_sampling": True,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="cannot be bound"):
+        run_train(
+            *base_cli_args(
+                pairs_path,
+                fasta_path,
+                tmp_path / "unbound_metadata",
+            ),
+            "--dataset-metadata", dataset_metadata_path,
+            "--no-metrics-plots",
+        )
+
+
+def test_dataset_metadata_rejects_malformed_negative_construction(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    dataset_metadata_path = tmp_path / "metadata.json"
+    dataset_metadata_path.write_text(
+        json.dumps({
+            "output_pairs_file_sha256": hashlib.sha256(
+                pairs_path.read_bytes()
+            ).hexdigest(),
+            "negative_construction": {"policy": "global"},
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="missing required fields"):
+        run_train(
+            *base_cli_args(
+                pairs_path,
+                fasta_path,
+                tmp_path / "malformed_metadata",
+            ),
+            "--dataset-metadata", dataset_metadata_path,
+            "--no-metrics-plots",
+        )
+
+
+def test_append_results_rejects_changed_dataset_metadata(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    dataset_metadata_path = tmp_path / "dataset_metadata.json"
+    base_metadata = {
+        "output_pairs_path": str(pairs_path),
+        "working_directory": str(tmp_path),
+        "sampled_negatives": True,
+        "species_aware_sampling": True,
+        "negative_ratio": 1.0,
+        "seed": 3,
+    }
+    dataset_metadata_path.write_text(
+        json.dumps(base_metadata),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "append_changed_dataset_metadata"
+    common_args = [
+        *base_cli_args(pairs_path, fasta_path, run_dir),
+        "--no-metrics-plots",
+    ]
+    run_train(*common_args)
+    split_metadata = json.loads(
+        (run_dir / "splits" / "split_metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        split_metadata["negative_construction"]["policy"]
+        == "taxon_pair_matched"
+    )
+    assert split_metadata["negative_construction"]["seed"] == 3
+    assert (
+        split_metadata["dataset_metadata_pairs_binding"]
+        == "legacy_path_only"
+    )
+    base_metadata["seed"] = 4
+    dataset_metadata_path.write_text(
+        json.dumps(base_metadata),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="dataset_metadata_file_sha256"):
+        run_train(*common_args, "--append-results")
+
+
 def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
         tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data

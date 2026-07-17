@@ -30,6 +30,31 @@ SUMMARY_FILES = (
     ("val", "val_metrics_summary.csv"),
     ("test", "test_metrics_summary.csv"),
 )
+DATASET_IDENTITY_COLUMNS = (
+    "pairs",
+    "fasta",
+    "pairs_file_sha256",
+    "fasta_file_sha256",
+    "dataset_metadata_path",
+    "dataset_metadata_file_sha256",
+    "dataset_metadata_pairs_binding",
+)
+NEGATIVE_CONSTRUCTION_COLUMNS = (
+    "negative_label_meaning",
+    "negative_sampling_policy",
+    "negative_ratio_requested",
+    "negative_ratio_realized",
+    "negative_sampling_seed",
+    "negative_construction_timing",
+)
+NEGATIVE_CONSTRUCTION_FIELD_MAP = {
+    "negative_label_meaning": "label_meaning",
+    "negative_sampling_policy": "policy",
+    "negative_ratio_requested": "negative_ratio_requested",
+    "negative_ratio_realized": "negative_ratio_realized",
+    "negative_sampling_seed": "seed",
+    "negative_construction_timing": "timing",
+}
 MANIFEST_COLUMNS = (
     "run_dir",
     "evaluation_schema_version",
@@ -51,10 +76,8 @@ MANIFEST_COLUMNS = (
     "num_reruns",
     "features_run",
     "classifiers_run",
-    "pairs",
-    "fasta",
-    "pairs_file_sha256",
-    "fasta_file_sha256",
+    *DATASET_IDENTITY_COLUMNS,
+    *NEGATIVE_CONSTRUCTION_COLUMNS,
     "git_commit",
     "git_is_dirty",
     "n_train",
@@ -101,10 +124,8 @@ SUMMARY_CONTEXT_COLUMNS = (
     "timestamp_utc",
     "split_strategy",
     "split_name",
-    "pairs",
-    "fasta",
-    "pairs_file_sha256",
-    "fasta_file_sha256",
+    *DATASET_IDENTITY_COLUMNS,
+    *NEGATIVE_CONSTRUCTION_COLUMNS,
     "git_commit",
     "git_is_dirty",
     "features_run",
@@ -320,6 +341,27 @@ def diagnostic_context(metadata: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
+def negative_construction_context(
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Return curated negative-construction provenance for aggregation."""
+    construction = metadata.get("negative_construction") or {}
+    if not isinstance(construction, dict):
+        construction = {}
+
+    context = {
+        key: metadata.get(key, "")
+        for key in DATASET_IDENTITY_COLUMNS[4:]
+    }
+    context.update({
+        output_field: construction.get(source_field, "")
+        for output_field, source_field in (
+            NEGATIVE_CONSTRUCTION_FIELD_MAP.items()
+        )
+    })
+    return context
+
+
 def split_grouping_context(
     metadata: dict[str, Any],
     sequence_clusters: dict[str, Any],
@@ -434,6 +476,7 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         "fasta": metadata.get("fasta_path", ""),
         "pairs_file_sha256": metadata.get("pairs_file_sha256", ""),
         "fasta_file_sha256": metadata.get("fasta_file_sha256", ""),
+        **negative_construction_context(metadata),
         "git_commit": metadata.get("git_commit", ""),
         "git_is_dirty": metadata.get("git_is_dirty", ""),
         "n_train": metadata.get("n_train", ""),

@@ -249,6 +249,9 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "c3_execution",
     }
     assert set(summary_df["task"]) == {"ppi"}
+    legacy_row = manifest_df[manifest_df["split_strategy"] == "c3"].iloc[0]
+    assert legacy_row["negative_sampling_policy"] == ""
+    assert legacy_row["negative_ratio_requested"] == ""
 
 
 def test_grouping_instances_remain_separate_in_benchmark_plot_data(tmp_path):
@@ -322,6 +325,103 @@ def test_grouping_instances_remain_separate_in_benchmark_plot_data(tmp_path):
         "protein_identity": {"train": 0.9, "val": 0.8},
         "sequence_cluster:fingerprint-a": {"train": 0.6, "val": 0.4},
     }
+
+
+def test_negative_construction_propagates_to_benchmark_outputs(tmp_path):
+    benchmark_dir = tmp_path / "benchmark"
+    run_dir = benchmark_dir / "matched"
+    run_metadata = metadata(run_dir)
+    run_metadata.update({
+        "dataset_metadata_path": "processed/matched/dataset_metadata.json",
+        "dataset_metadata_file_sha256": "metadata-sha",
+        "dataset_metadata_pairs_binding": "sha256",
+        "negative_construction": {
+            "label_meaning": "sampled_unobserved_pair",
+            "policy": "taxon_pair_matched",
+            "negative_ratio_requested": 1.0,
+            "negative_ratio_realized": 0.95,
+            "seed": 17,
+            "timing": "before_split",
+        },
+    })
+    write_json(run_dir / "splits" / "split_metadata.json", run_metadata)
+    pd.DataFrame([summary_row("train")]).to_csv(
+        run_dir / "train_metrics_summary.csv",
+        index=False,
+    )
+
+    manifest_df, summary_df = aggregate_benchmark_results(benchmark_dir)
+
+    expected = {
+        "dataset_metadata_path": "processed/matched/dataset_metadata.json",
+        "dataset_metadata_file_sha256": "metadata-sha",
+        "dataset_metadata_pairs_binding": "sha256",
+        "negative_label_meaning": "sampled_unobserved_pair",
+        "negative_sampling_policy": "taxon_pair_matched",
+        "negative_ratio_requested": 1.0,
+        "negative_ratio_realized": 0.95,
+        "negative_sampling_seed": 17,
+        "negative_construction_timing": "before_split",
+    }
+    for column, value in expected.items():
+        assert manifest_df.loc[0, column] == value
+        assert summary_df.loc[0, column] == value
+
+
+def test_negative_policies_and_ratios_remain_separate_in_plot_data():
+    rows = []
+    instances = (
+        ("taxon_pair_matched", 1.0, 1.0, 0.9, 0.8),
+        ("global", 1.0, 1.0, 0.7, 0.5),
+        ("global", 2.0, 2.0, 0.6, 0.4),
+    )
+    for policy, requested, realized, train_f1, val_f1 in instances:
+        for split_name, f1_value in (("train", train_f1), ("val", val_f1)):
+            row = summary_row(split_name)
+            row.update({
+                "summary_split": split_name,
+                "split_strategy": "random",
+                "negative_sampling_policy": policy,
+                "negative_ratio_requested": requested,
+                "negative_ratio_realized": realized,
+                "f1_mean": f1_value,
+            })
+            rows.append(row)
+
+    plot_df = _benchmark_train_val_f1_data(pd.DataFrame(rows))
+    observed = plot_df.set_index([
+        "negative_sampling_policy",
+        "negative_ratio_requested",
+        "negative_ratio_realized",
+    ])[["train", "val"]].to_dict("index")
+
+    assert observed == {
+        ("taxon_pair_matched", "1.0", "1.0"): {
+            "train": 0.9,
+            "val": 0.8,
+        },
+        ("global", "1.0", "1.0"): {"train": 0.7, "val": 0.5},
+        ("global", "2.0", "2.0"): {"train": 0.6, "val": 0.4},
+    }
+
+
+def test_legacy_negative_context_uses_not_recorded_plot_group():
+    rows = []
+    for split_name, f1_value in (("train", 0.8), ("val", 0.7)):
+        row = summary_row(split_name)
+        row.update({
+            "summary_split": split_name,
+            "split_strategy": "random",
+            "f1_mean": f1_value,
+        })
+        rows.append(row)
+
+    plot_df = _benchmark_train_val_f1_data(pd.DataFrame(rows))
+
+    assert len(plot_df) == 1
+    assert plot_df.loc[0, "negative_sampling_policy"] == "not_recorded"
+    assert plot_df.loc[0, "negative_ratio_requested"] == "not_recorded"
+    assert plot_df.loc[0, "negative_ratio_realized"] == "not_recorded"
 
 
 @pytest.mark.integration
@@ -440,6 +540,12 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert '--max-pairs "$MAX_PAIRS"' in grid_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-laptop}"' in yeast_text
     assert 'MAX_PAIRS="${MAX_PAIRS:-50000}"' in yeast_text
+    assert (
+        'NEGATIVE_SAMPLING_POLICY="${NEGATIVE_SAMPLING_POLICY:-'
+        'taxon_pair_matched}"'
+        in yeast_text
+    )
+    assert 'NEGATIVE_SAMPLING_SEED="${NEGATIVE_SAMPLING_SEED:-0}"' in yeast_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in toy_text
     assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
     assert '--val-size "$VAL_SIZE"' in grid_text
@@ -449,6 +555,8 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert "ppi-train" not in grid_text
     assert 'ppi-aggregate --benchmark-dir "$SUITE_ROOT"' in grid_text
     assert "ppi-prepare biogrid" in yeast_text
+    assert '--negative-sampling-policy "$NEGATIVE_SAMPLING_POLICY"' in yeast_text
+    assert '--negative-sampling-seed "$NEGATIVE_SAMPLING_SEED"' in yeast_text
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
     assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text

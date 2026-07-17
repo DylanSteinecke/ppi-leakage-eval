@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from ppi_benchmark.cli.train import argument_parser
-from ppi_benchmark.datasets.common import file_sha256
+from ppi_benchmark.artifact_io import file_sha256
 from ppi_benchmark.splitting import grouping
 from ppi_benchmark.splitting.grouping import (
     load_sequence_cluster_mapping,

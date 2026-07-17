@@ -7,16 +7,18 @@ from typing import Any
 
 import pandas as pd
 
+from ..artifact_io import file_sha256
 from .common import (
     add_common_loader_args,
+    add_negative_construction_args,
     apply_id_mapping_to_pairs,
-    file_sha256,
     input_protein_count,
     iter_table_chunks,
     read_fasta_with_taxa,
     read_table,
+    require_taxonomy_for_negative_sampling,
+    resolve_generated_negative_spec,
     sample_negative_pairs,
-    validate_negative_ratio,
     write_prepared_dataset,
 )
 
@@ -78,8 +80,7 @@ def register_subcommand(subparsers: Any) -> None:
         default="error",
         help="How rows containing multi-ID interactor values are handled.",
     )
-    parser.add_argument("--sample-negatives", action="store_true")
-    parser.add_argument("--negative-ratio", type=float, default=1.0)
+    add_negative_construction_args(parser)
     parser.set_defaults(func=run)
 
 
@@ -328,7 +329,9 @@ def make_loader_specific_options(
         "experimental_system_type_col": args.experimental_system_type_col,
         "allowed_system_types": args.allowed_system_types,
         "sample_negatives": bool(args.sample_negatives),
+        "negative_sampling_policy": args.negative_sampling_policy,
         "negative_ratio": float(args.negative_ratio),
+        "negative_sampling_seed": int(args.negative_sampling_seed),
         "n_positive_after_loader_filters": int(
             n_positive_after_loader_filters),
         "ambiguous_id_policy": args.ambiguous_id_policy,
@@ -346,11 +349,11 @@ def run(args: Any) -> None:
     Prepare a BioGRID PPI dataset.
     """
     validate_id_mapping_args(args)
-    validate_negative_ratio(args.negative_ratio)
     if not args.sample_negatives:
         raise ValueError(
             "BioGRID provides positives only in this loader version; pass "
             "--sample-negatives.")
+    sampling_spec = resolve_generated_negative_spec(args)
 
     fasta_data = read_fasta_with_taxa(
         fasta_path=args.fasta,
@@ -359,6 +362,10 @@ def run(args: Any) -> None:
         taxon_id=args.taxon_id or args.organism_id,
     )
     sequences = fasta_data.sequences
+    require_taxonomy_for_negative_sampling(
+        sampling_spec,
+        fasta_data.taxon_ids,
+    )
     (
         positive_pairs,
         protein_a_col,
@@ -391,8 +398,7 @@ def run(args: Any) -> None:
 
     negative_pairs, sampling_metadata = sample_negative_pairs(
         positive_pairs=positive_pairs,
-        negative_ratio=args.negative_ratio,
-        seed=args.seed,
+        spec=sampling_spec,
         allowed_protein_ids=sequences,
         protein_taxa=fasta_data.taxon_ids,
     )

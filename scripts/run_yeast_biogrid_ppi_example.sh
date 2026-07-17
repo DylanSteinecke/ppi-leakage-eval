@@ -32,6 +32,8 @@ BIOGRID_ARCHIVE="${BIOGRID_ARCHIVE:-input/BIOGRID-ORGANISM-LATEST.tab3.zip}"
 BIOGRID_ARCHIVE_MEMBER="${BIOGRID_ARCHIVE_MEMBER:-BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-5.0.259.tab3.txt}"
 YEAST_FASTA="${YEAST_FASTA:-input/UP000002311_559292.fasta}"
 NEGATIVE_RATIO="${NEGATIVE_RATIO:-1.0}"
+NEGATIVE_SAMPLING_POLICY="${NEGATIVE_SAMPLING_POLICY:-taxon_pair_matched}"
+NEGATIVE_SAMPLING_SEED="${NEGATIVE_SAMPLING_SEED:-0}"
 PREPARE_YEAST_DATA="${PREPARE_YEAST_DATA:-1}"
 
 if [[ "$PREPARE_YEAST_DATA" == "1" ]]; then
@@ -50,7 +52,9 @@ if [[ "$PREPARE_YEAST_DATA" == "1" ]]; then
         --allowed-system-types physical \
         --ambiguous-id-policy drop \
         --sample-negatives \
+        --negative-sampling-policy "$NEGATIVE_SAMPLING_POLICY" \
         --negative-ratio "$NEGATIVE_RATIO" \
+        --negative-sampling-seed "$NEGATIVE_SAMPLING_SEED" \
         --out-dir processed \
         --overwrite
 fi
