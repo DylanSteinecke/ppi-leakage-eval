@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 
-from .inputs import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
+from .dispatch import TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, protein_ids_in_pairs
 
 
 DEFAULT_SPLIT_ORDER = (TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT)

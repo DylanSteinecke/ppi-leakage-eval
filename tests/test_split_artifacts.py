@@ -4,13 +4,13 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from ppi_benchmark.inputs import prepare_input_data
-from ppi_benchmark.splits import (
+from ppi_benchmark.splitting.artifacts import (
     add_source_row_index,
     compute_split_metadata,
     make_split_assignments,
     write_split_artifacts,
 )
+from ppi_benchmark.splitting.preparation import prepare_input_data
 
 
 def test_source_row_index_and_drop_reasons_are_preserved():

@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from ppi_benchmark.splitters.protein_disjoint import (
+from ppi_benchmark.splitting.protein_disjoint import (
     split_pairs,
     split_pairs_three_way,
 )

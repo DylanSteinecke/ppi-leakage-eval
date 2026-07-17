@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from ppi_benchmark.datasets.common import file_sha256
-from ppi_benchmark.inputs import load_sequence_cluster_mapping
+from ppi_benchmark.splitting.grouping import load_sequence_cluster_mapping
 
 
 def test_sequence_cluster_loader_normalizes_and_rejects_duplicate_proteins(

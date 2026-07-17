@@ -6,12 +6,12 @@ from sklearn.feature_extraction.text import CountVectorizer
 
 from ppi_benchmark import features as ppi_features
 from ppi_benchmark.features import build_feature_matrices
-from ppi_benchmark.inputs import (
+from ppi_benchmark.splitting.dispatch import (
     load_split_column,
     make_random_pair_split,
-    prepare_input_data,
     validate_splits,
 )
+from ppi_benchmark.splitting.preparation import prepare_input_data
 
 
 def balanced_pairs(n_pairs=24):

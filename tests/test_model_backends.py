@@ -18,7 +18,7 @@ from ppi_benchmark.backends.models import (
     model_spec,
     score_estimator,
 )
-from ppi_benchmark.performance import solver_iteration_report
+from ppi_benchmark.reporting.performance import solver_iteration_report
 
 
 def test_sklearn_backend_matches_existing_estimator_path():

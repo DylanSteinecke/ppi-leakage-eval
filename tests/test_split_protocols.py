@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from ppi_benchmark import inputs
-from ppi_benchmark.inputs import load_or_make_split
-from ppi_benchmark.split_protocols import (
+from ppi_benchmark.splitting import dispatch
+from ppi_benchmark.splitting.dispatch import load_or_make_split
+from ppi_benchmark.splitting.protocols import (
     C1_SPLIT_STRATEGY,
     C2_SPLIT_STRATEGY,
     C3_SPLIT_STRATEGY,
@@ -46,13 +46,13 @@ def test_ppi_registry_has_expected_task_qualified_protocols():
         assert spec.projection_kind
 
 
-def test_registry_preserves_legacy_input_constant_exports():
-    assert inputs.PROVIDED_SPLIT_STRATEGY == PROVIDED_SPLIT_STRATEGY
-    assert inputs.RANDOM_SPLIT_STRATEGY == RANDOM_SPLIT_STRATEGY
-    assert inputs.C1_SPLIT_STRATEGY == C1_SPLIT_STRATEGY
-    assert inputs.C2_SPLIT_STRATEGY == C2_SPLIT_STRATEGY
-    assert inputs.C3_SPLIT_STRATEGY == C3_SPLIT_STRATEGY
-    assert inputs.SPLIT_STRATEGY_CHOICES == SPLIT_STRATEGY_CHOICES
+def test_dispatch_reexports_strategy_constants():
+    assert dispatch.PROVIDED_SPLIT_STRATEGY == PROVIDED_SPLIT_STRATEGY
+    assert dispatch.RANDOM_SPLIT_STRATEGY == RANDOM_SPLIT_STRATEGY
+    assert dispatch.C1_SPLIT_STRATEGY == C1_SPLIT_STRATEGY
+    assert dispatch.C2_SPLIT_STRATEGY == C2_SPLIT_STRATEGY
+    assert dispatch.C3_SPLIT_STRATEGY == C3_SPLIT_STRATEGY
+    assert dispatch.SPLIT_STRATEGY_CHOICES == SPLIT_STRATEGY_CHOICES
 
 
 def test_c2_and_c3_declare_grouping_and_projection_drops():

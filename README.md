@@ -27,10 +27,11 @@ This provides `ppi-train`, `ppi-grid`, `ppi-prepare`, `ppi-aggregate`, and
 
 The installable implementation lives under `src/ppi_benchmark/`. Command-line
 orchestration is in `cli/`, dataset preparation and source-specific loaders are
-in `datasets/`, model-framework adapters are in `backends/`, and reusable
-benchmark modules are at the package root. The runner uses a backend-neutral
-fit/predict contract. Classical classifiers retain the existing sklearn
-factory and scoring path, while `torch_mlp` exercises the batched Torch path.
+in `datasets/`, model-framework adapters are in `backends/`, split construction
+and audits are in `splitting/`, and result generation is in `reporting/`. The
+runner uses a backend-neutral fit/predict contract. Classical classifiers
+retain the existing sklearn factory and scoring path, while `torch_mlp`
+exercises the batched Torch path.
 
 The training engine is task-neutral: a backend fits and predicts, an evaluation
 policy selects the operating point and computes metrics, and a task adapter

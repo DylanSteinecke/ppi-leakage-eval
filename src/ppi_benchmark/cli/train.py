@@ -52,61 +52,26 @@ from ..features import (
     normalize_feature_types,
     unique_protein_ids,
 )
-from ..inputs import (
-    C2_SPLIT_STRATEGY,
-    C3_SPLIT_STRATEGY,
-    PROVIDED_SPLIT_STRATEGY,
-    load_or_make_split,
-    load_sequence_cluster_mapping,
-    normalized_split_values,
-    prepare_input_data,
-    protein_ids_in_pairs,
-    RANDOM_SPLIT_STRATEGY,
-    SPLIT_STRATEGY_CHOICES,
-    validate_splits,
+from ..reporting.io import (
+    append_dataframe,
+    reset_output_file,
+    write_dataframe_threadsafe,
 )
-from ..plots import (
-    legacy_f1_heatmap_output_paths,
-    plot_metrics_summary,
-    plot_train_test_f1_heatmap,
-    plot_train_test_metrics_summary,
-    plot_train_test_metrics_summary_png,
-)
-from ..performance import (
+from ..reporting.performance import (
     PERFORMANCE_FILENAME,
     PerformanceTracker,
     append_performance_report,
     peak_memory_bytes,
 )
-from ..protein_encoders import (
-    DEFAULT_ESM2_MODEL,
-    DEFAULT_PROTEIN_ENCODER_ADAPTER,
-    PLM_POOLING_CHOICES,
-    PLM_PRECISION_CHOICES,
-    PLM_TRUNCATION_CHOICES,
-    PROTEIN_ENCODER_ADAPTER_CHOICES,
-    PROTEIN_ENCODER_PRESET_CHOICES,
-    EmbeddingCache,
-    FrozenProteinEncoder,
-    create_protein_encoder,
-    get_protein_encoder_preset,
+from ..reporting.plot_common import legacy_f1_heatmap_output_paths
+from ..reporting.run_plots import (
+    plot_metrics_summary,
+    plot_train_test_f1_heatmap,
+    plot_train_test_metrics_summary,
+    plot_train_test_metrics_summary_png,
 )
-from ..results import (
-    append_dataframe,
-    reset_output_file,
-    summarize_metrics,
-    write_dataframe_threadsafe,
-)
-from ..sampling import (
-    SAMPLING_DIRNAME,
-    SELECTED_EXAMPLES_FILENAME,
-    SamplingSpec,
-    select_examples,
-    write_selection_manifest,
-)
-from ..schema import EVALUATION_SCHEMA_VERSION
-from ..split_protocols import get_split_strategy
-from ..splits import (
+from ..reporting.summaries import summarize_metrics
+from ..splitting.artifacts import (
     add_source_row_index,
     append_invocation_log,
     compute_split_metadata,
@@ -122,6 +87,43 @@ from ..splits import (
     write_metadata_json,
     write_split_artifacts,
 )
+from ..splitting.cohort import (
+    SAMPLING_DIRNAME,
+    SELECTED_EXAMPLES_FILENAME,
+    SamplingSpec,
+    select_examples,
+    write_selection_manifest,
+)
+from ..splitting.dispatch import (
+    load_or_make_split,
+    normalized_split_values,
+    protein_ids_in_pairs,
+    validate_splits,
+)
+from ..splitting.grouping import load_sequence_cluster_mapping
+from ..splitting.preparation import prepare_input_data
+from ..splitting.protocols import (
+    C2_SPLIT_STRATEGY,
+    C3_SPLIT_STRATEGY,
+    PROVIDED_SPLIT_STRATEGY,
+    RANDOM_SPLIT_STRATEGY,
+    SPLIT_STRATEGY_CHOICES,
+    get_split_strategy,
+)
+from ..protein_encoders import (
+    DEFAULT_ESM2_MODEL,
+    DEFAULT_PROTEIN_ENCODER_ADAPTER,
+    PLM_POOLING_CHOICES,
+    PLM_PRECISION_CHOICES,
+    PLM_TRUNCATION_CHOICES,
+    PROTEIN_ENCODER_ADAPTER_CHOICES,
+    PROTEIN_ENCODER_PRESET_CHOICES,
+    EmbeddingCache,
+    FrozenProteinEncoder,
+    create_protein_encoder,
+    get_protein_encoder_preset,
+)
+from ..schema import EVALUATION_SCHEMA_VERSION
 from ..tasks import PPI_TASK
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
 from ..training import TaskSplitData, fit_and_evaluate_task

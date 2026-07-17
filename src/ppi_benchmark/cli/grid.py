@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from ..backends.models import CLASSIFIER_CHOICES, is_baseline_classifier
 from ..features import FEATURE_CHOICES, PLM_FEATURE
-from ..inputs import SPLIT_STRATEGY_CHOICES
+from ..splitting.protocols import SPLIT_STRATEGY_CHOICES
 from ..protein_encoders import (
     DEFAULT_ESM2_MODEL,
     DEFAULT_PROTEIN_ENCODER_ADAPTER,

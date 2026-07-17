@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from ppi_benchmark.performance import (
+from ppi_benchmark.reporting.performance import (
     PerformanceTracker,
     append_performance_report,
     matrix_statistics,

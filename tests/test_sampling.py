@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from ppi_benchmark.sampling import SamplingSpec, select_examples
+from ppi_benchmark.splitting.cohort import SamplingSpec, select_examples
 
 
 def test_unstratified_sampling_is_reproducible_and_without_replacement():

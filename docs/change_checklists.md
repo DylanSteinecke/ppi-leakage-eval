@@ -25,7 +25,7 @@ when they are useful for auditability, grouping, or cross-run comparison.
 - Confirm `invocations.jsonl` captures the invocation correctly.
 - Update `src/ppi_benchmark/cli/aggregate.py` if the flag should appear in
   `benchmark_manifest.csv` or `benchmark_summary.csv`.
-- Update `ppi_benchmark.results.SUMMARY_GROUP_COLUMNS` only if metrics
+- Update `ppi_benchmark.reporting.summaries.SUMMARY_GROUP_COLUMNS` only if metrics
   summaries should be grouped by the new flag.
 - Add or update pytest coverage for the flag's behavior.
 - Update README or runner examples if users need to know about the flag.
@@ -81,8 +81,9 @@ Current runner env vars include:
   conformance rule, or extension requirement changes.
 - Update `docs/split_engineering_guide.md` only when architecture, artifact,
   migration, or reusable conformance-test guidance changes.
-- Add the strategy constant and choice in `src/ppi_benchmark/inputs.py` when it
-  is exposed through the current CLI.
+- Add the strategy specification in
+  `src/ppi_benchmark/splitting/protocols.py` when it is exposed through the
+  current CLI, and update dispatch only when routing changes.
 - Implement split creation in the task-appropriate adapter or splitter; do not
   infer task compatibility from a similar strategy name.
 - Validate task/protocol compatibility before expensive loading or grouping.
@@ -99,7 +100,7 @@ Current runner env vars include:
 
 ## When Adding a Split Diagnostic
 
-- Update `src/ppi_benchmark/diagnostics.py`.
+- Update `src/ppi_benchmark/splitting/diagnostics.py`.
 - Store the diagnostic under `split_metadata["diagnostics"]`.
 - Do not create a separate diagnostics artifact unless there is a strong
   reason.
@@ -161,7 +162,7 @@ should not fail runs unless a future explicit validation mode is added.
 
 ## When Changing Split Metadata
 
-- Update `src/ppi_benchmark/splits.py`.
+- Update `src/ppi_benchmark/splitting/artifacts.py`.
 - Keep `split_assignments.csv` minimal.
 - Keep `dropped_pairs.csv` minimal.
 - Keep `split_metadata.json` as the main audit artifact.

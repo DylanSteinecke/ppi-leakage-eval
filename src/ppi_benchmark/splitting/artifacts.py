@@ -15,15 +15,15 @@ from typing import Any
 
 import pandas as pd
 
-from .datasets.common import file_sha256, protein_taxon_summary, taxon_pair_name
+from ..datasets.common import file_sha256, protein_taxon_summary, taxon_pair_name
+from ..reporting.io import output_lock
+from ..schema import EVALUATION_SCHEMA_VERSION
 from .diagnostics import (
     compute_ppi_split_diagnostics,
     label_counts,
     native_value,
 )
-from .inputs import protein_ids_in_pairs, TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT
-from .results import output_lock
-from .schema import EVALUATION_SCHEMA_VERSION
+from .dispatch import protein_ids_in_pairs, TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT
 
 
 SOURCE_ROW_INDEX_COLUMN = "source_row_index"

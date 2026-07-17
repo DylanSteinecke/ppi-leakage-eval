@@ -14,7 +14,7 @@ from ppi_benchmark.cli.make_toy_data import (
     weighted_sample_without_replacement,
 )
 from ppi_benchmark.datasets.common import read_protein_taxa
-from ppi_benchmark.results import summarize_metrics
+from ppi_benchmark.reporting.summaries import summarize_metrics
 
 
 def test_summarize_metrics_supports_plain_metric_tables(tmp_path):

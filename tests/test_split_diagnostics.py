@@ -2,17 +2,17 @@ import json
 
 import pandas as pd
 
-from ppi_benchmark.inputs import (
+from ppi_benchmark.splitting.diagnostics import (
+    compute_generic_split_diagnostics,
+    compute_ppi_split_diagnostics,
+)
+from ppi_benchmark.splitting.dispatch import (
     load_split_column,
     TEST_SPLIT,
     TRAIN_SPLIT,
     VAL_SPLIT,
 )
-from ppi_benchmark.diagnostics import (
-    compute_generic_split_diagnostics,
-    compute_ppi_split_diagnostics,
-)
-from ppi_benchmark.splitters import split_pairs
+from ppi_benchmark.splitting.protein_disjoint import split_pairs
 
 
 def pair_frame(rows):

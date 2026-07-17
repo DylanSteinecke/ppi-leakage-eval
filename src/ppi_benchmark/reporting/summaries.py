@@ -1,15 +1,10 @@
 """
-Result writing and aggregation helpers for PPI pipeline runs.
+Metric aggregation helpers for PPI pipeline runs.
 
-This module owns thread-safe output writes and metric summarization. Future
-additions should include multiprocessing-friendly result stores, JSONL or
-Parquet output, resumable run manifests, and richer experiment summaries.
+This module owns metric summarization and stable summary schemas.
 """
 
-import fcntl
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import pandas as pd
 
@@ -64,76 +59,6 @@ SUMMARY_GROUP_COLUMNS = (
     "n_val",
     "n_test",
 )
-
-
-##################
-# Output writing #
-##################
-@contextmanager
-def output_lock(output_path: Path) -> Iterator[None]:
-    """
-    Lock a sidecar file before writing output.
-    """
-    lock_path = output_path.with_suffix(f"{output_path.suffix}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-def append_dataframe(df: pd.DataFrame, output_path: Path) -> None:
-    """
-    Append a dataframe to a CSV with a file lock and one header row.
-    """
-    # Check for empty dataframe
-    if df.empty:
-        return
-
-    # Define dataframe headers and columns
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_lock(output_path):
-        write_header = (
-            not output_path.exists()
-            or output_path.stat().st_size == 0
-        )
-        if not write_header:
-            existing_columns = pd.read_csv(
-                output_path,
-                nrows=0,
-            ).columns.tolist()
-            incoming_columns = df.columns.tolist()
-            if existing_columns != incoming_columns:
-                raise ValueError(
-                    f"Cannot append to {output_path}: existing columns do "
-                    "not match the incoming dataframe schema."
-                )
-
-        # Save the dataframe
-        df.to_csv(output_path, mode="a", header=write_header, index=False)
-
-
-def write_dataframe_threadsafe(
-        df: pd.DataFrame, output_path: Path,
-    ) -> None:
-    """
-    Write a dataframe to CSV with a file lock.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_lock(output_path):
-        df.to_csv(output_path, index=False)
-
-
-def reset_output_file(output_path: Path, append_results: bool) -> None:
-    """
-    Start with a clean output file unless append mode is requested.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not append_results and output_path.exists():
-        output_path.unlink()
 
 
 ####################

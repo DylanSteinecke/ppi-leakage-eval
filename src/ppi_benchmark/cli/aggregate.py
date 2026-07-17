@@ -16,7 +16,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..plots import plot_benchmark_train_val_f1
+from ..reporting.benchmark_plots import plot_benchmark_train_val_f1
 
 
 METADATA_RELATIVE_PATH = Path("splits") / "split_metadata.json"

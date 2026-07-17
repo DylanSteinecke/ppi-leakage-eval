@@ -1,12 +1,16 @@
 # Repository Guidelines
 
+Goal: Develop a benchmarking framework which will produce results for "models x features x splits x tasks". Models and features will include baselines (e.g., predicts positives), simple models (e.g., TF-IDF features), and SOTA models (e.g., protein language models). Splits will be different leakage-aware splits such as C1/C2/C3
+
 ## Project Structure & Module Organization
 
 The installable package is under `src/ppi_benchmark/`. Put command-line entry
 points in `cli/`, source-specific loading in `datasets/`, framework adapters in
 `backends/`, PPI/PTM behavior in `tasks/`, and reusable encoder code in
-`protein_encoders/`. Shared splitting, evaluation, features, and reporting live
-at the package root. Tests are in `tests/` and generally mirror these modules.
+`protein_encoders/`. Shared split construction lives in `splitting/`, reporting
+and plot generation in `reporting/`, and evaluation in `evaluation/`. Shared
+feature construction remains in `features.py`. Tests are in `tests/` and
+generally mirror these modules.
 Use `scripts/` for thin runnable workflows, `configs/` for versioned benchmark
 settings, and `docs/` for connected-change checklists. Generated datasets,
 embeddings, checkpoints, and benchmark outputs belong in ignored `processed/`
