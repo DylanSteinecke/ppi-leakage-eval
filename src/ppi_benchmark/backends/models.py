@@ -10,8 +10,19 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import numpy as np
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.svm import LinearSVC
+
+
+BIOLOGICAL_FEATURE_INPUT = "biological_features"
+CONSTANT_INPUT = "constant"
+DEGREE_INPUT = "training_degree"
+MODEL_INPUT_KINDS = (
+    BIOLOGICAL_FEATURE_INPUT,
+    CONSTANT_INPUT,
+    DEGREE_INPUT,
+)
 
 class ConstantClassifier:
     """
@@ -101,6 +112,28 @@ def _make_always_negative(max_iter: int, random_state: int) -> Any:
     return ConstantClassifier(positive_probability=0.0)
 
 
+def _make_degree_logistic(max_iter: int, random_state: int) -> Any:
+    return LogisticRegression(
+        solver="liblinear",
+        class_weight="balanced",
+        C=1.0,
+        max_iter=max_iter,
+        random_state=random_state,
+    )
+
+
+def _make_degree_hgb(max_iter: int, random_state: int) -> Any:
+    return HistGradientBoostingClassifier(
+        max_depth=3,
+        max_iter=max_iter,
+        learning_rate=0.05,
+        l2_regularization=1.0,
+        early_stopping=False,
+        class_weight="balanced",
+        random_state=random_state,
+    )
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """One registered model and the backend that owns it."""
@@ -108,7 +141,17 @@ class ModelSpec:
     name: str
     backend: str
     baseline: bool = False
+    input_kind: str = BIOLOGICAL_FEATURE_INPUT
+    force_fixed_threshold: bool = False
+    fixed_max_iter: int | None = None
+    reporting_role: str = "predictive_model"
     estimator_factory: ClassifierFactory | None = None
+
+    def __post_init__(self) -> None:
+        if self.input_kind not in MODEL_INPUT_KINDS:
+            raise ValueError(
+                f"Unknown input kind for {self.name!r}: {self.input_kind!r}"
+            )
 
 
 MODEL_SPECS = (
@@ -124,13 +167,37 @@ MODEL_SPECS = (
         "always_positive",
         "sklearn",
         baseline=True,
+        input_kind=CONSTANT_INPUT,
+        force_fixed_threshold=True,
+        reporting_role="constant_baseline",
         estimator_factory=_make_always_positive,
     ),
     ModelSpec(
         "always_negative",
         "sklearn",
         baseline=True,
+        input_kind=CONSTANT_INPUT,
+        force_fixed_threshold=True,
+        reporting_role="constant_baseline",
         estimator_factory=_make_always_negative,
+    ),
+    ModelSpec(
+        "degree_logistic",
+        "sklearn",
+        baseline=True,
+        input_kind=DEGREE_INPUT,
+        fixed_max_iter=1000,
+        reporting_role="primary_degree_control",
+        estimator_factory=_make_degree_logistic,
+    ),
+    ModelSpec(
+        "degree_hgb",
+        "sklearn",
+        baseline=True,
+        input_kind=DEGREE_INPUT,
+        fixed_max_iter=100,
+        reporting_role="degree_sensitivity_control",
+        estimator_factory=_make_degree_hgb,
     ),
 )
 _MODEL_SPECS_BY_NAME = {spec.name: spec for spec in MODEL_SPECS}
@@ -146,8 +213,23 @@ def model_spec(classifier_name: str) -> ModelSpec:
 
 
 def is_baseline_classifier(classifier_name: str) -> bool:
-    """Return whether a registered model ignores feature matrices."""
+    """Return whether a registered model is a benchmark control."""
     return model_spec(classifier_name).baseline
+
+
+def model_input_kind(classifier_name: str) -> str:
+    """Return the registered input contract for one classifier."""
+    return model_spec(classifier_name).input_kind
+
+
+def classifier_forces_fixed_threshold(classifier_name: str) -> bool:
+    """Return whether a classifier must retain its backend threshold."""
+    return model_spec(classifier_name).force_fixed_threshold
+
+
+def model_reporting_role(classifier_name: str) -> str:
+    """Return the registered reporting role for one classifier."""
+    return model_spec(classifier_name).reporting_role
 
 
 def make_classifier(
@@ -162,7 +244,8 @@ def make_classifier(
             f"Classifier {classifier_name!r} is owned by the "
             f"{spec.backend!r} backend and has no sklearn estimator."
         )
-    return spec.estimator_factory(max_iter, random_state)
+    effective_max_iter = spec.fixed_max_iter or max_iter
+    return spec.estimator_factory(effective_max_iter, random_state)
 
 
 def score_estimator(model: Any, x: Any) -> tuple[np.ndarray, float]:

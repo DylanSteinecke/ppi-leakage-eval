@@ -56,6 +56,23 @@ def test_laptop_profile_expands_to_independent_run_directories(tmp_path):
         spec.train_args[spec.train_args.index("--model-seeds") + 1] == "11"
         for spec in baseline_specs
     )
+    assert config.baseline_classifiers == (
+        "degree_logistic",
+        "always_positive",
+        "always_negative",
+    )
+    assert all(
+        "degree_logistic" in spec.train_args
+        for spec in baseline_specs
+    )
+    assert config.degree_bin_quantiles == (0.5, 0.9)
+    assert all(
+        spec.train_args[
+            spec.train_args.index("--degree-bin-quantiles") + 1:
+            spec.train_args.index("--degree-bin-quantiles") + 3
+        ] == ("0.5", "0.9")
+        for spec in specs
+    )
     assert all(
         spec.train_args[
             spec.train_args.index("--model-seeds") + 1:

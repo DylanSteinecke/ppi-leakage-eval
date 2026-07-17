@@ -1020,6 +1020,8 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
 
     train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
     train_summary = pd.read_csv(run_dir / "train_metrics_summary.csv")
+    degree_metrics = pd.read_csv(run_dir / "val_degree_metrics.csv")
+    degree_summary = pd.read_csv(run_dir / "val_degree_metrics_summary.csv")
     invocations = [
         json.loads(line)
         for line in (run_dir / "invocations.jsonl").read_text(
@@ -1044,6 +1046,23 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
     assert invocations[1]["resolved_args"]["classifiers"] == [
         "always_negative",
     ]
+    internal_degree_keys = {
+        "degree_evaluation_cohort_sha256",
+        "degree_identity_context",
+        "degree_protocol_id",
+        "degree_protocol_version",
+    }
+    assert internal_degree_keys.isdisjoint(
+        invocations[1]["resolved_args"]
+    )
+    pa_metrics = degree_metrics[
+        degree_metrics["classifier"] == "preferential_attachment"
+    ]
+    pa_summary = degree_summary[
+        degree_summary["classifier"] == "preferential_attachment"
+    ]
+    assert len(pa_metrics) == len(pa_summary)
+    assert set(pa_summary["n_runs"]) == {1}
 
 
 def test_canonical_protein_metadata_is_discovered_and_audited(

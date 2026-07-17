@@ -23,6 +23,7 @@ from ..splitting.grouping import (
     SequenceClusterParameters,
 )
 from ..splitting.protocols import SPLIT_STRATEGY_CHOICES, get_split_strategy
+from ..tasks.ppi_degree import DEFAULT_DEGREE_BIN_QUANTILES
 from ..protein_encoders import (
     DEFAULT_ESM2_MODEL,
     DEFAULT_PROTEIN_ENCODER_ADAPTER,
@@ -39,7 +40,11 @@ from .arg_types import (
 
 
 DEFAULT_SPLIT_STRATEGIES = ("random", "c1", "c2", "c3")
-DEFAULT_BASELINE_CLASSIFIERS = ("always_positive", "always_negative")
+DEFAULT_BASELINE_CLASSIFIERS = (
+    "degree_logistic",
+    "always_positive",
+    "always_negative",
+)
 CONFIG_FILENAME = "benchmark_config.json"
 RUNS_DIRNAME = "runs"
 SAFE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -47,6 +52,7 @@ GRID_OWNED_TRAIN_FLAGS = frozenset({
     "--append-results",
     "--classifier",
     "--classifiers",
+    "--degree-bin-quantiles",
     "--execution-id",
     "--fasta",
     "--features",
@@ -139,6 +145,7 @@ class BenchmarkGridConfig:
     n_split_trials: int
     max_iter: int
     k: int
+    degree_bin_quantiles: tuple[float, float]
     feature_sets: tuple[tuple[str, ...], ...]
     baseline_classifiers: tuple[str, ...]
     learned_classifiers: tuple[str, ...]
@@ -179,6 +186,15 @@ class BenchmarkGridConfig:
             raise ValueError("train_size + val_size must be less than 1.")
         if self.n_split_trials < 1 or self.max_iter < 1 or self.k < 1:
             raise ValueError("n_split_trials, max_iter, and k must be positive.")
+        if not (
+            len(self.degree_bin_quantiles) == 2
+            and 0.0 < self.degree_bin_quantiles[0]
+            < self.degree_bin_quantiles[1] < 1.0
+        ):
+            raise ValueError(
+                "degree_bin_quantiles must contain two strictly increasing "
+                "values between zero and one."
+            )
         if not self.split_strategies:
             raise ValueError("At least one split strategy is required.")
         if not self.split_seeds or not self.model_seeds:
@@ -532,6 +548,12 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int, default=None)
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument(
+        "--degree-bin-quantiles",
+        type=_unit_interval,
+        nargs=2,
+        default=None,
+    )
+    parser.add_argument(
         "--include-sgd", action=argparse.BooleanOptionalAction,
         default=None,
     )
@@ -622,7 +644,8 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         "sequence_cluster_cache_dir",
         "full_cohort", "sampling_seed", "train_size", "val_size",
         "split_strategies", "split_seeds", "model_seeds",
-        "n_split_trials", "max_iter", "k", "include_sgd",
+        "n_split_trials", "max_iter", "k", "degree_bin_quantiles",
+        "include_sgd",
         "include_torch_mlp",
         "include_plm", "plm_presets", "plm_adapter", "plm_model",
         "plm_revision",
@@ -853,6 +876,21 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         "embedding_cache_dir",
         None,
     )
+    raw_degree_quantiles = _value(
+        args.degree_bin_quantiles,
+        config_values,
+        "degree_bin_quantiles",
+        DEFAULT_DEGREE_BIN_QUANTILES,
+    )
+    if isinstance(raw_degree_quantiles, (str, bytes)):
+        parser.error("degree_bin_quantiles must be an array of two numbers.")
+    try:
+        degree_bin_quantiles = tuple(
+            _config_float(value, "degree_bin_quantiles")
+            for value in raw_degree_quantiles
+        )
+    except (TypeError, ValueError) as exc:
+        parser.error(str(exc))
 
     try:
         return BenchmarkGridConfig(
@@ -897,6 +935,7 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
             )),
             max_iter=int(_value(args.max_iter, config_values, "max_iter", 1000)),
             k=int(_value(args.k, config_values, "k", 3)),
+            degree_bin_quantiles=degree_bin_quantiles,
             feature_sets=feature_sets,
             baseline_classifiers=tuple(
                 str(value) for value in config_values.get(
@@ -976,6 +1015,8 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
                 "--n-split-trials", str(config.n_split_trials),
                 "--max-iter", str(config.max_iter),
                 "--k", str(config.k),
+                "--degree-bin-quantiles",
+                *(str(value) for value in config.degree_bin_quantiles),
             ]
             if config.protein_metadata is not None:
                 common_args.extend([

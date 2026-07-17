@@ -47,15 +47,24 @@ CLASSIFIER_ORDER = (
     "linear_svm",
     "sgd_logistic",
     "torch_mlp",
+    "degree_logistic",
+    "degree_hgb",
     "always_positive",
     "always_negative",
 )
-BASELINE_CLASSIFIERS = ("always_positive", "always_negative")
+BASELINE_CLASSIFIERS = (
+    "degree_logistic",
+    "degree_hgb",
+    "always_positive",
+    "always_negative",
+)
 CLASSIFIER_LABELS = {
     "logistic": "Logistic",
     "linear_svm": "Linear SVM",
     "sgd_logistic": "SGD Logistic",
     "torch_mlp": "Torch MLP",
+    "degree_logistic": "Degree Logistic",
+    "degree_hgb": "Degree HGB (Sensitivity)",
     "always_positive": "Always Positive",
     "always_negative": "Always Negative",
 }

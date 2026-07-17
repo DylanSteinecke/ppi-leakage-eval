@@ -14,7 +14,7 @@ import logging
 import re
 import shutil
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,8 +33,13 @@ from ..backends import (
     make_model_backend,
 )
 from ..backends.models import (
+    BIOLOGICAL_FEATURE_INPUT,
     CLASSIFIER_CHOICES,
-    is_baseline_classifier,
+    CONSTANT_INPUT,
+    DEGREE_INPUT,
+    classifier_forces_fixed_threshold,
+    model_input_kind,
+    model_spec,
 )
 from ..datasets.common import (
     discover_dataset_metadata_path,
@@ -128,6 +133,26 @@ from ..protein_encoders import (
 )
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..tasks import PPI_TASK
+from ..tasks.ppi_degree import (
+    DEFAULT_DEGREE_BIN_QUANTILES,
+    PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+    TEST_DEGREE_METRICS_FILENAME,
+    TEST_DEGREE_SUMMARY_FILENAME,
+    TRAINING_POSITIVE_DEGREE_FILENAME,
+    VAL_DEGREE_METRICS_FILENAME,
+    VAL_DEGREE_SUMMARY_FILENAME,
+    DegreeDiagnosticContext,
+    DegreeEvaluationPlan,
+    build_degree_evaluation_plan,
+    build_training_degree_profile,
+    deduplicate_preferential_attachment_rows,
+    degree_feature_matrices,
+    degree_identity_context,
+    degree_metric_rows,
+    evaluation_cohort_sha256,
+    summarize_degree_metrics,
+    write_training_degree_profile,
+)
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
 from ..training import TaskSplitData, fit_and_evaluate_task
 from .arg_types import (
@@ -459,6 +484,17 @@ def argument_parser(
             "Select learned-model decision thresholds by validation F1, or "
             "retain each backend's fixed default threshold."
         ))
+    model_group.add_argument(
+        "--degree-bin-quantiles",
+        type=unit_interval,
+        nargs=2,
+        default=DEFAULT_DEGREE_BIN_QUANTILES,
+        metavar=("LOW_QUANTILE", "HIGH_QUANTILE"),
+        help=(
+            "Training-protein quantiles defining low/mid/high degree and "
+            "exposure bins (default: 0.5 0.9)."
+        ),
+    )
 
     # Training args
     training_group = parser.add_argument_group("Training")
@@ -595,6 +631,15 @@ def argument_parser(
         parser.error("--split-name can only be used with --split-col.")
     if args.train_size + args.val_size >= 1.0:
         parser.error("--train-size + --val-size must be less than 1.")
+    args.degree_bin_quantiles = tuple(args.degree_bin_quantiles)
+    if not (
+        0.0 < args.degree_bin_quantiles[0]
+        < args.degree_bin_quantiles[1] < 1.0
+    ):
+        parser.error(
+            "--degree-bin-quantiles requires two strictly increasing "
+            "values between zero and one."
+        )
 
     args.cli_deprecation_warnings = []
     if args.seed is not None:
@@ -850,6 +895,11 @@ class OutputPaths:
     train_metrics_path: Path
     val_metrics_path: Path | None
     test_metrics_path: Path | None
+    training_positive_degree_path: Path
+    val_degree_metrics_path: Path | None
+    test_degree_metrics_path: Path | None
+    val_degree_summary_path: Path | None
+    test_degree_summary_path: Path | None
     split_assignments_path: Path
     dropped_pairs_path: Path
     split_metadata_path: Path
@@ -867,6 +917,20 @@ class OutputPaths:
     train_test_plot_path: Path | None
     train_test_png_path: Path | None
     train_test_f1_heatmap_path: Path | None
+
+
+@dataclass(frozen=True)
+class ModelRunArtifacts:
+    """Outputs produced by one fitted model seed."""
+
+    train_metrics: pd.DataFrame
+    val_metrics: pd.DataFrame | None
+    test_metrics: pd.DataFrame | None
+    predictions: pd.DataFrame | None
+    val_degree_metrics: pd.DataFrame | None
+    test_degree_metrics: pd.DataFrame | None
+    training_history: pd.DataFrame | None
+    performance: dict[str, Any]
 
 
 def make_model_name(feature_name: str, classifier_name: str) -> str:
@@ -1059,6 +1123,91 @@ def make_metrics_df(
     return metrics_df
 
 
+def _append_pa_rows_idempotently(
+    rows: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Append PA once, validating any existing cohort reference."""
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        append_dataframe(rows, output_path)
+        return
+    existing = pd.read_csv(output_path)
+    existing = existing[
+        existing["classifier"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
+    ]
+    if existing.empty:
+        append_dataframe(rows, output_path)
+        return
+
+    ignored = ["execution_id"]
+    sort_columns = [
+        "stratification_axis",
+        "degree_measure",
+        "endpoint_selector",
+        "stratum",
+    ]
+    existing = deduplicate_preferential_attachment_rows(existing).drop(
+        columns=ignored, errors="ignore"
+    )
+    incoming = rows.drop(columns=ignored, errors="ignore")
+    existing = existing.sort_values(sort_columns).reset_index(drop=True)
+    incoming = incoming.sort_values(sort_columns).reset_index(drop=True)
+    for column in existing.columns:
+        if (
+            pd.api.types.is_object_dtype(existing[column])
+            or pd.api.types.is_string_dtype(incoming[column])
+        ):
+            existing[column] = existing[column].fillna("").astype(str)
+            incoming[column] = incoming[column].fillna("").astype(str)
+    try:
+        pd.testing.assert_frame_equal(
+            existing,
+            incoming,
+            check_dtype=False,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+    except AssertionError as exc:
+        raise ValueError(
+            f"Cannot append to {output_path}: its preferential-attachment "
+            "reference does not match the current evaluation cohort."
+        ) from exc
+
+
+def append_preferential_attachment_metrics(
+        *, plans: Mapping[str, DegreeEvaluationPlan],
+        context: DegreeDiagnosticContext, execution_id: str,
+        output_paths: OutputPaths,
+    ) -> None:
+    """Write one threshold-free PA reference for each evaluated cohort."""
+    output_paths_by_split = {
+        "val": output_paths.val_degree_metrics_path,
+        "test": output_paths.test_degree_metrics_path,
+    }
+    for split_name, plan in plans.items():
+        output_path = output_paths_by_split[split_name]
+        if output_path is None:
+            continue
+        metadata = context.metric_metadata(
+            split_name=split_name,
+            classifier_name=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+            model_name=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+            model_role="degree_reference",
+            feature_name=DEGREE_INPUT,
+            run_number=0,
+            model_seed=np.nan,
+            execution_id=execution_id,
+        )
+        rows = degree_metric_rows(
+            plan,
+            scores=plan.preferential_attachment_scores,
+            predictions=None,
+            global_threshold=None,
+            metadata=metadata,
+        )
+        _append_pa_rows_idempotently(rows, output_path)
+
+
 def reset_output_files(
         output_paths: list[Path | None], append_results: bool,
     ) -> None:
@@ -1076,29 +1225,31 @@ def train_and_evaluate_model_run(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
         x_test: Any | None, feature_name: str, classifier_name: str,
+        degree_plans: Mapping[str, DegreeEvaluationPlan],
+        degree_context: DegreeDiagnosticContext,
         run_number: int,
         execution_id: str, args: argparse.Namespace,
         best_checkpoint_path: Path | None = None,
         last_checkpoint_path: Path | None = None,
         resume_from: Path | None = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame | None,
-               pd.DataFrame | None, pd.DataFrame | None,
-               pd.DataFrame | None, dict[str, Any]]:
+    ) -> ModelRunArtifacts:
     """
     Train and evaluate one model configuration for one run number.
     """
     # Define model metadata
     model_name = make_model_name(feature_name, classifier_name)
-    is_baseline = is_baseline_classifier(classifier_name)
+    spec = model_spec(classifier_name)
+    is_constant = spec.input_kind == CONSTANT_INPUT
     run_seed = args.model_seeds[run_number - 1]
-    model_seed = np.nan if is_baseline else run_seed
+    model_seed = np.nan if is_constant else run_seed
     backend_name = backend_name_for_classifier(classifier_name)
     backend_max_iter = (
         args.torch_max_epochs
         if backend_name == TORCH_BACKEND
         else args.max_iter
     )
-    max_iter = np.nan if is_baseline else backend_max_iter
+    effective_max_iter = spec.fixed_max_iter or backend_max_iter
+    max_iter = np.nan if is_constant else effective_max_iter
     feature_meta = feature_metadata(feature_name, args)
     run_identity = {
         "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
@@ -1126,7 +1277,7 @@ def train_and_evaluate_model_run(
         }
     backend = make_model_backend(
         classifier_name=classifier_name,
-        max_iter=backend_max_iter,
+        max_iter=effective_max_iter,
         random_state=run_seed,
         backend_name=backend_name,
         best_checkpoint_path=best_checkpoint_path,
@@ -1154,7 +1305,7 @@ def train_and_evaluate_model_run(
         test=test_split,
         evaluation_policy=BinaryClassificationPolicy(
             threshold_strategy=args.threshold_selection,
-            force_fixed=is_baseline,
+            force_fixed=classifier_forces_fixed_threshold(classifier_name),
         ),
     )
     fit_result = model_run_result.fit_result
@@ -1234,6 +1385,34 @@ def train_and_evaluate_model_run(
         raise RuntimeError("Training evaluation was not produced.")
     val_metrics_df = metrics_frame("val")
     test_metrics_df = metrics_frame("test")
+    degree_metrics_frames: dict[str, pd.DataFrame | None] = {
+        "val": None,
+        "test": None,
+    }
+    for split_name, plan in degree_plans.items():
+        evaluation = model_run_result.split_evaluations.get(split_name)
+        if evaluation is None:
+            continue
+        degree_metrics_frames[split_name] = degree_metric_rows(
+            plan,
+            scores=evaluation.scores,
+            predictions=evaluation.predictions,
+            global_threshold=threshold_selection.threshold,
+            metadata=degree_context.metric_metadata(
+                split_name=split_name,
+                classifier_name=classifier_name,
+                model_name=model_name,
+                model_role=spec.reporting_role,
+                feature_name=(
+                    DEGREE_INPUT
+                    if spec.input_kind == DEGREE_INPUT
+                    else feature_meta["features"]
+                ),
+                run_number=run_number,
+                model_seed=model_seed,
+                execution_id=execution_id,
+            ),
+        )
     predictions_df = None
     if args.evaluate_test_metrics:
         test_evaluation = model_run_result.split_evaluations.get("test")
@@ -1270,7 +1449,7 @@ def train_and_evaluate_model_run(
         "classifier": classifier_name,
         "backend": backend.backend_name,
         "run_number": run_identity["run_number"],
-        "model_seed": None if is_baseline else run_seed,
+        "model_seed": None if is_constant else run_seed,
         "fit_seconds": float(fit_seconds),
         "evaluation_seconds": {
             split_name: evaluation.evaluation_seconds
@@ -1298,13 +1477,15 @@ def train_and_evaluate_model_run(
         },
         "peak_memory_bytes_after_run": peak_memory_bytes(),
     }
-    return (
-        train_metrics_df,
-        val_metrics_df,
-        test_metrics_df,
-        predictions_df,
-        training_history_df,
-        model_performance,
+    return ModelRunArtifacts(
+        train_metrics=train_metrics_df,
+        val_metrics=val_metrics_df,
+        test_metrics=test_metrics_df,
+        predictions=predictions_df,
+        val_degree_metrics=degree_metrics_frames["val"],
+        test_degree_metrics=degree_metrics_frames["test"],
+        training_history=training_history_df,
+        performance=model_performance,
     )
 
 
@@ -1312,6 +1493,8 @@ def run_model_reruns(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
         x_test: Any | None, feature_name: str, classifier_name: str,
+        degree_plans: Mapping[str, DegreeEvaluationPlan],
+        degree_context: DegreeDiagnosticContext,
         execution_id: str, args: argparse.Namespace,
         output_paths: OutputPaths,
     ) -> list[dict[str, Any]]:
@@ -1341,39 +1524,40 @@ def run_model_reruns(
             best_checkpoint_path = None
             last_checkpoint_path = None
             resume_from = None
-        (
-            train_metrics_df,
-            val_metrics_df,
-            test_metrics_df,
-            predictions_df,
-            training_history_df,
-            model_performance,
-        ) = (
-            train_and_evaluate_model_run(
-                train_df=train_df,
-                val_df=val_df,
-                test_df=test_df,
-                x_train=x_train,
-                x_val=x_val,
-                x_test=x_test,
-                feature_name=feature_name,
-                classifier_name=classifier_name,
-                run_number=run_number,
-                execution_id=execution_id,
-                args=args,
-                best_checkpoint_path=best_checkpoint_path,
-                last_checkpoint_path=last_checkpoint_path,
-                resume_from=resume_from,
-            )
+        artifacts = train_and_evaluate_model_run(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            x_train=x_train,
+            x_val=x_val,
+            x_test=x_test,
+            feature_name=feature_name,
+            classifier_name=classifier_name,
+            degree_plans=degree_plans,
+            degree_context=degree_context,
+            run_number=run_number,
+            execution_id=execution_id,
+            args=args,
+            best_checkpoint_path=best_checkpoint_path,
+            last_checkpoint_path=last_checkpoint_path,
+            resume_from=resume_from,
         )
-        model_performance_records.append(model_performance)
+        model_performance_records.append(artifacts.performance)
         # Save performance and prediction results
         output_dfs = (
-            (train_metrics_df, output_paths.train_metrics_path),
-            (val_metrics_df, output_paths.val_metrics_path),
-            (test_metrics_df, output_paths.test_metrics_path),
-            (predictions_df, output_paths.predictions_path),
-            (training_history_df, output_paths.training_history_path),
+            (artifacts.train_metrics, output_paths.train_metrics_path),
+            (artifacts.val_metrics, output_paths.val_metrics_path),
+            (artifacts.test_metrics, output_paths.test_metrics_path),
+            (artifacts.predictions, output_paths.predictions_path),
+            (
+                artifacts.val_degree_metrics,
+                output_paths.val_degree_metrics_path,
+            ),
+            (
+                artifacts.test_degree_metrics,
+                output_paths.test_degree_metrics_path,
+            ),
+            (artifacts.training_history, output_paths.training_history_path),
         )
         for output_df, output_path in output_dfs:
             if output_df is not None and output_path is not None:
@@ -1404,7 +1588,12 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     train_metrics_path = run_dir / TRAIN_METRICS_FILENAME
     all_val_metrics_path = run_dir / VAL_METRICS_FILENAME
     all_test_metrics_path = run_dir / TEST_METRICS_FILENAME
+    all_val_degree_metrics_path = run_dir / VAL_DEGREE_METRICS_FILENAME
+    all_test_degree_metrics_path = run_dir / TEST_DEGREE_METRICS_FILENAME
     split_assignments_path = splits_dir / SPLIT_ASSIGNMENTS_FILENAME
+    training_positive_degree_path = (
+        splits_dir / TRAINING_POSITIVE_DEGREE_FILENAME
+    )
     dropped_pairs_path = splits_dir / DROPPED_PAIRS_FILENAME
     split_metadata_path = splits_dir / SPLIT_METADATA_FILENAME
     sequence_cluster_assignments_path = (
@@ -1417,6 +1606,8 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     train_summary_path = run_dir / TRAIN_SUMMARY_FILENAME
     all_val_summary_path = run_dir / VAL_SUMMARY_FILENAME
     all_test_summary_path = run_dir / TEST_SUMMARY_FILENAME
+    all_val_degree_summary_path = run_dir / VAL_DEGREE_SUMMARY_FILENAME
+    all_test_degree_summary_path = run_dir / TEST_DEGREE_SUMMARY_FILENAME
     all_train_plot_path = plots_dir / TRAIN_PLOT_FILENAME
     all_val_plot_path = plots_dir / VAL_PLOT_FILENAME
     all_test_plot_path = plots_dir / TEST_PLOT_FILENAME
@@ -1434,10 +1625,22 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         all_val_metrics_path if args.has_validation_split else None)
     test_metrics_path = (
         all_test_metrics_path if args.evaluate_test_metrics else None)
+    val_degree_metrics_path = (
+        all_val_degree_metrics_path if args.has_validation_split else None
+    )
+    test_degree_metrics_path = (
+        all_test_degree_metrics_path if args.evaluate_test_metrics else None
+    )
     val_summary_path = (
         all_val_summary_path if args.has_validation_split else None)
     test_summary_path = (
         all_test_summary_path if args.evaluate_test_metrics else None)
+    val_degree_summary_path = (
+        all_val_degree_summary_path if args.has_validation_split else None
+    )
+    test_degree_summary_path = (
+        all_test_degree_summary_path if args.evaluate_test_metrics else None
+    )
     train_plot_path = all_train_plot_path if not args.no_metrics_plots else None
     val_plot_path = None
     test_plot_path = None
@@ -1474,6 +1677,11 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
         train_metrics_path=train_metrics_path,
         val_metrics_path=val_metrics_path,
         test_metrics_path=test_metrics_path,
+        training_positive_degree_path=training_positive_degree_path,
+        val_degree_metrics_path=val_degree_metrics_path,
+        test_degree_metrics_path=test_degree_metrics_path,
+        val_degree_summary_path=val_degree_summary_path,
+        test_degree_summary_path=test_degree_summary_path,
         split_assignments_path=split_assignments_path,
         dropped_pairs_path=dropped_pairs_path,
         split_metadata_path=split_metadata_path,
@@ -1513,6 +1721,8 @@ def initialize_output_files(
             TRAIN_METRICS_FILENAME,
             VAL_METRICS_FILENAME,
             TEST_METRICS_FILENAME,
+            VAL_DEGREE_METRICS_FILENAME,
+            TEST_DEGREE_METRICS_FILENAME,
         )
     ]
     summary_paths = [
@@ -1521,6 +1731,8 @@ def initialize_output_files(
             TRAIN_SUMMARY_FILENAME,
             VAL_SUMMARY_FILENAME,
             TEST_SUMMARY_FILENAME,
+            VAL_DEGREE_SUMMARY_FILENAME,
+            TEST_DEGREE_SUMMARY_FILENAME,
         )
     ]
     plot_paths = [
@@ -1568,6 +1780,7 @@ def initialize_output_files(
     if args.has_validation_split:
         active_derived_paths.extend([
             output_paths.val_summary_path,
+            output_paths.val_degree_summary_path,
             plots_dir / VAL_PLOT_FILENAME,
             plots_dir / TRAIN_VAL_PLOT_FILENAME,
             plots_dir / TRAIN_VAL_PNG_FILENAME,
@@ -1576,6 +1789,7 @@ def initialize_output_files(
     if args.evaluate_test_metrics:
         active_derived_paths.extend([
             output_paths.test_summary_path,
+            output_paths.test_degree_summary_path,
             plots_dir / TEST_PLOT_FILENAME,
             plots_dir / TRAIN_TEST_PLOT_FILENAME,
             plots_dir / TRAIN_TEST_PNG_FILENAME,
@@ -1609,6 +1823,24 @@ def summarize_model_outputs(
         summaries[split_name] = summary_df
 
     return summaries
+
+
+def summarize_degree_outputs(output_paths: OutputPaths) -> None:
+    """Write validation/test summaries for additive degree artifacts."""
+    for metrics_path, summary_path in (
+        (
+            output_paths.val_degree_metrics_path,
+            output_paths.val_degree_summary_path,
+        ),
+        (
+            output_paths.test_degree_metrics_path,
+            output_paths.test_degree_summary_path,
+        ),
+    ):
+        if metrics_path is None or summary_path is None:
+            continue
+        summary = summarize_degree_metrics(metrics_path)
+        write_dataframe_threadsafe(summary, summary_path)
 
 
 def plot_model_outputs(
@@ -1715,6 +1947,26 @@ def log_model_outputs(
         sections.append("\n".join(lines))
 
     artifact_specs = (
+        (
+            output_paths.training_positive_degree_path,
+            "training-positive degree profile",
+        ),
+        (
+            output_paths.val_degree_metrics_path,
+            "validation degree metrics",
+        ),
+        (
+            output_paths.val_degree_summary_path,
+            "validation degree summary",
+        ),
+        (
+            output_paths.test_degree_metrics_path,
+            "test degree metrics",
+        ),
+        (
+            output_paths.test_degree_summary_path,
+            "test degree summary",
+        ),
         (output_paths.train_plot_path, "train metric plot"),
         (output_paths.val_plot_path, "validation metric plot"),
         (output_paths.test_plot_path, "test metric plot"),
@@ -1919,6 +2171,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             val_df=val_df,
             test_df=test_df,
         )
+        degree_profile = build_training_degree_profile(
+            train_df=train_df,
+            split_assignments=split_assignments,
+            quantiles=args.degree_bin_quantiles,
+        )
+        degree_plans: dict[str, DegreeEvaluationPlan] = {}
+        if val_df is not None:
+            degree_plans["val"] = build_degree_evaluation_plan(
+                val_df,
+                degree_profile,
+                args.effective_split_strategy,
+            )
+        if args.evaluate_test_metrics:
+            degree_plans["test"] = build_degree_evaluation_plan(
+                test_df,
+                degree_profile,
+                args.effective_split_strategy,
+            )
         split_metadata = compute_split_metadata(
             args=args,
             output_paths=output_paths,
@@ -1937,6 +2207,87 @@ def main(argv: Sequence[str] | None = None) -> None:
             negative_construction=negative_construction,
             task_name=PPI_TASK.name,
         )
+        if args.effective_split_strategy in {"c2", "c3"}:
+            grouping_identity = (
+                {
+                    "grouping_kind": "protein_identity",
+                    "identity_key": "canonical_protein_id",
+                }
+                if args.sequence_cluster_metadata is None
+                else args.sequence_cluster_metadata
+            )
+        else:
+            grouping_identity = {"grouping_kind": "not_applicable"}
+        protocol_instance = {
+            "task": PPI_TASK.name,
+            "protocol_id": split_spec.protocol_id,
+            "protocol_version": split_spec.protocol_version,
+            "split_strategy": args.effective_split_strategy,
+            "split_name": args.split_name,
+            "split_seed": args.split_seed,
+            "target_train_size": args.train_size,
+            "target_val_size": args.val_size,
+            "target_test_size": 1.0 - args.train_size - args.val_size,
+            "grouping": grouping_identity,
+        }
+        control_selection_context = {
+            "task": PPI_TASK.name,
+            "dataset_sha256": split_metadata["pairs_file_sha256"],
+            "selected_cohort_sha256": evaluation_cohort_sha256(protein_pairs),
+            "negative_construction": negative_construction,
+            "sampling_seed": args.sampling_seed,
+            "max_pairs": args.max_pairs,
+            "target_train_size": args.train_size,
+            "target_val_size": args.val_size,
+            "target_test_size": 1.0 - args.train_size - args.val_size,
+        }
+        degree_identity = degree_identity_context(
+            degree_profile,
+            dataset_sha256=split_metadata["pairs_file_sha256"],
+            negative_construction=negative_construction,
+            grouping_identity=grouping_identity,
+            protocol_instance=protocol_instance,
+            control_selection_context=control_selection_context,
+        )
+        degree_context = DegreeDiagnosticContext(
+            task=PPI_TASK.name,
+            split_strategy=args.effective_split_strategy,
+            protocol_id=split_spec.protocol_id,
+            protocol_version=split_spec.protocol_version,
+            split_seed=args.split_seed,
+            evaluation_cohort_hashes={
+                split_name: plan.cohort_sha256
+                for split_name, plan in degree_plans.items()
+            },
+            identity=degree_identity,
+        )
+        degree_diagnostic_metadata = {
+            **degree_profile.metadata,
+            "identity": degree_context.identity,
+            "evaluation_cohort_sha256": (
+                degree_context.evaluation_cohort_hashes
+            ),
+            "primary_fitted_control": "degree_logistic",
+            "sensitivity_control": "degree_hgb",
+            "preferential_attachment_score": "log1p(d_a * d_b)",
+            "coefficient_interpretation_allowed": False,
+        }
+        split_metadata["diagnostics"]["degree_diagnostic"] = (
+            degree_diagnostic_metadata
+        )
+        split_metadata["training_positive_degree_path"] = str(
+            output_paths.training_positive_degree_path
+        )
+        split_metadata["val_degree_metrics_path"] = (
+            None
+            if output_paths.val_degree_metrics_path is None
+            else str(output_paths.val_degree_metrics_path)
+        )
+        split_metadata["test_degree_metrics_path"] = (
+            None
+            if output_paths.test_degree_metrics_path is None
+            else str(output_paths.test_degree_metrics_path)
+        )
         try:
             write_selection_manifest(
                 selection_manifest=selection_manifest,
@@ -1952,6 +2303,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 sequence_cluster_assignments=(
                     sequence_cluster_assignments),
             )
+            write_training_degree_profile(
+                degree_profile,
+                output_paths.training_positive_degree_path,
+                append_results=args.append_results,
+            )
             initialize_output_files(args, output_paths)
             append_invocation_log(
                 invocation_log_entry(
@@ -1964,21 +2320,34 @@ def main(argv: Sequence[str] | None = None) -> None:
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
 
+    with performance.stage("degree_reference"):
+        append_preferential_attachment_metrics(
+            plans=degree_plans,
+            context=degree_context,
+            execution_id=execution_id,
+            output_paths=output_paths,
+        )
+
     # Define the model configurations to run
-    baseline_classifiers = [
+    constant_classifiers = [
         classifier_name
         for classifier_name in args.classifiers
-        if is_baseline_classifier(classifier_name)
+        if model_input_kind(classifier_name) == CONSTANT_INPUT
+    ]
+    degree_classifiers = [
+        classifier_name
+        for classifier_name in args.classifiers
+        if model_input_kind(classifier_name) == DEGREE_INPUT
     ]
     learned_classifiers = [
         classifier_name
         for classifier_name in args.classifiers
-        if not is_baseline_classifier(classifier_name)
+        if model_input_kind(classifier_name) == BIOLOGICAL_FEATURE_INPUT
     ]
 
     # Run the baseline models
     with performance.stage("baseline_models"):
-        for classifier_name in baseline_classifiers:
+        for classifier_name in constant_classifiers:
             performance.add_model_runs(
                 run_model_reruns(
                     train_df=train_df,
@@ -1990,11 +2359,47 @@ def main(argv: Sequence[str] | None = None) -> None:
                         test_df if args.evaluate_test_metrics else None),
                     feature_name=FEATURELESS_FEATURE,
                     classifier_name=classifier_name,
+                    degree_plans=degree_plans,
+                    degree_context=degree_context,
                     execution_id=execution_id,
                     args=args,
                     output_paths=output_paths,
                 )
             )
+        if degree_classifiers:
+            degree_x_train, degree_x_val, degree_x_test = (
+                degree_feature_matrices(
+                    train_df=train_df,
+                    val_df=val_df,
+                    test_df=(
+                        test_df if args.evaluate_test_metrics else None
+                    ),
+                    profile=degree_profile,
+                )
+            )
+            performance.add_matrices({
+                "degree_train": degree_x_train,
+                "degree_val": degree_x_val,
+                "degree_test": degree_x_test,
+            })
+            for classifier_name in degree_classifiers:
+                performance.add_model_runs(
+                    run_model_reruns(
+                        train_df=train_df,
+                        val_df=val_df,
+                        test_df=test_df,
+                        x_train=degree_x_train,
+                        x_val=degree_x_val,
+                        x_test=degree_x_test,
+                        feature_name=FEATURELESS_FEATURE,
+                        classifier_name=classifier_name,
+                        degree_plans=degree_plans,
+                        degree_context=degree_context,
+                        execution_id=execution_id,
+                        args=args,
+                        output_paths=output_paths,
+                    )
+                )
 
     # Extract the combined feature set
     if learned_classifiers:
@@ -2059,6 +2464,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     x_test=x_test,
                     feature_name=feature_name,
                     classifier_name=classifier_name,
+                    degree_plans=degree_plans,
+                    degree_context=degree_context,
                     execution_id=execution_id,
                     args=args,
                     output_paths=output_paths,
@@ -2068,6 +2475,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Summarize and plot model performance
     with performance.stage("summarize_results"):
         summaries = summarize_model_outputs(output_paths)
+        summarize_degree_outputs(output_paths)
     with performance.stage("plot_results"):
         heatmap_paths = plot_model_outputs(output_paths)
     log_model_outputs(summaries, output_paths, heatmap_paths)

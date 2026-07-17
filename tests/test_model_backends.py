@@ -12,9 +12,14 @@ from ppi_benchmark.backends import (
 )
 from ppi_benchmark.backends.models import (
     CLASSIFIER_CHOICES,
+    CONSTANT_INPUT,
+    DEGREE_INPUT,
     MODEL_SPECS,
+    classifier_forces_fixed_threshold,
     is_baseline_classifier,
     make_classifier,
+    model_input_kind,
+    model_reporting_role,
     model_spec,
     score_estimator,
 )
@@ -123,10 +128,39 @@ def test_model_registry_is_the_single_source_for_choices_and_routing():
     assert backend_name_for_classifier("logistic") == "sklearn"
     assert backend_name_for_classifier("torch_mlp") == "torch"
     assert is_baseline_classifier("always_positive") is True
+    assert is_baseline_classifier("degree_logistic") is True
     assert is_baseline_classifier("sgd_logistic") is False
+    assert model_input_kind("always_positive") == CONSTANT_INPUT
+    assert model_input_kind("degree_logistic") == DEGREE_INPUT
+    assert classifier_forces_fixed_threshold("always_positive") is True
+    assert classifier_forces_fixed_threshold("degree_logistic") is False
+    assert model_spec("degree_logistic").fixed_max_iter == 1000
+    assert model_spec("degree_hgb").fixed_max_iter == 100
+    assert model_reporting_role("degree_logistic") == "primary_degree_control"
+    assert model_reporting_role("logistic") == "predictive_model"
     assert model_spec("torch_mlp").estimator_factory is None
     with pytest.raises(ValueError, match="Unknown classifier: missing"):
         model_spec("missing")
+
+
+def test_degree_controls_use_the_fixed_predeclared_estimators():
+    logistic = make_classifier(
+        "degree_logistic", max_iter=3, random_state=17
+    )
+    hgb = make_classifier("degree_hgb", max_iter=3, random_state=17)
+
+    assert logistic.solver == "liblinear"
+    assert logistic.class_weight == "balanced"
+    assert logistic.C == 1.0
+    assert logistic.max_iter == 1000
+    assert logistic.random_state == 17
+    assert hgb.max_depth == 3
+    assert hgb.max_iter == 100
+    assert hgb.learning_rate == 0.05
+    assert hgb.l2_regularization == 1.0
+    assert hgb.early_stopping is False
+    assert hgb.class_weight == "balanced"
+    assert hgb.random_state == 17
 
 
 def test_torch_mlp_batches_sparse_densification_and_early_stops(

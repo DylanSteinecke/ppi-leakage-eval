@@ -102,7 +102,9 @@ The runner profiles are:
   logistic regression, linear SVM, and SGD logistic regression; the full
   cohort and 100 C-split trials are used by default.
 
-Both profiles include the constant baselines. The example scripts create an
+Both profiles include the leakage-safe `degree_logistic` control and the
+constant baselines. The fixed `degree_hgb` sensitivity control is registered
+but excluded from default grids. The example scripts create an
 `identity` child grid with random/C1/C2/C3 and an
 `mmseqs2_id0.30_cov0.80_mode0` child grid with C2/C3; suite-level aggregation
 compares all six configurations. Set
@@ -135,7 +137,9 @@ Each example invocation creates one suite at `<OUT_DIR>/<RUN_NAME>/` with two
 immutable child grids. Every split strategy, split seed, baseline group, and
 feature set gets an independent run directory; no grid cell appends into
 another cell's files. Each child records `benchmark_config.json`, while
-aggregation writes `benchmark_manifest.csv`, `benchmark_summary.csv`, and
+aggregation writes `benchmark_manifest.csv`, `benchmark_summary.csv`,
+`benchmark_degree_summary.csv`, `benchmark_degree_lift.csv`,
+`benchmark_degree_control_selection.json`, and
 `benchmark_train_val_f1.png` at the suite root. Omit `RUN_NAME` to use a
 timestamped name.
 
@@ -248,6 +252,41 @@ record contains stage durations, process peak resident memory, feature-matrix
 shape/density/storage statistics, and per-model fit/evaluation timings and
 solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
 `evaluation_seconds`, and `solver_iterations` columns.
+
+## Degree and hub-bias diagnostic
+
+Every PPI run profiles the retained training graph without consulting
+validation or test edges. Positive degree counts distinct positive training
+partners; training exposure counts all retained training examples containing a
+protein. The training-only profile is written to
+`splits/training_positive_degree.csv`, with hashes, bin cutoffs, and provenance
+under `diagnostics.degree_diagnostic` in `splits/split_metadata.json`.
+
+Validation and, only with `--eval-test-set`, test reporting is written to
+`val_degree_metrics.csv` / `test_degree_metrics.csv` and matching summary
+files. These contain the threshold-free preferential-attachment reference,
+global and degree-stratified metrics for every requested model, counts and
+prevalence, and the single global validation-selected threshold. C2 reports
+the familiar endpoint because the novel endpoint degree is structurally zero;
+C3 reports global controls and marks degree stratification inapplicable. Use
+`--degree-bin-quantiles 0.5 0.9` (or the matching grid/TOML option) to change
+the default training-distribution cutoffs.
+
+Benchmark aggregation joins biological models to the fitted control only when
+the dataset, protocol instance, grouping, negative construction, assignments,
+training graph, and exact evaluation cohort hashes agree. The headline AUPRC
+quantity is `residual_over_degree_control`; it is a residual diagnostic, not a
+claim of genuine biological signal. Individual `degree_logistic` coefficients
+must not be interpreted because its four symmetric derived features are
+intentionally correlated.
+
+Aggregation locks the fitted-control decision in
+`benchmark_degree_control_selection.json` using validation evidence only,
+before reading test degree metrics. Re-aggregation validates the evidence hash
+and refuses to change the choice. Use a new benchmark directory if validation
+evidence or the pre-publication control decision changes. The first aggregation
+is the lock event; if the five-seed HGB evidence is missing, the predeclared
+fallback deliberately locks `degree_logistic`.
 
 ## Frozen protein encoders and embedding cache
 

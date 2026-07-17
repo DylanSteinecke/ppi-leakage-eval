@@ -11,12 +11,20 @@ from the train/val/test metrics summary files that exist.
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from ..reporting.benchmark_plots import plot_benchmark_train_val_f1
+from ..reporting.degree import (
+    BENCHMARK_DEGREE_CONTROL_SELECTION_FILENAME,
+    BENCHMARK_DEGREE_LIFT_FILENAME,
+    BENCHMARK_DEGREE_SUMMARY_FILENAME,
+    aggregate_degree_diagnostics,
+    protocol_lift_table,
+)
 from ..splitting.protocols import C2_SPLIT_STRATEGY, C3_SPLIT_STRATEGY
 
 
@@ -30,6 +38,24 @@ SUMMARY_FILES = (
     ("val", "val_metrics_summary.csv"),
     ("test", "test_metrics_summary.csv"),
 )
+
+
+@dataclass(frozen=True)
+class BenchmarkAggregationResult:
+    """Primary and additive benchmark aggregation outputs."""
+
+    manifest: pd.DataFrame
+    summary: pd.DataFrame
+    degree_summary: pd.DataFrame
+    degree_lift: pd.DataFrame
+    degree_selection: dict[str, Any]
+
+    def __iter__(self):
+        """Preserve the historical two-value unpacking contract."""
+        yield self.manifest
+        yield self.summary
+
+
 DATASET_IDENTITY_COLUMNS = (
     "pairs",
     "fasta",
@@ -206,6 +232,21 @@ def parse_args() -> argparse.Namespace:
         "--summary-out",
         default=None,
         help="Optional output path for the combined metrics summary CSV.",
+    )
+    parser.add_argument(
+        "--degree-summary-out",
+        default=None,
+        help="Optional output path for benchmark degree-stratified summaries.",
+    )
+    parser.add_argument(
+        "--degree-lift-out",
+        default=None,
+        help="Optional output path for hash-gated degree-control lift rows.",
+    )
+    parser.add_argument(
+        "--degree-control-selection-out",
+        default=None,
+        help="Optional path for the immutable degree-control selection lock.",
     )
     parser.add_argument(
         "--train-val-plot-out",
@@ -590,7 +631,10 @@ def aggregate_benchmark_results(
         benchmark_dir: Path | str,
         manifest_out: Path | str | None = None,
         summary_out: Path | str | None = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        degree_summary_out: Path | str | None = None,
+        degree_lift_out: Path | str | None = None,
+        degree_control_selection_out: Path | str | None = None,
+    ) -> BenchmarkAggregationResult:
     """
     Write benchmark manifest and combined summary CSVs.
     """
@@ -603,10 +647,24 @@ def aggregate_benchmark_results(
         benchmark_dir / SUMMARY_FILENAME
         if summary_out is None else Path(summary_out)
     )
+    degree_summary_out = (
+        benchmark_dir / BENCHMARK_DEGREE_SUMMARY_FILENAME
+        if degree_summary_out is None else Path(degree_summary_out)
+    )
+    degree_lift_out = (
+        benchmark_dir / BENCHMARK_DEGREE_LIFT_FILENAME
+        if degree_lift_out is None else Path(degree_lift_out)
+    )
+    degree_control_selection_out = (
+        benchmark_dir / BENCHMARK_DEGREE_CONTROL_SELECTION_FILENAME
+        if degree_control_selection_out is None
+        else Path(degree_control_selection_out)
+    )
 
     manifest_rows = []
     summary_frames = []
-    for run_dir in run_directories(benchmark_dir):
+    directories = run_directories(benchmark_dir)
+    for run_dir in directories:
         metadata = read_json(run_dir / METADATA_RELATIVE_PATH)
         row = manifest_row(run_dir, metadata)
         manifest_rows.append(row)
@@ -637,8 +695,22 @@ def aggregate_benchmark_results(
     summary_out.parent.mkdir(parents=True, exist_ok=True)
     manifest_df.to_csv(manifest_out, index=False)
     summary_df.to_csv(summary_out, index=False)
+    degree_summary, degree_lift, degree_selection = (
+        aggregate_degree_diagnostics(
+            directories,
+            summary_out=degree_summary_out,
+            lift_out=degree_lift_out,
+            selection_out=degree_control_selection_out,
+        )
+    )
 
-    return manifest_df, summary_df
+    return BenchmarkAggregationResult(
+        manifest=manifest_df,
+        summary=summary_df,
+        degree_summary=degree_summary,
+        degree_lift=degree_lift,
+        degree_selection=degree_selection,
+    )
 
 
 def main() -> None:
@@ -646,15 +718,27 @@ def main() -> None:
     Run the benchmark aggregator.
     """
     args = parse_args()
-    manifest_df, summary_df = aggregate_benchmark_results(
+    result = aggregate_benchmark_results(
         benchmark_dir=args.benchmark_dir,
         manifest_out=args.manifest_out,
         summary_out=args.summary_out,
+        degree_summary_out=args.degree_summary_out,
+        degree_lift_out=args.degree_lift_out,
+        degree_control_selection_out=args.degree_control_selection_out,
     )
+    manifest_df = result.manifest
+    summary_df = result.summary
     manifest_out = args.manifest_out or (
         Path(args.benchmark_dir) / MANIFEST_FILENAME)
     summary_out = args.summary_out or (
         Path(args.benchmark_dir) / SUMMARY_FILENAME)
+    degree_summary_out = args.degree_summary_out or (
+        Path(args.benchmark_dir) / BENCHMARK_DEGREE_SUMMARY_FILENAME)
+    degree_lift_out = args.degree_lift_out or (
+        Path(args.benchmark_dir) / BENCHMARK_DEGREE_LIFT_FILENAME)
+    degree_control_selection_out = args.degree_control_selection_out or (
+        Path(args.benchmark_dir) / BENCHMARK_DEGREE_CONTROL_SELECTION_FILENAME
+    )
     train_val_plot_out = args.train_val_plot_out or (
         Path(args.benchmark_dir) / TRAIN_VAL_F1_PLOT_FILENAME)
     train_val_plot_out = Path(train_val_plot_out)
@@ -662,6 +746,30 @@ def main() -> None:
         train_val_plot_out.unlink()
     print(f"Wrote {len(manifest_df)} run rows to {manifest_out}")
     print(f"Wrote {len(summary_df)} summary rows to {summary_out}")
+    degree_summary = result.degree_summary
+    degree_lift = result.degree_lift
+    print(
+        f"Wrote {len(degree_summary)} degree summary rows to "
+        f"{degree_summary_out}"
+    )
+    selected_controls = sorted({
+        context["selected_control"]
+        for context in result.degree_selection.get("selections", [])
+    } or {
+        result.degree_selection["default_on_tie_or_missing"]
+    })
+    print(
+        "Locked validation-selected fitted degree control: "
+        + ", ".join(map(str, selected_controls))
+        + f" ({degree_control_selection_out})"
+    )
+    print(f"Wrote {len(degree_lift)} degree lift rows to {degree_lift_out}")
+    lift_table = protocol_lift_table(degree_lift)
+    if lift_table.empty:
+        print("Degree lift table unavailable: no matched real/control rows")
+    else:
+        print("Protocol-level residual_over_degree_control (AUPRC)")
+        print(lift_table.to_string(index=False))
     plot_written = plot_benchmark_train_val_f1(
         summary=summary_df,
         plot_path=train_val_plot_out,
