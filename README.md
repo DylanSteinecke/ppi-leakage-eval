@@ -70,18 +70,23 @@ conda activate ppi
 bash scripts/run_toy_ppi_example.sh
 ```
 
-The toy runner defaults to the `exhaustive` profile. Set
-`BENCHMARK_PROFILE=laptop` for the smaller grid, or `GENERATE_TOY_DATA=0` to
-reuse the existing files under `processed/`.
+The toy runner defaults to the `exhaustive` profile and runs six split
+configurations: random, C1, identity-grouped C2/C3, and MMseqs2-grouped C2/C3.
+MMseqs2 must be available as `mmseqs` on `PATH`. Set
+`INCLUDE_SEQUENCE_CLUSTER_SPLITS=0` for only the dependency-free identity
+grid, `BENCHMARK_PROFILE=laptop` for the smaller model grid, or
+`GENERATE_TOY_DATA=0` to reuse the existing files under `processed/`.
 
 ## Run the yeast BioGRID example
 
 The local UniProt FASTA uses headers such as `sp|P04387|GAL80_YEAST`, while
 BioGRID stores the matching accession as `P04387`. The example runner prepares
 the current local files, samples negatives within the yeast taxon, and runs a
-laptop-sized sparse benchmark. By default, the `laptop` profile selects a
-deterministic, label-stratified cohort of at most 10,000 pairs before creating
-each split:
+laptop-sized sparse benchmark. The yeast wrapper selects a deterministic,
+label-stratified cohort of 50,000 pairs before creating each split. The larger
+workflow-specific cohort is needed for C2's train-side representation
+invariant; a 10,000-pair yeast sample is too sparse even though that remains
+the general `laptop` profile default:
 
 ```bash
 conda activate ppi
@@ -90,18 +95,32 @@ BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh
 
 The runner profiles are:
 
-- `laptop`: TF-IDF and count features with SGD logistic regression, at most
-  10,000 pairs, and 25 C-split trials.
+- `laptop`: TF-IDF and count features with SGD logistic regression and 25
+  C-split trials. The general profile limit is 10,000 pairs; the yeast wrapper
+  overrides it to 50,000 for feasible C2 projection.
 - `exhaustive`: TF-IDF, BM25, count, binary, and their combined feature set with
   logistic regression, linear SVM, and SGD logistic regression; the full
   cohort and 100 C-split trials are used by default.
 
-Both profiles include the constant baselines and random/C1/C2/C3 splits. Set
+Both profiles include the constant baselines. The example scripts create an
+`identity` child grid with random/C1/C2/C3 and an
+`mmseqs2_id0.30_cov0.80_mode0` child grid with C2/C3; suite-level aggregation
+compares all six configurations. Set
 `MAX_PAIRS` or `N_SPLIT_TRIALS` explicitly to override a profile default. An
 explicitly empty `MAX_PAIRS` uses the entire eligible cohort. `SAMPLING_SEED`
 controls cohort selection independently of the data-split seed. `SPLIT_SEEDS`
 accepts a quoted, space-separated list. `MODEL_SEEDS` explicitly lists every
-independent model-fit seed. For example:
+independent model-fit seed.
+
+The grouped child accepts `SEQUENCE_CLUSTER_MIN_SEQ_ID`,
+`SEQUENCE_CLUSTER_COVERAGE`, `SEQUENCE_CLUSTER_COV_MODE`,
+`SEQUENCE_CLUSTER_EVALUE`, `SEQUENCE_CLUSTER_SENSITIVITY`,
+`SEQUENCE_CLUSTER_CLUSTER_MODE`, `SEQUENCE_CLUSTER_THREADS`, and
+`SEQUENCE_CLUSTER_CACHE_DIR` environment overrides. Set `SEQUENCE_CLUSTERS` to
+use a supplied CSV for only the grouped child, or set
+`INCLUDE_SEQUENCE_CLUSTER_SPLITS=0` to omit that child. Give every threshold
+sweep a distinct `RUN_NAME` (and, when useful, `SEQUENCE_CLUSTER_GRID_NAME`).
+For example:
 
 ```bash
 SPLIT_SEEDS="0 1 2 3 4" MODEL_SEEDS="100 101 102" \
@@ -109,21 +128,23 @@ SPLIT_SEEDS="0 1 2 3 4" MODEL_SEEDS="100 101 102" \
     bash scripts/run_yeast_biogrid_ppi_example.sh
 ```
 
-Each invocation creates one immutable benchmark root at
-`<OUT_DIR>/<RUN_NAME>/`. Every split strategy, split seed, baseline group, and
-feature set gets an independent run directory below `runs/`; no grid cell
-appends into another cell's files. The resolved grid is recorded in
-`benchmark_config.json`, and aggregation writes `benchmark_manifest.csv`,
-`benchmark_summary.csv`, and `benchmark_train_val_f1.png` at the benchmark
-root. Omit `RUN_NAME` to use a timestamped name.
+Each example invocation creates one suite at `<OUT_DIR>/<RUN_NAME>/` with two
+immutable child grids. Every split strategy, split seed, baseline group, and
+feature set gets an independent run directory; no grid cell appends into
+another cell's files. Each child records `benchmark_config.json`, while
+aggregation writes `benchmark_manifest.csv`, `benchmark_summary.csv`, and
+`benchmark_train_val_f1.png` at the suite root. Omit `RUN_NAME` to use a
+timestamped name.
 
 The grid defaults to a genuine 80/10/10 train/validation/test split. Test
 remains held out unless `--eval-test-set` is supplied. After aggregation, the
 current grid invocation is summarized in
-`benchmark_train_val_f1.png`: each split strategy has its own panel, marker
-positions show absolute F1, and the train-to-validation arrow shows the
-generalization gap. Strategy panels are stacked vertically on one shared F1
-scale, so better or worse performance can be compared by horizontal position.
+`benchmark_train_val_f1.png`: each split strategy and grouping instance has its
+own panel, marker positions show absolute F1, and the train-to-validation arrow
+shows the generalization gap. Distinct identity, supplied-cluster, and MMseqs2
+groupings are never averaged together. Panels are stacked vertically on one
+shared F1 scale, so better or worse performance can be compared by horizontal
+position.
 To reuse already prepared yeast files, add
 `PREPARE_YEAST_DATA=0` before the command.
 
@@ -137,6 +158,7 @@ ppi-grid \
     --out-dir results \
     --run-name yeast_laptop_v1 \
     --profile laptop \
+    --max-pairs 50000 \
     --split-seeds 0 1 2 \
     --model-seeds 100 101
 ```
@@ -469,7 +491,31 @@ adjust this with `--n-split-trials`.
 Detailed retention, class-balance, degree, overlap, and invariant diagnostics
 are written under `split_audit` in `split_metadata.json`.
 
-For homology-aware C2/C3 splits, provide a precomputed sequence-cluster CSV:
+For sequence-cluster-aware C2/C3 splits, either generate MMseqs2 groups
+automatically or provide a precomputed CSV. Automatic grouping is
+task-independent; only the subsequent C2/C3 edge projection is PPI-specific:
+
+```bash
+ppi-train \
+    --pairs processed/biogrid_yeast_physical/pairs.csv \
+    --fasta processed/biogrid_yeast_physical/proteins.fasta \
+    --sequence-cluster-method mmseqs2 \
+    --sequence-cluster-min-seq-id 0.30 \
+    --sequence-cluster-coverage 0.80 \
+    --sequence-cluster-cov-mode 0 \
+    --split-strategy c3 \
+    --run-dir results/yeast_mmseqs2_c3
+```
+
+The defaults are identity `0.30`, coverage `0.80`, coverage mode `0`, E-value
+`0.001`, automatic sensitivity and cluster mode, and one thread. Automatic
+sensitivity omits `-s`; automatic cluster mode omits `--cluster-mode`.
+MMseqs2 defines coverage modes as: `0` query and target coverage, `1` target
+coverage, `2` query coverage, `3` minimum target/query length ratio, `4`
+minimum query/target length ratio, and `5` minimum shorter/longer length ratio.
+The `-c` value is interpreted under the selected mode.
+
+For supplied groups:
 
 ```csv
 protein_id,cluster_id
@@ -484,12 +530,28 @@ ppi-train \
     --fasta processed/biogrid_yeast_physical/proteins.fasta \
     --sequence-clusters processed/biogrid_yeast_physical/sequence_clusters.csv \
     --split-strategy c3 \
-    --run-dir results/yeast_homology_c3
+    --run-dir results/yeast_sequence_cluster_c3
 ```
 
 Every eligible cohort protein must have exactly one mapping; coverage is
 validated before optional cohort sampling. C2/C3 then treat each cluster as an
 indivisible group. The normalized mapping is copied to
 `splits/sequence_cluster_assignments.csv`, and its path, hash, counts, and split
-audit are recorded in `split_metadata.json`. The pipeline consumes cluster
-assignments but does not run a clustering tool itself.
+audit are recorded in `split_metadata.json`. Supplied and automatic grouping
+are mutually exclusive, and either source is rejected for random, C1, and
+provided-column protocols.
+
+Generated mappings use a content-addressed cache selected by
+`PPI_SEQUENCE_CLUSTER_CACHE_DIR`, then
+`$XDG_CACHE_HOME/ppi-leakage/sequence_clusters`, then
+`~/.cache/ppi-leakage/sequence_clusters`. Metadata records the exact tool
+version and command, all effective parameters, universe and mapping hashes,
+cluster-size statistics, cache fingerprint, and cache hit. One `ppi-grid`
+invocation accepts one grouping configuration; use separate versioned TOML
+files and run names for threshold sweeps. See
+`configs/benchmark_grid.mmseqs2.example.toml`.
+
+These runs are described as **MMseqs2 sequence-cluster-disjoint**. MMseqs2's
+clustering threshold does not itself prove that every cross-partition sequence
+pair is below that threshold; a strict homology-disjoint claim requires a
+separate all-vs-all audit.

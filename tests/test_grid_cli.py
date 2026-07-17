@@ -65,6 +65,82 @@ def test_laptop_profile_expands_to_independent_run_directories(tmp_path):
     )
 
 
+def test_mmseqs_grid_forwards_one_validated_grouping_configuration(tmp_path):
+    cache_dir = tmp_path / "cluster-cache"
+    config = grid_config(
+        tmp_path,
+        "--profile", "laptop",
+        "--split-strategies", "c2", "c3",
+        "--sequence-cluster-method", "mmseqs2",
+        "--sequence-cluster-min-seq-id", "0.4",
+        "--sequence-cluster-coverage", "0.7",
+        "--sequence-cluster-cov-mode", "2",
+        "--sequence-cluster-evalue", "0.01",
+        "--sequence-cluster-sensitivity", "6.5",
+        "--sequence-cluster-cluster-mode", "1",
+        "--sequence-cluster-threads", "4",
+        "--sequence-cluster-cache-dir", str(cache_dir),
+        "--no-aggregate-results",
+    )
+
+    assert config.sequence_cluster_method == "mmseqs2"
+    assert config.sequence_cluster_min_seq_id == 0.4
+    assert config.sequence_cluster_coverage == 0.7
+    assert config.sequence_cluster_cov_mode == 2
+    assert config.sequence_cluster_evalue == 0.01
+    assert config.sequence_cluster_sensitivity == 6.5
+    assert config.sequence_cluster_cluster_mode == 1
+    assert config.sequence_cluster_threads == 4
+    assert config.sequence_cluster_cache_dir == cache_dir
+    assert config.to_dict()["sequence_cluster_cache_dir"] == str(cache_dir)
+    for spec in build_run_specs(config):
+        assert "--sequence-cluster-method" in spec.train_args
+        assert spec.train_args[
+            spec.train_args.index("--sequence-cluster-threads") + 1
+        ] == "4"
+        assert "--sequence-clusters" not in spec.train_args
+
+
+@pytest.mark.parametrize("source_option", ["supplied", "generated"])
+def test_grid_rejects_grouping_for_any_incompatible_strategy(
+    tmp_path,
+    capsys,
+    source_option,
+):
+    source_args = (
+        ["--sequence-clusters", str(tmp_path / "clusters.csv")]
+        if source_option == "supplied"
+        else ["--sequence-cluster-method", "mmseqs2"]
+    )
+    with pytest.raises(SystemExit) as error:
+        grid_config(
+            tmp_path,
+            "--split-strategies", "c2", "random",
+            *source_args,
+        )
+    assert error.value.code == 2
+    assert "separate grid" in capsys.readouterr().err
+
+
+def test_grid_rejects_mixed_or_orphan_grouping_options(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        grid_config(
+            tmp_path,
+            "--split-strategies", "c2",
+            "--sequence-clusters", str(tmp_path / "clusters.csv"),
+            "--sequence-cluster-method", "mmseqs2",
+        )
+    assert "cannot be combined" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        grid_config(
+            tmp_path,
+            "--split-strategies", "c2",
+            "--sequence-cluster-coverage", "0.5",
+        )
+    assert "requires sequence_cluster_method" in capsys.readouterr().err
+
+
 def test_profile_and_optional_model_expansion(tmp_path):
     exhaustive = grid_config(
         tmp_path,
@@ -249,6 +325,95 @@ def test_toml_config_and_cli_overrides_are_resolved(tmp_path):
     assert config.train_args == ("--no-metrics-plots",)
 
 
+def test_toml_resolves_mmseqs_auto_settings(tmp_path):
+    config_path = tmp_path / "mmseqs-grid.toml"
+    config_path.write_text(
+        "\n".join([
+            "[grid]",
+            f'pairs = "{tmp_path / "pairs.csv"}"',
+            f'fasta = "{tmp_path / "proteins.fasta"}"',
+            f'out_dir = "{tmp_path / "results"}"',
+            'run_name = "mmseqs-grid"',
+            'split_strategies = ["c2", "c3"]',
+            'sequence_cluster_method = "mmseqs2"',
+            "sequence_cluster_min_seq_id = 0.3",
+            "sequence_cluster_coverage = 0.8",
+            "sequence_cluster_cov_mode = 0",
+            "sequence_cluster_evalue = 0.001",
+            'sequence_cluster_sensitivity = "auto"',
+            'sequence_cluster_cluster_mode = "auto"',
+            "sequence_cluster_threads = 3",
+            "aggregate_results = false",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    config = resolve_grid_config(["--config", str(config_path)])
+
+    assert config.sequence_cluster_sensitivity is None
+    assert config.sequence_cluster_cluster_mode is None
+    assert config.sequence_cluster_threads == 3
+    spec = build_run_specs(config)[0]
+    assert spec.train_args[
+        spec.train_args.index("--sequence-cluster-sensitivity") + 1
+    ] == "auto"
+    assert spec.train_args[
+        spec.train_args.index("--sequence-cluster-cluster-mode") + 1
+    ] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("invalid_setting", "expected_error"),
+    (
+        (
+            "sequence_cluster_cov_mode = 1.9",
+            "sequence_cluster_cov_mode must be an integer",
+        ),
+        (
+            "sequence_cluster_cov_mode = true",
+            "sequence_cluster_cov_mode must be an integer",
+        ),
+        (
+            "sequence_cluster_threads = 2.5",
+            "sequence_cluster_threads must be an integer",
+        ),
+        (
+            'sequence_cluster_min_seq_id = "invalid"',
+            "sequence_cluster_min_seq_id must be a number",
+        ),
+    ),
+)
+def test_toml_rejects_lossy_or_malformed_mmseqs_numbers(
+    tmp_path,
+    capsys,
+    invalid_setting,
+    expected_error,
+):
+    config_path = tmp_path / "invalid-mmseqs-grid.toml"
+    config_path.write_text(
+        "\n".join([
+            "[grid]",
+            f'pairs = "{tmp_path / "pairs.csv"}"',
+            f'fasta = "{tmp_path / "proteins.fasta"}"',
+            f'out_dir = "{tmp_path / "results"}"',
+            'run_name = "invalid-mmseqs-grid"',
+            'split_strategies = ["c2"]',
+            'sequence_cluster_method = "mmseqs2"',
+            invalid_setting,
+            "aggregate_results = false",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as error:
+        resolve_grid_config(["--config", str(config_path)])
+
+    assert error.value.code == 2
+    assert expected_error in capsys.readouterr().err
+
+
 def test_nested_plm_config_selects_explicit_adapter(tmp_path):
     config_path = tmp_path / "plm-grid.toml"
     config_path.write_text(
@@ -325,3 +490,28 @@ def test_run_grid_records_config_and_refuses_overwrite(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="already exists"):
         run_grid(config)
+
+
+def test_grouped_grid_preflights_mmseqs_before_creating_output(
+    tmp_path,
+    monkeypatch,
+):
+    pairs_path = tmp_path / "pairs.csv"
+    fasta_path = tmp_path / "proteins.fasta"
+    pairs_path.write_text(
+        "pair_id,protein_a,protein_b,label\n",
+        encoding="utf-8",
+    )
+    fasta_path.write_text(">P1\nACDE\n", encoding="utf-8")
+    config = grid_config(
+        tmp_path,
+        "--split-strategies", "c2",
+        "--sequence-cluster-method", "mmseqs2",
+        "--no-aggregate-results",
+    )
+    monkeypatch.setattr("ppi_benchmark.cli.grid.shutil.which", lambda _: None)
+
+    with pytest.raises(ValueError, match="requires the 'mmseqs' executable"):
+        run_grid(config)
+
+    assert not config.benchmark_dir.exists()

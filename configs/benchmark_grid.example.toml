@@ -7,7 +7,8 @@ out_dir = "results"
 run_name = "yeast_laptop_v1"
 profile = "laptop"
 
-max_pairs = 10000
+# The yeast graph needs this density for feasible three-way C2 projection.
+max_pairs = 50000
 sampling_seed = 17
 train_size = 0.80
 val_size = 0.10

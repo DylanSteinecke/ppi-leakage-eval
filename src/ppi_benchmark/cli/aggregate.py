@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 
 from ..reporting.benchmark_plots import plot_benchmark_train_val_f1
+from ..splitting.protocols import C2_SPLIT_STRATEGY, C3_SPLIT_STRATEGY
 
 
 METADATA_RELATIVE_PATH = Path("splits") / "split_metadata.json"
@@ -64,9 +65,26 @@ MANIFEST_COLUMNS = (
     "n_pairs_in_sampled_cohort",
     "sampling_seed",
     "sampling_applied",
+    "split_grouping_kind",
+    "split_grouping_instance",
+    "split_grouping_label",
     "sequence_clusters_path",
     "sequence_clusters_file_sha256",
     "sequence_cluster_grouping_applied",
+    "sequence_cluster_grouping_kind",
+    "sequence_cluster_grouping_source",
+    "sequence_cluster_method",
+    "sequence_cluster_workflow",
+    "sequence_cluster_tool_version",
+    "sequence_cluster_min_seq_id",
+    "sequence_cluster_coverage",
+    "sequence_cluster_cov_mode",
+    "sequence_cluster_evalue",
+    "sequence_cluster_sensitivity",
+    "sequence_cluster_cluster_mode",
+    "sequence_cluster_threads",
+    "sequence_cluster_cache_fingerprint",
+    "sequence_cluster_cache_hit",
     "n_sequence_clusters",
     "n_dropped_pairs",
     "eval_test_set",
@@ -97,9 +115,26 @@ SUMMARY_CONTEXT_COLUMNS = (
     "n_pairs_in_sampled_cohort",
     "sampling_seed",
     "sampling_applied",
+    "split_grouping_kind",
+    "split_grouping_instance",
+    "split_grouping_label",
     "sequence_clusters_path",
     "sequence_clusters_file_sha256",
     "sequence_cluster_grouping_applied",
+    "sequence_cluster_grouping_kind",
+    "sequence_cluster_grouping_source",
+    "sequence_cluster_method",
+    "sequence_cluster_workflow",
+    "sequence_cluster_tool_version",
+    "sequence_cluster_min_seq_id",
+    "sequence_cluster_coverage",
+    "sequence_cluster_cov_mode",
+    "sequence_cluster_evalue",
+    "sequence_cluster_sensitivity",
+    "sequence_cluster_cluster_mode",
+    "sequence_cluster_threads",
+    "sequence_cluster_cache_fingerprint",
+    "sequence_cluster_cache_hit",
     "n_sequence_clusters",
     "n_dropped_pairs",
 )
@@ -285,6 +320,72 @@ def diagnostic_context(metadata: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
+def split_grouping_context(
+    metadata: dict[str, Any],
+    sequence_clusters: dict[str, Any],
+) -> dict[str, str]:
+    """Return a stable grouping identity for cross-run comparison."""
+    strategy = metadata.get("split_strategy", "")
+    if strategy not in {C2_SPLIT_STRATEGY, C3_SPLIT_STRATEGY}:
+        return {
+            "split_grouping_kind": "",
+            "split_grouping_instance": "not_applicable",
+            "split_grouping_label": "",
+        }
+
+    split_audit = metadata.get("split_audit") or {}
+    grouping_kind = split_audit.get("grouping_kind")
+    if not grouping_kind:
+        grouping_kind = (
+            sequence_clusters.get("grouping_kind")
+            if sequence_clusters.get("applied_to_split") is True
+            else "protein_identity"
+        )
+
+    if grouping_kind == "protein_identity":
+        return {
+            "split_grouping_kind": grouping_kind,
+            "split_grouping_instance": grouping_kind,
+            "split_grouping_label": "Protein identity",
+        }
+
+    if grouping_kind == "sequence_cluster":
+        artifact_id = (
+            sequence_clusters.get("cache_fingerprint")
+            or sequence_clusters.get("mapping_sha256")
+            or metadata.get("sequence_clusters_file_sha256")
+            or "unspecified"
+        )
+        artifact_suffix = (
+            "" if artifact_id == "unspecified" else f" [{str(artifact_id)[:8]}]"
+        )
+        if sequence_clusters.get("method") == "mmseqs2":
+            parameters = sequence_clusters.get("parameters") or {}
+            label = (
+                "MMseqs2 "
+                f"id={parameters.get('min_seq_id', '?')} "
+                f"cov={parameters.get('coverage', '?')} "
+                f"mode={parameters.get('cov_mode', '?')}"
+                f"{artifact_suffix}"
+            )
+        elif sequence_clusters.get("grouping_source") == "supplied_csv":
+            label = f"Supplied sequence clusters{artifact_suffix}"
+        else:
+            label = f"Sequence clusters{artifact_suffix}"
+        return {
+            "split_grouping_kind": grouping_kind,
+            "split_grouping_instance": f"{grouping_kind}:{artifact_id}",
+            "split_grouping_label": label,
+        }
+
+    grouping_kind = str(grouping_kind)
+    return {
+        "split_grouping_kind": grouping_kind,
+        "split_grouping_instance": grouping_kind,
+        "split_grouping_label": grouping_kind.replace("_", " ").title(),
+    }
+
+
 def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     """
     Return one benchmark manifest row for a canonical run directory.
@@ -300,6 +401,8 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     resolved_args = metadata.get("resolved_args", {})
     sampling = metadata.get("sampling") or {}
     sequence_clusters = metadata.get("sequence_clusters") or {}
+    sequence_cluster_parameters = sequence_clusters.get("parameters") or {}
+    grouping_context = split_grouping_context(metadata, sequence_clusters)
     row = {
         "run_dir": str(run_dir),
         "evaluation_schema_version": metadata.get(
@@ -343,12 +446,40 @@ def manifest_row(run_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
             "n_pairs_in_sampled_cohort", ""),
         "sampling_seed": sampling.get("seed", ""),
         "sampling_applied": sampling.get("applied", ""),
+        **grouping_context,
         "sequence_clusters_path": metadata.get(
             "sequence_clusters_path", ""),
         "sequence_clusters_file_sha256": metadata.get(
             "sequence_clusters_file_sha256", ""),
         "sequence_cluster_grouping_applied": sequence_clusters.get(
             "applied_to_split", ""),
+        "sequence_cluster_grouping_kind": sequence_clusters.get(
+            "grouping_kind", ""),
+        "sequence_cluster_grouping_source": sequence_clusters.get(
+            "grouping_source", ""),
+        "sequence_cluster_method": sequence_clusters.get("method", ""),
+        "sequence_cluster_workflow": sequence_clusters.get(
+            "workflow", ""),
+        "sequence_cluster_tool_version": sequence_clusters.get(
+            "tool_version", ""),
+        "sequence_cluster_min_seq_id": sequence_cluster_parameters.get(
+            "min_seq_id", ""),
+        "sequence_cluster_coverage": sequence_cluster_parameters.get(
+            "coverage", ""),
+        "sequence_cluster_cov_mode": sequence_cluster_parameters.get(
+            "cov_mode", ""),
+        "sequence_cluster_evalue": sequence_cluster_parameters.get(
+            "evalue", ""),
+        "sequence_cluster_sensitivity": sequence_cluster_parameters.get(
+            "sensitivity", ""),
+        "sequence_cluster_cluster_mode": sequence_cluster_parameters.get(
+            "cluster_mode", ""),
+        "sequence_cluster_threads": sequence_cluster_parameters.get(
+            "threads", ""),
+        "sequence_cluster_cache_fingerprint": sequence_clusters.get(
+            "cache_fingerprint", ""),
+        "sequence_cluster_cache_hit": sequence_clusters.get(
+            "cache_hit", ""),
         "n_sequence_clusters": sequence_clusters.get(
             "n_sequence_clusters", ""),
         "n_dropped_pairs": metadata.get("n_dropped_pairs", ""),

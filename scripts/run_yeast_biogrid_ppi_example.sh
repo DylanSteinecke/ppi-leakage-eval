@@ -23,6 +23,10 @@ MAX_ITER="${MAX_ITER:-100}"
 K="${K:-2}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-laptop}"
 SAMPLING_SEED="${SAMPLING_SEED:-17}"
+# The 10,000-pair laptop profile is too sparse to satisfy the yeast C2
+# train-side representation invariant. This workflow-specific floor remains
+# small enough for laptop runs while making every default split feasible.
+MAX_PAIRS="${MAX_PAIRS:-50000}"
 
 BIOGRID_ARCHIVE="${BIOGRID_ARCHIVE:-input/BIOGRID-ORGANISM-LATEST.tab3.zip}"
 BIOGRID_ARCHIVE_MEMBER="${BIOGRID_ARCHIVE_MEMBER:-BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-5.0.259.tab3.txt}"

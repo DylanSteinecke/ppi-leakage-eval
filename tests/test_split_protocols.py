@@ -158,3 +158,25 @@ def test_legacy_ppi_boundary_resolves_same_random_split():
             assert explicit_frame is None
         else:
             assert implicit_frame.index.tolist() == explicit_frame.index.tolist()
+
+
+def test_c1_audit_does_not_claim_a_protein_grouping_relation():
+    pairs = pd.DataFrame([
+        (f"P{left}", f"P{right}", (left + right) % 2)
+        for left in range(12)
+        for right in range(left + 1, 12)
+    ], columns=["protein_a", "protein_b", "label"])
+    args = SimpleNamespace(
+        effective_split_strategy="c1",
+        seed=7,
+        split_seed=7,
+        split_col=None,
+        train_size=0.7,
+        val_size=0.0,
+        n_split_trials=20,
+    )
+
+    load_or_make_split(pairs, args)
+
+    assert args.split_audit["grouping_kind"] is None
+    assert args.split_audit["grouping_type"] is None

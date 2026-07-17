@@ -1,0 +1,37 @@
+# Automatic grouping is a separate immutable grid because grouping inputs are
+# valid only for C2/C3. Use a distinct run_name for every threshold sweep.
+[grid]
+pairs = "processed/biogrid_yeast_physical/pairs.csv"
+fasta = "processed/biogrid_yeast_physical/proteins.fasta"
+protein_metadata = "processed/biogrid_yeast_physical/protein_metadata.csv"
+out_dir = "results"
+run_name = "yeast_mmseqs2_id0.30_cov0.80_mode0_v1"
+profile = "laptop"
+
+# Match the identity grid's cohort; yeast C2 is infeasible at 10,000 pairs.
+max_pairs = 50000
+sampling_seed = 17
+train_size = 0.80
+val_size = 0.10
+split_strategies = ["c2", "c3"]
+split_seeds = [0, 1, 2]
+model_seeds = [100, 101]
+aggregate_results = true
+
+sequence_cluster_method = "mmseqs2"
+sequence_cluster_min_seq_id = 0.30
+sequence_cluster_coverage = 0.80
+sequence_cluster_cov_mode = 0
+sequence_cluster_evalue = 0.001
+sequence_cluster_sensitivity = "auto"
+sequence_cluster_cluster_mode = "auto"
+sequence_cluster_threads = 4
+
+train_args = ["--no-metrics-plots"]
+
+[plm]
+enabled = false
+presets = []
+adapter = "esm2"
+model = "facebook/esm2_t6_8M_UR50D"
+revision = ""

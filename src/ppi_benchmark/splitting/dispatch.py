@@ -238,14 +238,19 @@ def load_or_make_split(
         train_df = split_result.train
         test_df = split_result.test
         args.split_audit = split_result.audit
+        if strategy_name in {C2_SPLIT_STRATEGY, C3_SPLIT_STRATEGY}:
+            grouping_kind = (
+                "sequence_cluster"
+                if protein_to_group is not None
+                else resolved_spec.default_grouping_kind
+            )
+        else:
+            grouping_kind = None
+        args.split_audit["grouping_kind"] = grouping_kind
         args.split_audit["grouping_type"] = (
-            "sequence_cluster"
-            if protein_to_group is not None
-            and strategy_name in {
-                C2_SPLIT_STRATEGY,
-                C3_SPLIT_STRATEGY,
-            }
-            else "protein_id"
+            "protein_id"
+            if grouping_kind == "protein_identity"
+            else grouping_kind
         )
         args.n_discarded_edges = len(split_result.dropped)
         args.discarded_edge_fraction = args.n_discarded_edges / len(pairs)

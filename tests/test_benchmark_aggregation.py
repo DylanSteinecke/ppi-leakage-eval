@@ -8,6 +8,10 @@ import pytest
 from ppi_benchmark.cli.aggregate import (
     aggregate_benchmark_results,
     main as aggregate_main,
+    manifest_row,
+)
+from ppi_benchmark.reporting.benchmark_plots import (
+    _benchmark_train_val_f1_data,
 )
 
 
@@ -129,6 +133,22 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "sequence_clusters_file_sha256": "clusters-sha",
         "sequence_clusters": {
             "applied_to_split": False,
+            "grouping_kind": "sequence_cluster",
+            "grouping_source": "generated",
+            "method": "mmseqs2",
+            "workflow": "easy-cluster",
+            "tool_version": "17-b804f",
+            "parameters": {
+                "min_seq_id": 0.30,
+                "coverage": 0.80,
+                "cov_mode": 0,
+                "evalue": 0.001,
+                "sensitivity": None,
+                "cluster_mode": None,
+                "threads": 4,
+            },
+            "cache_fingerprint": "fingerprint",
+            "cache_hit": True,
             "n_sequence_clusters": 17,
         },
     })
@@ -208,6 +228,13 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     assert not bool(
         first_manifest_row["sequence_cluster_grouping_applied"])
     assert first_manifest_row["n_sequence_clusters"] == 17
+    assert first_manifest_row["sequence_cluster_method"] == "mmseqs2"
+    assert first_manifest_row["sequence_cluster_min_seq_id"] == 0.30
+    assert first_manifest_row["sequence_cluster_coverage"] == 0.80
+    assert first_manifest_row["sequence_cluster_cache_fingerprint"] == (
+        "fingerprint"
+    )
+    assert bool(first_manifest_row["sequence_cluster_cache_hit"]) is True
     assert (
         first_manifest_row[
             "diagnostics_n_exact_ordered_pair_overlaps_train_val"
@@ -222,6 +249,79 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "c3_execution",
     }
     assert set(summary_df["task"]) == {"ppi"}
+
+
+def test_grouping_instances_remain_separate_in_benchmark_plot_data(tmp_path):
+    identity_metadata = metadata(
+        tmp_path / "identity" / "c2",
+        split_strategy="c2",
+    )
+    identity_metadata["split_audit"] = {
+        "grouping_kind": "protein_identity",
+    }
+    grouped_metadata = metadata(
+        tmp_path / "grouped" / "c2",
+        split_strategy="c2",
+    )
+    grouped_metadata.update({
+        "sequence_clusters_file_sha256": "mapping-file-sha",
+        "split_audit": {"grouping_kind": "sequence_cluster"},
+        "sequence_clusters": {
+            "applied_to_split": True,
+            "grouping_kind": "sequence_cluster",
+            "grouping_source": "generated",
+            "method": "mmseqs2",
+            "parameters": {
+                "min_seq_id": 0.3,
+                "coverage": 0.8,
+                "cov_mode": 0,
+            },
+            "cache_fingerprint": "fingerprint-a",
+            "mapping_sha256": "mapping-a",
+        },
+    })
+
+    identity_context = manifest_row(
+        tmp_path / "identity" / "c2",
+        identity_metadata,
+    )
+    grouped_context = manifest_row(
+        tmp_path / "grouped" / "c2",
+        grouped_metadata,
+    )
+
+    assert identity_context["split_grouping_instance"] == "protein_identity"
+    assert grouped_context["split_grouping_instance"] == (
+        "sequence_cluster:fingerprint-a"
+    )
+
+    rows = []
+    for context, train_f1, val_f1 in (
+        (identity_context, 0.9, 0.8),
+        (grouped_context, 0.6, 0.4),
+    ):
+        for split_name, f1_value in (("train", train_f1), ("val", val_f1)):
+            row = summary_row(split_name)
+            row.update({
+                "summary_split": split_name,
+                "split_strategy": "c2",
+                "split_grouping_instance": context[
+                    "split_grouping_instance"
+                ],
+                "split_grouping_label": context["split_grouping_label"],
+                "f1_mean": f1_value,
+            })
+            rows.append(row)
+
+    plot_df = _benchmark_train_val_f1_data(pd.DataFrame(rows))
+    observed = plot_df.set_index("split_grouping_instance")[
+        ["train", "val"]
+    ].to_dict("index")
+
+    assert observed == {
+        "protein_identity": {"train": 0.9, "val": 0.8},
+        "sequence_cluster:fingerprint-a": {"train": 0.6, "val": 0.4},
+    }
 
 
 @pytest.mark.integration
@@ -339,18 +439,27 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in grid_text
     assert '--max-pairs "$MAX_PAIRS"' in grid_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-laptop}"' in yeast_text
+    assert 'MAX_PAIRS="${MAX_PAIRS:-50000}"' in yeast_text
     assert 'BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-exhaustive}"' in toy_text
     assert "date -u +%Y-%m-%d_%H-%M-%S" in grid_text
     assert '--val-size "$VAL_SIZE"' in grid_text
-    assert 'ppi-grid "${GRID_ARGS[@]}"' in grid_text
+    assert '"${COMMON_GRID_ARGS[@]}"' in grid_text
+    assert "--run-name \"$IDENTITY_GRID_NAME\"" in grid_text
+    assert "--run-name \"$SEQUENCE_CLUSTER_GRID_NAME\"" in grid_text
     assert "ppi-train" not in grid_text
-    assert "ppi-aggregate" not in grid_text
+    assert 'ppi-aggregate --benchmark-dir "$SUITE_ROOT"' in grid_text
     assert "ppi-prepare biogrid" in yeast_text
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
     assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
     assert 'INCLUDE_SGD="${INCLUDE_SGD:-1}"' in grid_text
     assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
+    assert (
+        'INCLUDE_SEQUENCE_CLUSTER_SPLITS="${INCLUDE_SEQUENCE_CLUSTER_SPLITS:-1}"'
+        in grid_text
+    )
+    assert 'SEQUENCE_CLUSTER_THREADS="${SEQUENCE_CLUSTER_THREADS:-4}"' in grid_text
+    assert "--sequence-cluster-method mmseqs2" in grid_text
     assert 'PLM_ADAPTER="${PLM_ADAPTER:-esm2}"' in grid_text
     assert 'PLM_PRESETS="${PLM_PRESETS:-}"' in grid_text
     assert (
@@ -366,7 +475,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert "--include-low-resource-esm2" in toy_text
 
 
-def test_benchmark_shell_wrapper_forwards_one_grid_command(tmp_path):
+def test_benchmark_shell_wrapper_forwards_identity_grid_command(tmp_path):
     grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
 
     def wrapper_command(
@@ -409,6 +518,7 @@ MAX_ITER=100
 K=2
 RUN_STAMP="profile-test"
 AGGREGATE_RESULTS=0
+INCLUDE_SEQUENCE_CLUSTER_SPLITS=0
 shift 9
 source "$GRID_PATH" --no-metrics-plots "$@"
 '''
@@ -463,7 +573,8 @@ source "$GRID_PATH" --no-metrics-plots "$@"
     exhaustive_call = wrapper_command("exhaustive")
 
     assert "--profile laptop" in laptop_call
-    assert "--run-name laptop_profile-test" in laptop_call
+    assert "--run-name identity" in laptop_call
+    assert f"--out-dir {tmp_path / 'laptop_results' / 'laptop_profile-test'}" in laptop_call
     assert "--split-seeds 3 7" in laptop_call
     assert "--model-seeds 11 19" in laptop_call
     assert "--val-size 0.10" in laptop_call
@@ -494,3 +605,100 @@ source "$GRID_PATH" --no-metrics-plots "$@"
     assert "--plm-max-batch-tokens 1024" in laptop_esm2_call
     assert "--plm-max-batch-sequences 8" in laptop_esm2_call
     assert "--profile exhaustive" in exhaustive_call
+
+
+def test_benchmark_shell_wrapper_expands_identity_and_grouped_child_grids(
+    tmp_path,
+):
+    grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
+    calls_path = tmp_path / "calls.txt"
+    out_dir = tmp_path / "results"
+    shell_script = r'''
+set -euo pipefail
+CALLS_PATH="$1"
+GRID_PATH="$2"
+OUT_DIR="$3"
+ppi-grid() {
+    printf 'GRID %s\n' "$*" >> "$CALLS_PATH"
+}
+ppi-aggregate() {
+    printf 'AGG %s\n' "$*" >> "$CALLS_PATH"
+}
+mmseqs() { :; }
+PAIRS="pairs.csv"
+FASTA="proteins.fasta"
+BENCHMARK_PROFILE="laptop"
+RUN_STAMP="suite-test"
+MODEL_SEEDS="0"
+SPLIT_SEEDS="0"
+INCLUDE_SGD=0
+AGGREGATE_RESULTS=1
+source "$GRID_PATH" --no-metrics-plots
+'''
+    completed = subprocess.run(
+        [
+            "bash", "-c", shell_script, "suite-test",
+            str(calls_path), str(grid_path), str(out_dir),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    calls = calls_path.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 3
+    identity_call, grouped_call, aggregate_call = calls
+    suite_root = out_dir / "laptop_suite-test"
+    assert f"--out-dir {suite_root}" in identity_call
+    assert "--run-name identity" in identity_call
+    assert "--split-strategies random c1 c2 c3" in identity_call
+    assert "--sequence-cluster-method" not in identity_call
+    assert "--run-name mmseqs2_id0.30_cov0.80_mode0" in grouped_call
+    assert "--split-strategies c2 c3" in grouped_call
+    assert "--sequence-cluster-method mmseqs2" in grouped_call
+    assert "--sequence-cluster-min-seq-id 0.30" in grouped_call
+    assert "--sequence-cluster-coverage 0.80" in grouped_call
+    assert "--sequence-cluster-threads 4" in grouped_call
+    assert aggregate_call == f"AGG --benchmark-dir {suite_root}"
+    assert "Grouped C2/C3 source: MMseqs2" in completed.stdout
+
+
+def test_benchmark_shell_wrapper_uses_supplied_clusters_only_for_grouped_grid(
+    tmp_path,
+):
+    grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
+    calls_path = tmp_path / "calls.txt"
+    shell_script = r'''
+set -euo pipefail
+CALLS_PATH="$1"
+GRID_PATH="$2"
+ppi-grid() {
+    printf '%s\n' "$*" >> "$CALLS_PATH"
+}
+PAIRS="pairs.csv"
+FASTA="proteins.fasta"
+OUT_DIR="results"
+RUN_STAMP="supplied-test"
+SEQUENCE_CLUSTERS="supplied_clusters.csv"
+INCLUDE_SGD=0
+AGGREGATE_RESULTS=0
+source "$GRID_PATH"
+'''
+    subprocess.run(
+        [
+            "bash", "-c", shell_script, "supplied-test",
+            str(calls_path), str(grid_path),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    identity_call, grouped_call = calls_path.read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert "--sequence-clusters" not in identity_call
+    assert "--sequence-clusters supplied_clusters.csv" in grouped_call
+    assert "--sequence-cluster-method" not in grouped_call

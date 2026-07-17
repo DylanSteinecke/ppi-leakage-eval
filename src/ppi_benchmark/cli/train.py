@@ -35,7 +35,6 @@ from ..backends.models import (
 from ..datasets.common import (
     discover_protein_metadata_path,
     FASTA_ID_FORMAT_CHOICES,
-    file_sha256,
     read_fasta_with_taxa,
 )
 from ..evaluation import (
@@ -100,11 +99,13 @@ from ..splitting.dispatch import (
     protein_ids_in_pairs,
     validate_splits,
 )
-from ..splitting.grouping import load_sequence_cluster_mapping
+from ..splitting.grouping import (
+    SEQUENCE_CLUSTER_METHODS,
+    SequenceClusterParameters,
+    resolve_sequence_clusters,
+)
 from ..splitting.preparation import prepare_input_data
 from ..splitting.protocols import (
-    C2_SPLIT_STRATEGY,
-    C3_SPLIT_STRATEGY,
     PROVIDED_SPLIT_STRATEGY,
     RANDOM_SPLIT_STRATEGY,
     SPLIT_STRATEGY_CHOICES,
@@ -210,6 +211,30 @@ def positive_float(value: str) -> float:
     return parsed_value
 
 
+def auto_or_positive_float(value: str) -> float | None:
+    """Parse ``auto`` or a positive finite float."""
+    if value.strip().lower() == "auto":
+        return None
+    return positive_float(value)
+
+
+def auto_or_cluster_mode(value: str) -> int | None:
+    """Parse ``auto`` or an MMseqs2 cluster mode from 0 through 3."""
+    if value.strip().lower() == "auto":
+        return None
+    try:
+        parsed_value = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be 'auto' or an integer from 0 through 3"
+        ) from exc
+    if parsed_value not in range(4):
+        raise argparse.ArgumentTypeError(
+            "value must be 'auto' or an integer from 0 through 3"
+        )
+    return parsed_value
+
+
 def nonnegative_float(value: str) -> float:
     """
     Parse a nonnegative float argparse value.
@@ -308,9 +333,78 @@ def argument_parser(
         "--sequence-clusters",
         default=None,
         help=(
-            "Optional CSV with protein_id and cluster_id columns. C2/C3 "
-            "treat each sequence cluster as one atomic homology group."
+            "Supplied CSV with protein_id and cluster_id columns for C2/C3. "
+            "Mutually exclusive with automatic sequence clustering."
         ))
+
+    grouping_group = parser.add_argument_group("Automatic sequence grouping")
+    grouping_group.add_argument(
+        "--sequence-cluster-method",
+        choices=SEQUENCE_CLUSTER_METHODS,
+        default=None,
+        help="Generate task-independent protein groups for a C2/C3 split.",
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-min-seq-id",
+        type=unit_interval,
+        default=argparse.SUPPRESS,
+        help="MMseqs2 minimum sequence identity (default: 0.30).",
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-coverage",
+        type=unit_interval,
+        default=argparse.SUPPRESS,
+        help="MMseqs2 coverage threshold (default: 0.80).",
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-cov-mode",
+        type=int,
+        choices=range(6),
+        default=argparse.SUPPRESS,
+        help="MMseqs2 coverage mode, from 0 through 5 (default: 0).",
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-evalue",
+        type=positive_float,
+        default=argparse.SUPPRESS,
+        help="MMseqs2 E-value threshold (default: 0.001).",
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-sensitivity",
+        type=auto_or_positive_float,
+        default=argparse.SUPPRESS,
+        metavar="AUTO_OR_FLOAT",
+        help=(
+            "MMseqs2 sensitivity. 'auto' omits -s so MMseqs2 derives it "
+            "from sequence identity (default: auto)."
+        ),
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-cluster-mode",
+        type=auto_or_cluster_mode,
+        default=argparse.SUPPRESS,
+        metavar="AUTO_OR_0_TO_3",
+        help=(
+            "MMseqs2 cluster mode. 'auto' omits --cluster-mode so MMseqs2 "
+            "derives it from coverage mode (default: auto)."
+        ),
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-threads",
+        type=positive_int,
+        default=argparse.SUPPRESS,
+        help="MMseqs2 worker threads (default: 1).",
+    )
+    grouping_group.add_argument(
+        "--sequence-cluster-cache-dir",
+        default=argparse.SUPPRESS,
+        help=(
+            "Content-addressed grouping cache. Defaults to "
+            "$PPI_SEQUENCE_CLUSTER_CACHE_DIR, then "
+            "$XDG_CACHE_HOME/ppi-leakage/sequence_clusters, then "
+            "~/.cache/ppi-leakage/sequence_clusters."
+        ),
+    )
 
     # Whole-cohort sampling args
     sampling_group = parser.add_argument_group("Cohort sampling")
@@ -623,6 +717,71 @@ def argument_parser(
     else:
         args.effective_split_strategy = (
             args.split_strategy or RANDOM_SPLIT_STRATEGY)
+
+    automatic_grouping_option_names = (
+        "sequence_cluster_min_seq_id",
+        "sequence_cluster_coverage",
+        "sequence_cluster_cov_mode",
+        "sequence_cluster_evalue",
+        "sequence_cluster_sensitivity",
+        "sequence_cluster_cluster_mode",
+        "sequence_cluster_threads",
+        "sequence_cluster_cache_dir",
+    )
+    explicit_automatic_options = [
+        option_name
+        for option_name in automatic_grouping_option_names
+        if hasattr(args, option_name)
+    ]
+    if args.sequence_clusters is not None and (
+        args.sequence_cluster_method is not None
+        or explicit_automatic_options
+    ):
+        parser.error(
+            "--sequence-clusters cannot be combined with automatic "
+            "sequence-cluster options."
+        )
+    if (
+        args.sequence_cluster_method is None
+        and explicit_automatic_options
+    ):
+        option = explicit_automatic_options[0].replace("_", "-")
+        parser.error(
+            f"--{option} requires --sequence-cluster-method mmseqs2."
+        )
+    grouping_requested = (
+        args.sequence_clusters is not None
+        or args.sequence_cluster_method is not None
+    )
+    split_spec = get_split_strategy(
+        PPI_TASK.name,
+        args.effective_split_strategy,
+    )
+    if (
+        grouping_requested
+        and "sequence_cluster" not in split_spec.allowed_grouping_kinds
+    ):
+        parser.error(
+            "Sequence-cluster grouping is incompatible with split strategy "
+            f"{args.effective_split_strategy!r}; use C2 or C3."
+        )
+
+    sequence_cluster_defaults = SequenceClusterParameters()
+    sequence_cluster_default_values = {
+        "sequence_cluster_min_seq_id": sequence_cluster_defaults.min_seq_id,
+        "sequence_cluster_coverage": sequence_cluster_defaults.coverage,
+        "sequence_cluster_cov_mode": sequence_cluster_defaults.cov_mode,
+        "sequence_cluster_evalue": sequence_cluster_defaults.evalue,
+        "sequence_cluster_sensitivity": sequence_cluster_defaults.sensitivity,
+        "sequence_cluster_cluster_mode": (
+            sequence_cluster_defaults.cluster_mode
+        ),
+        "sequence_cluster_threads": sequence_cluster_defaults.threads,
+        "sequence_cluster_cache_dir": None,
+    }
+    for option_name, default_value in sequence_cluster_default_values.items():
+        if not hasattr(args, option_name):
+            setattr(args, option_name, default_value)
     args.n_discarded_edges = 0
     args.discarded_edge_fraction = 0.0
     args.split_audit = None
@@ -1742,33 +1901,44 @@ def main(argv: Sequence[str] | None = None) -> None:
     sequence_cluster_mapping = None
     sequence_cluster_assignments = None
     args.sequence_cluster_metadata = None
-    if args.sequence_clusters is not None:
-        with performance.stage("load_sequence_clusters"):
-            sequence_clusters_path = Path(args.sequence_clusters)
-            cluster_grouping_applied = args.effective_split_strategy in {
-                C2_SPLIT_STRATEGY,
-                C3_SPLIT_STRATEGY,
-            }
-            required_proteins = (
-                protein_ids_in_pairs(eligible_protein_pairs)
-                if cluster_grouping_applied
-                else None
+    if (
+        args.sequence_clusters is not None
+        or args.sequence_cluster_method is not None
+    ):
+        with performance.stage("resolve_sequence_clusters"):
+            automatic_parameters = (
+                None
+                if args.sequence_cluster_method is None
+                else SequenceClusterParameters(
+                    method=args.sequence_cluster_method,
+                    min_seq_id=args.sequence_cluster_min_seq_id,
+                    coverage=args.sequence_cluster_coverage,
+                    cov_mode=args.sequence_cluster_cov_mode,
+                    evalue=args.sequence_cluster_evalue,
+                    sensitivity=args.sequence_cluster_sensitivity,
+                    cluster_mode=args.sequence_cluster_cluster_mode,
+                    threads=args.sequence_cluster_threads,
+                )
             )
-            (
-                sequence_cluster_mapping,
-                sequence_cluster_assignments,
-                cluster_counts,
-            ) = load_sequence_cluster_mapping(
-                mapping_path=sequence_clusters_path,
-                required_proteins=required_proteins,
+            sequence_cluster_result = resolve_sequence_clusters(
+                sequences=sequences,
+                eligible_protein_ids=protein_ids_in_pairs(
+                    eligible_protein_pairs
+                ),
+                supplied_mapping_path=args.sequence_clusters,
+                parameters=automatic_parameters,
+                cache_dir=args.sequence_cluster_cache_dir,
             )
-            args.sequence_cluster_metadata = {
-                "path": str(sequence_clusters_path),
-                "file_size_bytes": sequence_clusters_path.stat().st_size,
-                "file_sha256": file_sha256(sequence_clusters_path),
-                "applied_to_split": cluster_grouping_applied,
-                **cluster_counts,
-            }
+            assert sequence_cluster_result is not None
+            sequence_cluster_mapping = (
+                sequence_cluster_result.protein_to_group
+            )
+            sequence_cluster_assignments = (
+                sequence_cluster_result.assignments
+            )
+            args.sequence_cluster_metadata = (
+                sequence_cluster_result.metadata
+            )
 
     # Select the complete benchmark cohort before constructing any split.
     with performance.stage("sample_cohort"):

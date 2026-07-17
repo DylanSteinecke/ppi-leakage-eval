@@ -28,8 +28,8 @@ used.
 | `ppi.provided.v1` | stable | partially implemented |
 | `ppi.random_pair.v1` | stable | partially implemented |
 | `ppi.c1.v1` | stable | partially implemented; the splitter covers core invariants for already-canonical inputs |
-| `ppi.c2.v1` | stable | partially implemented; the splitter covers core projection invariants, while complete drop artifacts and versioned identity are pending |
-| `ppi.c3.v1` | stable | partially implemented; the splitter covers core projection invariants, while complete drop artifacts and versioned identity are pending |
+| `ppi.c2.v1` | stable | partially implemented; core projection invariants support exact-identity plus supplied or generated MMseqs2 sequence-cluster grouping, while complete drop artifacts and versioned identity are pending |
+| `ppi.c3.v1` | stable | partially implemented; core projection invariants support exact-identity plus supplied or generated MMseqs2 sequence-cluster grouping, while complete drop artifacts and versioned identity are pending |
 | `ptm.provided.v1` | stable | not implemented |
 | `ptm.random_site.v1` | stable | not implemented |
 | `ptm.protein_disjoint.v1` | stable | partially implemented at the task-helper level; not yet a supported benchmark protocol |
@@ -303,6 +303,43 @@ Required grouping metadata:
 - group count and size distribution;
 - missing-entity policy;
 - composite-grouping policy, if any.
+
+The current implementation accepts two mutually exclusive artifact sources:
+a supplied `protein_id,cluster_id` CSV or task-independent generation with
+MMseqs2 `easy-cluster`. Either source is valid only for grouped C2/C3; random,
+C1, and source-provided split protocols reject grouping inputs rather than
+silently ignoring them. Automatic construction receives normalized protein IDs
+and sequences plus the complete eligible protein universe. PPI endpoints,
+labels, and C2/C3 projection rules are not inputs to clustering.
+
+Automatic MMseqs2 defaults are minimum sequence identity `0.30`, coverage
+`0.80`, coverage mode `0`, E-value `0.001`, tool-selected sensitivity and
+cluster mode, and one thread. Coverage mode controls how `-c` is interpreted:
+
+- `0`: coverage of query and target;
+- `1`: coverage of target;
+- `2`: coverage of query;
+- `3`: target length is at least the threshold fraction of query length;
+- `4`: query length is at least the threshold fraction of target length; and
+- `5`: the shorter sequence is at least the threshold fraction of the longer.
+
+These meanings follow the
+[MMseqs2 parameter definition](https://github.com/soedinglab/MMseqs2/blob/master/src/commons/Parameters.cpp).
+The task-independent mapping is content-addressed by normalized sequences and
+eligible membership, exact tool version, workflow, effective parameters, and
+cache/parser revisions. Cache resolution uses
+`PPI_SEQUENCE_CLUSTER_CACHE_DIR`, then
+`$XDG_CACHE_HOME/ppi-leakage/sequence_clusters`, then
+`~/.cache/ppi-leakage/sequence_clusters`. Entries are locked and atomically
+published only after validation; an existing corrupt entry is an actionable
+error, not a cache miss.
+
+One grid invocation has one grouping configuration. Threshold sweeps therefore
+use distinct versioned grid configurations and run names. A generated result
+must be called **MMseqs2 sequence-cluster-disjoint**. The clustering relation
+does not establish that every cross-partition protein pair is below the stated
+identity threshold; a strict homology-disjoint claim requires a separate
+all-vs-all cross-partition audit.
 
 Missing assignment entities must cause an error by default. An explicit
 `exclude_unmapped` policy may be supported, but every excluded example must be

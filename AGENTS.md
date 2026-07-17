@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-Goal: Develop a benchmarking framework which will produce results for "models x features x splits x tasks". Models and features will include baselines (e.g., predicts positives), simple models (e.g., TF-IDF features), and SOTA models (e.g., protein language models). Splits will be different leakage-aware splits such as C1/C2/C3
+Goal: Develop a benchmarking framework which will produce results for "models x features x splits x tasks". Models and features will include baselines (e.g., predicts positives), simple models (e.g., TF-IDF features), and SOTA models (e.g., protein language models). Splits will be different leakage-aware splits such as C1/C2/C3, homology-aware splitting, species, and temporal splitting. Tasks will be protein-protein interactions, PTM prediction, and more. Each step in the process (e.g., dataset prepration, splitting, task training and prediction, report generation) should be written in an abstraction that allows for adapters specific to each model/featire/split/task.
 
 ## Project Structure & Module Organization
 

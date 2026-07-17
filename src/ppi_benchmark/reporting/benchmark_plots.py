@@ -16,6 +16,67 @@ from .plot_common import (
 )
 
 
+def _benchmark_train_val_f1_data(
+    summary_df: pd.DataFrame,
+    execution_id_prefix: str | None = None,
+) -> pd.DataFrame:
+    """Return one train/validation row per split and grouping instance."""
+    required_columns = {
+        "summary_split",
+        "split_strategy",
+        "model_name",
+        "f1_mean",
+    }
+    if required_columns - set(summary_df.columns):
+        return pd.DataFrame()
+
+    summary_df = summary_df.copy()
+    if execution_id_prefix is not None:
+        if "execution_id" not in summary_df.columns:
+            return pd.DataFrame()
+        execution_ids = summary_df["execution_id"].fillna("").astype(str)
+        summary_df = summary_df[
+            execution_ids.str.startswith(execution_id_prefix)
+        ]
+
+    summary_df = summary_df[
+        summary_df["summary_split"].isin(("train", "val"))
+    ].copy()
+    if summary_df.empty:
+        return pd.DataFrame()
+
+    if "split_grouping_instance" not in summary_df.columns:
+        summary_df["split_grouping_instance"] = "legacy"
+    else:
+        summary_df["split_grouping_instance"] = (
+            summary_df["split_grouping_instance"]
+            .fillna("legacy")
+            .astype(str)
+            .replace("", "legacy")
+        )
+    if "split_grouping_label" not in summary_df.columns:
+        summary_df["split_grouping_label"] = ""
+    else:
+        summary_df["split_grouping_label"] = (
+            summary_df["split_grouping_label"].fillna("").astype(str)
+        )
+
+    plot_df = summary_df.pivot_table(
+        index=[
+            "split_strategy",
+            "split_grouping_instance",
+            "split_grouping_label",
+            "model_name",
+        ],
+        columns="summary_split",
+        values="f1_mean",
+        aggfunc="mean",
+    ).reset_index()
+    if "train" not in plot_df.columns or "val" not in plot_df.columns:
+        return pd.DataFrame()
+    return plot_df.dropna(subset=["train", "val"])
+
+
 def plot_benchmark_train_val_f1(
         summary: pd.DataFrame | str | Path,
         plot_path: str | Path,
@@ -42,39 +103,10 @@ def plot_benchmark_train_val_f1(
     else:
         summary_df = pd.read_csv(summary)
 
-    required_columns = {
-        "summary_split",
-        "split_strategy",
-        "model_name",
-        "f1_mean",
-    }
-    missing_columns = required_columns - set(summary_df.columns)
-    if missing_columns:
-        return False
-
-    if execution_id_prefix is not None:
-        if "execution_id" not in summary_df.columns:
-            return False
-        execution_ids = summary_df["execution_id"].fillna("").astype(str)
-        summary_df = summary_df[
-            execution_ids.str.startswith(execution_id_prefix)
-        ]
-
-    summary_df = summary_df[
-        summary_df["summary_split"].isin(("train", "val"))
-    ].copy()
-    if summary_df.empty:
-        return False
-
-    plot_df = summary_df.pivot_table(
-        index=["split_strategy", "model_name"],
-        columns="summary_split",
-        values="f1_mean",
-        aggfunc="mean",
-    ).reset_index()
-    if "train" not in plot_df.columns or "val" not in plot_df.columns:
-        return False
-    plot_df = plot_df.dropna(subset=["train", "val"])
+    plot_df = _benchmark_train_val_f1_data(
+        summary_df,
+        execution_id_prefix=execution_id_prefix,
+    )
     if plot_df.empty:
         return False
 
@@ -85,6 +117,23 @@ def plot_benchmark_train_val_f1(
         if strategy in observed_strategies
     ]
     strategies.extend(sorted(observed_strategies - set(strategies)))
+
+    panel_keys = []
+    for strategy in strategies:
+        strategy_panels = (
+            plot_df[plot_df["split_strategy"].astype(str) == strategy][
+                ["split_grouping_instance", "split_grouping_label"]
+            ]
+            .drop_duplicates()
+            .sort_values(
+                ["split_grouping_instance", "split_grouping_label"],
+                kind="stable",
+            )
+        )
+        panel_keys.extend(
+            (strategy, row.split_grouping_instance, row.split_grouping_label)
+            for row in strategy_panels.itertuples(index=False)
+        )
 
     model_order = (
         plot_df.groupby("model_name", sort=False)["val"]
@@ -100,9 +149,9 @@ def plot_benchmark_train_val_f1(
     y_positions = list(range(len(model_order)))
     panel_height = max(3.0, 0.28 * len(model_order) + 1.1)
     header_height = 0.95
-    figure_height = panel_height * len(strategies) + header_height
+    figure_height = panel_height * len(panel_keys) + header_height
     figure, axes = plt.subplots(
-        len(strategies),
+        len(panel_keys),
         1,
         figsize=(12.0, figure_height),
         sharex=True,
@@ -111,16 +160,30 @@ def plot_benchmark_train_val_f1(
     )
     axes = axes.ravel()
 
-    for axis, strategy in zip(axes, strategies):
+    for axis, panel_key in zip(axes, panel_keys):
+        strategy, grouping_instance, grouping_label = panel_key
         strategy_df = (
-            plot_df[plot_df["split_strategy"].astype(str) == strategy]
+            plot_df[
+                (plot_df["split_strategy"].astype(str) == strategy)
+                & (
+                    plot_df["split_grouping_instance"].astype(str)
+                    == grouping_instance
+                )
+                & (
+                    plot_df["split_grouping_label"].astype(str)
+                    == grouping_label
+                )
+            ]
             .set_index("model_name")
         )
+        strategy_label = SPLIT_STRATEGY_LABELS.get(
+            strategy,
+            strategy.replace("_", " ").title(),
+        )
+        if grouping_instance not in {"legacy", "not_applicable"}:
+            strategy_label = f"{strategy_label} — {grouping_label}"
         axis.set_title(
-            SPLIT_STRATEGY_LABELS.get(
-                strategy,
-                strategy.replace("_", " ").title(),
-            ),
+            strategy_label,
             fontsize=11,
             fontweight="bold",
             loc="left",
@@ -196,7 +259,7 @@ def plot_benchmark_train_val_f1(
         frameon=False,
     )
     figure.suptitle(
-        "Train vs validation F1 across split strategies",
+        "Train vs validation F1 across split and grouping protocols",
         fontsize=17,
         fontweight="bold",
         x=0.01,
@@ -224,4 +287,3 @@ def plot_benchmark_train_val_f1(
     plt.close(figure)
 
     return True
-

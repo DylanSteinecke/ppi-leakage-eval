@@ -47,6 +47,7 @@ version = {attr = "ppi_benchmark.__version__"}
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
+    "external_tool: requires an optional executable such as MMseqs2",
     "integration: exercises installed commands or process-boundary workflows",
     "slow: an intentionally comprehensive test excluded only from opt-in fast runs",
 ]

@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -17,7 +19,11 @@ from typing import Any, Mapping, Sequence
 
 from ..backends.models import CLASSIFIER_CHOICES, is_baseline_classifier
 from ..features import FEATURE_CHOICES, PLM_FEATURE
-from ..splitting.protocols import SPLIT_STRATEGY_CHOICES
+from ..splitting.grouping import (
+    SEQUENCE_CLUSTER_METHODS,
+    SequenceClusterParameters,
+)
+from ..splitting.protocols import SPLIT_STRATEGY_CHOICES, get_split_strategy
 from ..protein_encoders import (
     DEFAULT_ESM2_MODEL,
     DEFAULT_PROTEIN_ENCODER_ADAPTER,
@@ -57,6 +63,15 @@ GRID_OWNED_TRAIN_FLAGS = frozenset({
     "--sampling-seed",
     "--seed",
     "--sequence-clusters",
+    "--sequence-cluster-method",
+    "--sequence-cluster-min-seq-id",
+    "--sequence-cluster-coverage",
+    "--sequence-cluster-cov-mode",
+    "--sequence-cluster-evalue",
+    "--sequence-cluster-sensitivity",
+    "--sequence-cluster-cluster-mode",
+    "--sequence-cluster-threads",
+    "--sequence-cluster-cache-dir",
     "--split-col",
     "--split-name",
     "--split-seed",
@@ -132,6 +147,15 @@ class BenchmarkGridConfig:
     embedding_cache_dir: Path | None
     aggregate_results: bool
     train_args: tuple[str, ...]
+    sequence_cluster_method: str | None = None
+    sequence_cluster_min_seq_id: float = 0.30
+    sequence_cluster_coverage: float = 0.80
+    sequence_cluster_cov_mode: int = 0
+    sequence_cluster_evalue: float = 0.001
+    sequence_cluster_sensitivity: float | None = None
+    sequence_cluster_cluster_mode: int | None = None
+    sequence_cluster_threads: int = 1
+    sequence_cluster_cache_dir: Path | None = None
 
     def __post_init__(self) -> None:
         if not SAFE_NAME_PATTERN.fullmatch(self.run_name):
@@ -165,6 +189,66 @@ class BenchmarkGridConfig:
         )
         if unknown_splits:
             raise ValueError(f"Unknown split strategies: {sorted(unknown_splits)}")
+        grouping_requested = (
+            self.sequence_clusters is not None
+            or self.sequence_cluster_method is not None
+        )
+        if (
+            self.sequence_clusters is not None
+            and self.sequence_cluster_method is not None
+        ):
+            raise ValueError(
+                "sequence_clusters and sequence_cluster_method are mutually "
+                "exclusive."
+            )
+        grouping_defaults = SequenceClusterParameters()
+        automatic_settings_without_method = (
+            self.sequence_cluster_method is None
+            and (
+                self.sequence_cluster_min_seq_id
+                != grouping_defaults.min_seq_id
+                or self.sequence_cluster_coverage
+                != grouping_defaults.coverage
+                or self.sequence_cluster_cov_mode
+                != grouping_defaults.cov_mode
+                or self.sequence_cluster_evalue
+                != grouping_defaults.evalue
+                or self.sequence_cluster_sensitivity is not None
+                or self.sequence_cluster_cluster_mode is not None
+                or self.sequence_cluster_threads != grouping_defaults.threads
+                or self.sequence_cluster_cache_dir is not None
+            )
+        )
+        if automatic_settings_without_method:
+            raise ValueError(
+                "Automatic sequence-cluster settings require "
+                "sequence_cluster_method='mmseqs2'."
+            )
+        if self.sequence_cluster_method is not None:
+            SequenceClusterParameters(
+                method=self.sequence_cluster_method,
+                min_seq_id=self.sequence_cluster_min_seq_id,
+                coverage=self.sequence_cluster_coverage,
+                cov_mode=self.sequence_cluster_cov_mode,
+                evalue=self.sequence_cluster_evalue,
+                sensitivity=self.sequence_cluster_sensitivity,
+                cluster_mode=self.sequence_cluster_cluster_mode,
+                threads=self.sequence_cluster_threads,
+            )
+        incompatible_grouped_splits = [
+            strategy
+            for strategy in self.split_strategies
+            if grouping_requested
+            and "sequence_cluster" not in get_split_strategy(
+                "ppi", strategy
+            ).allowed_grouping_kinds
+        ]
+        if incompatible_grouped_splits:
+            raise ValueError(
+                "Sequence-cluster grouping is only compatible with C2/C3; "
+                "incompatible grid strategies: "
+                f"{incompatible_grouped_splits}. Use a separate grid."
+            )
         if not self.feature_sets:
             raise ValueError("At least one feature set is required.")
         for feature_set in self.feature_sets:
@@ -282,6 +366,7 @@ class BenchmarkGridConfig:
             "out_dir",
             "protein_metadata",
             "sequence_clusters",
+            "sequence_cluster_cache_dir",
             "embedding_cache_dir",
         ):
             value = values[key]
@@ -303,6 +388,68 @@ class GridRunSpec:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def _unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0 and 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return parsed
+
+
+def _auto_or_positive_float(value: str) -> float | None:
+    if value.strip().lower() == "auto":
+        return None
+    return _positive_float(value)
+
+
+def _auto_or_cluster_mode(value: str) -> int | None:
+    if value.strip().lower() == "auto":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be 'auto' or an integer from 0 through 3"
+        ) from exc
+    if parsed not in range(4):
+        raise argparse.ArgumentTypeError(
+            "value must be 'auto' or an integer from 0 through 3"
+        )
+    return parsed
+
+
+def _normalized_auto_positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return _auto_or_positive_float(str(value))
+
+
+def _normalized_auto_cluster_mode(value: Any) -> int | None:
+    if value is None:
+        return None
+    return _auto_or_cluster_mode(str(value))
+
+
+def _config_float(value: Any, key: str) -> float:
+    """Return a TOML/CLI number without accepting strings or booleans."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be a number.")
+    return float(value)
+
+
+def _config_int(value: Any, key: str) -> int:
+    """Return a TOML/CLI integer without lossy numeric coercion."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer.")
+    return value
 
 
 def _load_toml(path: str | Path | None) -> dict[str, Any]:
@@ -350,6 +497,53 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=tuple(BUILTIN_PROFILES), default=None)
     parser.add_argument("--protein-metadata", default=None)
     parser.add_argument("--sequence-clusters", default=None)
+    parser.add_argument(
+        "--sequence-cluster-method",
+        choices=SEQUENCE_CLUSTER_METHODS,
+        default=None,
+    )
+    parser.add_argument(
+        "--sequence-cluster-min-seq-id",
+        type=_unit_interval,
+        default=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--sequence-cluster-coverage",
+        type=_unit_interval,
+        default=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--sequence-cluster-cov-mode",
+        type=int,
+        choices=range(6),
+        default=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--sequence-cluster-evalue",
+        type=_positive_float,
+        default=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--sequence-cluster-sensitivity",
+        type=_auto_or_positive_float,
+        default=argparse.SUPPRESS,
+        metavar="AUTO_OR_FLOAT",
+    )
+    parser.add_argument(
+        "--sequence-cluster-cluster-mode",
+        type=_auto_or_cluster_mode,
+        default=argparse.SUPPRESS,
+        metavar="AUTO_OR_0_TO_3",
+    )
+    parser.add_argument(
+        "--sequence-cluster-threads",
+        type=int,
+        default=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--sequence-cluster-cache-dir",
+        default=argparse.SUPPRESS,
+    )
     cohort_group = parser.add_mutually_exclusive_group()
     cohort_group.add_argument("--max-pairs", type=int, default=None)
     cohort_group.add_argument(
@@ -452,6 +646,11 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
     allowed_grid_keys = {
         "pairs", "fasta", "out_dir", "run_name", "profile",
         "protein_metadata", "sequence_clusters", "max_pairs",
+        "sequence_cluster_method", "sequence_cluster_min_seq_id",
+        "sequence_cluster_coverage", "sequence_cluster_cov_mode",
+        "sequence_cluster_evalue", "sequence_cluster_sensitivity",
+        "sequence_cluster_cluster_mode", "sequence_cluster_threads",
+        "sequence_cluster_cache_dir",
         "full_cohort", "sampling_seed", "train_size", "val_size",
         "split_strategies", "split_seeds", "model_seeds",
         "n_split_trials", "max_iter", "k", "include_sgd",
@@ -565,6 +764,120 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
     sequence_clusters = _value(
         args.sequence_clusters, config_values, "sequence_clusters", None
     )
+    automatic_grouping_keys = (
+        "sequence_cluster_min_seq_id",
+        "sequence_cluster_coverage",
+        "sequence_cluster_cov_mode",
+        "sequence_cluster_evalue",
+        "sequence_cluster_sensitivity",
+        "sequence_cluster_cluster_mode",
+        "sequence_cluster_threads",
+        "sequence_cluster_cache_dir",
+    )
+    explicitly_configured_grouping_keys = [
+        key
+        for key in automatic_grouping_keys
+        if hasattr(args, key) or key in config_values
+    ]
+    sequence_cluster_method = _value(
+        args.sequence_cluster_method,
+        config_values,
+        "sequence_cluster_method",
+        None,
+    )
+    if sequence_clusters is not None and (
+        sequence_cluster_method is not None
+        or explicitly_configured_grouping_keys
+    ):
+        parser.error(
+            "sequence_clusters cannot be combined with automatic "
+            "sequence-cluster options."
+        )
+    if (
+        sequence_cluster_method is None
+        and explicitly_configured_grouping_keys
+    ):
+        parser.error(
+            f"{explicitly_configured_grouping_keys[0]} requires "
+            "sequence_cluster_method='mmseqs2'."
+        )
+    sequence_cluster_defaults = SequenceClusterParameters()
+    try:
+        sequence_cluster_min_seq_id = _config_float(
+            _value(
+                getattr(args, "sequence_cluster_min_seq_id", None),
+                config_values,
+                "sequence_cluster_min_seq_id",
+                sequence_cluster_defaults.min_seq_id,
+            ),
+            "sequence_cluster_min_seq_id",
+        )
+        sequence_cluster_coverage = _config_float(
+            _value(
+                getattr(args, "sequence_cluster_coverage", None),
+                config_values,
+                "sequence_cluster_coverage",
+                sequence_cluster_defaults.coverage,
+            ),
+            "sequence_cluster_coverage",
+        )
+        sequence_cluster_cov_mode = _config_int(
+            _value(
+                getattr(args, "sequence_cluster_cov_mode", None),
+                config_values,
+                "sequence_cluster_cov_mode",
+                sequence_cluster_defaults.cov_mode,
+            ),
+            "sequence_cluster_cov_mode",
+        )
+        sequence_cluster_evalue = _config_float(
+            _value(
+                getattr(args, "sequence_cluster_evalue", None),
+                config_values,
+                "sequence_cluster_evalue",
+                sequence_cluster_defaults.evalue,
+            ),
+            "sequence_cluster_evalue",
+        )
+        sensitivity_value = (
+            args.sequence_cluster_sensitivity
+            if hasattr(args, "sequence_cluster_sensitivity")
+            else config_values.get(
+                "sequence_cluster_sensitivity",
+                sequence_cluster_defaults.sensitivity,
+            )
+        )
+        sequence_cluster_sensitivity = _normalized_auto_positive_float(
+            sensitivity_value
+        )
+        cluster_mode_value = (
+            args.sequence_cluster_cluster_mode
+            if hasattr(args, "sequence_cluster_cluster_mode")
+            else config_values.get(
+                "sequence_cluster_cluster_mode",
+                sequence_cluster_defaults.cluster_mode,
+            )
+        )
+        sequence_cluster_cluster_mode = _normalized_auto_cluster_mode(
+            cluster_mode_value
+        )
+        sequence_cluster_threads = _config_int(
+            _value(
+                getattr(args, "sequence_cluster_threads", None),
+                config_values,
+                "sequence_cluster_threads",
+                sequence_cluster_defaults.threads,
+            ),
+            "sequence_cluster_threads",
+        )
+    except (argparse.ArgumentTypeError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
+    sequence_cluster_cache_dir = _value(
+        getattr(args, "sequence_cluster_cache_dir", None),
+        config_values,
+        "sequence_cluster_cache_dir",
+        None,
+    )
     embedding_cache_dir = _value(
         args.embedding_cache_dir,
         config_values,
@@ -650,6 +963,19 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
                 True,
             )),
             train_args=(*configured_train_args, *cli_train_args),
+            sequence_cluster_method=sequence_cluster_method,
+            sequence_cluster_min_seq_id=sequence_cluster_min_seq_id,
+            sequence_cluster_coverage=sequence_cluster_coverage,
+            sequence_cluster_cov_mode=sequence_cluster_cov_mode,
+            sequence_cluster_evalue=sequence_cluster_evalue,
+            sequence_cluster_sensitivity=sequence_cluster_sensitivity,
+            sequence_cluster_cluster_mode=sequence_cluster_cluster_mode,
+            sequence_cluster_threads=sequence_cluster_threads,
+            sequence_cluster_cache_dir=(
+                None
+                if sequence_cluster_cache_dir is None
+                else Path(sequence_cluster_cache_dir)
+            ),
         )
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
@@ -690,6 +1016,38 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
                 common_args.extend([
                     "--sequence-clusters", str(config.sequence_clusters)
                 ])
+            elif config.sequence_cluster_method is not None:
+                common_args.extend([
+                    "--sequence-cluster-method",
+                    config.sequence_cluster_method,
+                    "--sequence-cluster-min-seq-id",
+                    str(config.sequence_cluster_min_seq_id),
+                    "--sequence-cluster-coverage",
+                    str(config.sequence_cluster_coverage),
+                    "--sequence-cluster-cov-mode",
+                    str(config.sequence_cluster_cov_mode),
+                    "--sequence-cluster-evalue",
+                    str(config.sequence_cluster_evalue),
+                    "--sequence-cluster-sensitivity",
+                    (
+                        "auto"
+                        if config.sequence_cluster_sensitivity is None
+                        else str(config.sequence_cluster_sensitivity)
+                    ),
+                    "--sequence-cluster-cluster-mode",
+                    (
+                        "auto"
+                        if config.sequence_cluster_cluster_mode is None
+                        else str(config.sequence_cluster_cluster_mode)
+                    ),
+                    "--sequence-cluster-threads",
+                    str(config.sequence_cluster_threads),
+                ])
+                if config.sequence_cluster_cache_dir is not None:
+                    common_args.extend([
+                        "--sequence-cluster-cache-dir",
+                        str(config.sequence_cluster_cache_dir),
+                    ])
             if config.max_pairs is not None:
                 common_args.extend(["--max-pairs", str(config.max_pairs)])
 
@@ -780,6 +1138,14 @@ def run_grid(config: BenchmarkGridConfig) -> None:
     if missing_inputs:
         raise ValueError(
             "Benchmark input files do not exist: " + ", ".join(missing_inputs)
+        )
+    if (
+        config.sequence_cluster_method == "mmseqs2"
+        and shutil.which("mmseqs") is None
+    ):
+        raise ValueError(
+            "Automatic sequence clustering requires the 'mmseqs' executable "
+            "on PATH. Install MMseqs2 before launching this grouped grid."
         )
     if benchmark_dir.exists():
         raise ValueError(
