@@ -13,6 +13,10 @@ from ppi_benchmark.cli.aggregate import (
 from ppi_benchmark.reporting.benchmark_plots import (
     _benchmark_train_val_f1_data,
 )
+from ppi_benchmark.reporting.schema_compat import (
+    normalize_evaluation_frame,
+    validate_feature_identity_collisions,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +117,7 @@ def summary_row(split_name, features="tfidf", classifier="logistic"):
     Return one metrics summary row.
     """
     return {
+        "evaluation_schema_version": 1,
         "split": split_name,
         "model_name": f"{features}__{classifier}",
         "features": features,
@@ -120,6 +125,57 @@ def summary_row(split_name, features="tfidf", classifier="logistic"):
         "f1_mean": 0.75,
         "f1_standard_error": 0.01,
     }
+
+
+@pytest.mark.parametrize(
+    ("legacy_classifier", "expected_estimator"),
+    (
+        ("always_positive", "constant"),
+        ("always_negative", "constant"),
+        ("degree_logistic", "logistic"),
+        ("degree_hgb", "hist_gradient_boosting"),
+        ("logistic", "logistic"),
+        ("linear_svm", "linear_svm"),
+        ("sgd_logistic", "sgd_logistic"),
+        ("torch_mlp", "torch_mlp"),
+    ),
+)
+def test_schema_v1_model_identity_is_normalized_explicitly(
+        legacy_classifier, expected_estimator):
+    legacy = pd.DataFrame([{
+        "evaluation_schema_version": 1,
+        "classifier": legacy_classifier,
+        "model_name": f"legacy-feature__{legacy_classifier}",
+        "features": "legacy-feature",
+    }])
+
+    normalized = normalize_evaluation_frame(legacy)
+
+    assert "classifier" not in normalized.columns
+    assert normalized.loc[0, "model_name"] == legacy_classifier
+    assert normalized.loc[0, "configuration_id"] == (
+        f"legacy-feature__{legacy_classifier}"
+    )
+    assert normalized.loc[0, "estimator_id"] == expected_estimator
+    assert isinstance(json.loads(normalized.loc[0, "estimator_params"]), dict)
+    assert pd.isna(normalized.loc[0, "matrix_schema_id"])
+
+
+def test_schema_v1_unknown_models_and_feature_hash_collisions_fail():
+    unknown = pd.DataFrame([{
+        "evaluation_schema_version": 1,
+        "classifier": "mystery_model",
+        "model_name": "legacy__mystery_model",
+    }])
+    with pytest.raises(ValueError, match="Unknown schema-v1 classifier"):
+        normalize_evaluation_frame(unknown)
+
+    collision = pd.DataFrame({
+        "feature_identity": ["tfidf-k3-deadbeef0000"] * 2,
+        "feature_spec_sha256": ["a" * 64, "b" * 64],
+    })
+    with pytest.raises(ValueError, match="collisions"):
+        validate_feature_identity_collisions(collision)
 
 
 def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
@@ -249,6 +305,12 @@ def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
         "c3_execution",
     }
     assert set(summary_df["task"]) == {"ppi"}
+    assert "classifier" not in summary_df.columns
+    assert set(summary_df["estimator_id"]) == {"logistic", "constant"}
+    assert set(summary_df["configuration_id"]) == {
+        "tfidf__logistic",
+        "tfidf__always_positive",
+    }
     legacy_row = manifest_df[manifest_df["split_strategy"] == "c3"].iloc[0]
     assert legacy_row["negative_sampling_policy"] == ""
     assert legacy_row["negative_ratio_requested"] == ""
@@ -559,8 +621,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert '--negative-sampling-seed "$NEGATIVE_SAMPLING_SEED"' in yeast_text
     assert "ppi-make-toy-data" in toy_text
     assert '--protein-metadata "$PROTEIN_METADATA"' in grid_text
-    assert 'INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"' in grid_text
-    assert 'INCLUDE_SGD="${INCLUDE_SGD:-1}"' in grid_text
+    assert 'CLASSIFIERS="${CLASSIFIERS:-}"' in grid_text
     assert 'INCLUDE_PLM="${INCLUDE_PLM:-0}"' in grid_text
     assert (
         'INCLUDE_SEQUENCE_CLUSTER_SPLITS="${INCLUDE_SEQUENCE_CLUSTER_SPLITS:-1}"'
@@ -578,7 +639,7 @@ def test_example_runners_have_valid_syntax_and_use_installed_commands():
     assert 'SPLIT_SEEDS="${SPLIT_SEEDS:-0}"' in grid_text
     assert '--split-seeds "${SPLIT_SEED_VALUES[@]}"' in grid_text
     assert '--model-seeds "${MODEL_SEED_VALUES[@]}"' in grid_text
-    assert "--include-torch-mlp" in grid_text
+    assert 'COMMON_GRID_ARGS+=(--classifier "${CLASSIFIER_VALUES[@]}")' in grid_text
     assert "--include-low-resource-esm2" in yeast_text
     assert "--include-low-resource-esm2" in toy_text
 
@@ -587,14 +648,14 @@ def test_benchmark_shell_wrapper_forwards_identity_grid_command(tmp_path):
     grid_path = REPO_ROOT / "scripts" / "_run_ppi_benchmark_grid.sh"
 
     def wrapper_command(
-            profile, include_torch=False, include_plm=False,
+            profile, classifiers="", include_plm=False,
             include_low_resource_esm2=False,
             plm_revision="0123456789abcdef0123456789abcdef01234567",
             embedding_cache_dir=None,
             runner_args=(),
         ):
         suffix = (
-            f"_{int(include_torch)}_{int(include_plm)}"
+            f"_{classifiers.replace(' ', '_')}_{int(include_plm)}"
             f"_{int(include_low_resource_esm2)}"
         )
         if runner_args:
@@ -610,7 +671,7 @@ CALLS_PATH="$1"
 GRID_PATH="$2"
 OUT_DIR="$3"
 BENCHMARK_PROFILE="$4"
-INCLUDE_TORCH_MLP="$5"
+CLASSIFIERS="$5"
 INCLUDE_PLM="$6"
 INCLUDE_LOW_RESOURCE_ESM2="$7"
 PLM_REVISION="$8"
@@ -640,7 +701,7 @@ source "$GRID_PATH" --no-metrics-plots "$@"
                 str(grid_path),
                 str(out_dir),
                 profile,
-                "1" if include_torch else "0",
+                classifiers,
                 "1" if include_plm else "0",
                 "1" if include_low_resource_esm2 else "0",
                 plm_revision,
@@ -661,7 +722,13 @@ source "$GRID_PATH" --no-metrics-plots "$@"
         return calls[0]
 
     laptop_call = wrapper_command("laptop")
-    laptop_torch_call = wrapper_command("laptop", include_torch=True)
+    laptop_torch_call = wrapper_command(
+        "laptop",
+        classifiers=(
+            "degree_logistic always_positive always_negative "
+            "sgd_logistic torch_mlp"
+        ),
+    )
     laptop_plm_call = wrapper_command("laptop", include_plm=True)
     laptop_esm2_call = wrapper_command(
         "laptop",
@@ -670,9 +737,12 @@ source "$GRID_PATH" --no-metrics-plots "$@"
         embedding_cache_dir="",
         runner_args=("--include-low-resource-esm2",),
     )
-    laptop_no_sgd_call = wrapper_command(
+    laptop_controls_call = wrapper_command(
         "laptop",
-        runner_args=("--no-sgd",),
+        runner_args=(
+            "--classifier", "degree_logistic", "always_positive",
+            "always_negative", "--no-metrics-plots",
+        ),
     )
     laptop_protbert_call = wrapper_command(
         "laptop",
@@ -688,12 +758,18 @@ source "$GRID_PATH" --no-metrics-plots "$@"
     assert "--val-size 0.10" in laptop_call
     assert "--no-aggregate-results" in laptop_call
     assert "--no-metrics-plots" in laptop_call
-    assert "--no-include-torch-mlp" in laptop_call
-    assert "--include-sgd" in laptop_call
-    assert "--no-include-sgd" in laptop_no_sgd_call
+    assert "--classifier" not in laptop_call
+    assert (
+        "--classifier degree_logistic always_positive always_negative"
+        in laptop_controls_call
+    )
     assert "--plm-presets protbert" in laptop_protbert_call
     assert "--include-plm" in laptop_protbert_call
-    assert "--include-torch-mlp" in laptop_torch_call
+    assert (
+        "--classifier degree_logistic always_positive always_negative "
+        "sgd_logistic torch_mlp"
+        in laptop_torch_call
+    )
     assert "--include-plm" in laptop_plm_call
     assert "--plm-model facebook/esm2_t6_8M_UR50D" in laptop_plm_call
     assert "--plm-adapter esm2" in laptop_plm_call
@@ -739,7 +815,7 @@ BENCHMARK_PROFILE="laptop"
 RUN_STAMP="suite-test"
 MODEL_SEEDS="0"
 SPLIT_SEEDS="0"
-INCLUDE_SGD=0
+CLASSIFIERS="degree_logistic always_positive always_negative"
 AGGREGATE_RESULTS=1
 source "$GRID_PATH" --no-metrics-plots
 '''
@@ -789,7 +865,7 @@ FASTA="proteins.fasta"
 OUT_DIR="results"
 RUN_STAMP="supplied-test"
 SEQUENCE_CLUSTERS="supplied_clusters.csv"
-INCLUDE_SGD=0
+CLASSIFIERS="degree_logistic always_positive always_negative"
 AGGREGATE_RESULTS=0
 source "$GRID_PATH"
 '''

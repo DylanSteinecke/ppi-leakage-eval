@@ -30,8 +30,7 @@ K="${K:-3}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 RUN_NAME="${RUN_NAME:-${BENCHMARK_PROFILE}_${RUN_STAMP}}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
-INCLUDE_SGD="${INCLUDE_SGD:-1}"
-INCLUDE_TORCH_MLP="${INCLUDE_TORCH_MLP:-0}"
+CLASSIFIERS="${CLASSIFIERS:-}"
 INCLUDE_PLM="${INCLUDE_PLM:-0}"
 INCLUDE_LOW_RESOURCE_ESM2="${INCLUDE_LOW_RESOURCE_ESM2:-0}"
 PLM_ADAPTER="${PLM_ADAPTER:-esm2}"
@@ -48,6 +47,8 @@ PLM_MAX_BATCH_TOKENS="${PLM_MAX_BATCH_TOKENS:-1024}"
 PLM_MAX_BATCH_SEQUENCES="${PLM_MAX_BATCH_SEQUENCES:-8}"
 
 read -r -a PLM_PRESET_VALUES <<< "$PLM_PRESETS"
+read -r -a CLASSIFIER_VALUES <<< "$CLASSIFIERS"
+CLASSIFIER_OPTION_SEEN=0
 
 PASSTHROUGH_ARGS=()
 while (($#)); do
@@ -64,17 +65,23 @@ while (($#)); do
         --no-include-plm)
             INCLUDE_PLM=0
             ;;
-        --include-sgd|--sgd)
-            INCLUDE_SGD=1
-            ;;
-        --no-include-sgd|--no-sgd)
-            INCLUDE_SGD=0
-            ;;
-        --include-torch-mlp)
-            INCLUDE_TORCH_MLP=1
-            ;;
-        --no-include-torch-mlp)
-            INCLUDE_TORCH_MLP=0
+        --classifier)
+            if [[ "$CLASSIFIER_OPTION_SEEN" == "1" ]]; then
+                echo "Pass --classifier exactly once with all models." >&2
+                return 2
+            fi
+            CLASSIFIER_OPTION_SEEN=1
+            CLASSIFIER_VALUES=()
+            shift
+            while (($#)) && [[ "$1" != --* ]]; do
+                CLASSIFIER_VALUES+=("$1")
+                shift
+            done
+            if [[ "${#CLASSIFIER_VALUES[@]}" -eq 0 ]]; then
+                echo "--classifier requires at least one model." >&2
+                return 2
+            fi
+            continue
             ;;
         --include-sequence-cluster-splits)
             INCLUDE_SEQUENCE_CLUSTER_SPLITS=1
@@ -244,22 +251,9 @@ case "$AGGREGATE_RESULTS" in
         return 2
         ;;
 esac
-case "$INCLUDE_TORCH_MLP" in
-    1) COMMON_GRID_ARGS+=(--include-torch-mlp) ;;
-    0) COMMON_GRID_ARGS+=(--no-include-torch-mlp) ;;
-    *)
-        echo "INCLUDE_TORCH_MLP must be 0 or 1." >&2
-        return 2
-        ;;
-esac
-case "$INCLUDE_SGD" in
-    1) COMMON_GRID_ARGS+=(--include-sgd) ;;
-    0) COMMON_GRID_ARGS+=(--no-include-sgd) ;;
-    *)
-        echo "INCLUDE_SGD must be 0 or 1." >&2
-        return 2
-        ;;
-esac
+if [[ "${#CLASSIFIER_VALUES[@]}" -gt 0 ]]; then
+    COMMON_GRID_ARGS+=(--classifier "${CLASSIFIER_VALUES[@]}")
+fi
 case "$INCLUDE_PLM" in
     1)
         COMMON_GRID_ARGS+=(--include-plm)

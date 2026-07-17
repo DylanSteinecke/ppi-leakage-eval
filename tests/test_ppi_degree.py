@@ -137,7 +137,7 @@ def test_pair_order_has_identical_degree_bin_assignment():
         "predictions": [0],
         "global_threshold": 0.5,
         "split_strategy": "random",
-        "metadata": {"classifier": "model", "split": "test"},
+        "metadata": {"model_name": "model", "split": "test"},
     }
 
     forward_rows = degree_metric_rows(forward, **kwargs)
@@ -163,7 +163,7 @@ def test_degree_evaluation_plan_is_reusable_and_immutable():
         "scores": np.asarray([0.8, 0.2]),
         "predictions": np.asarray([1, 0]),
         "global_threshold": 0.5,
-        "metadata": {"classifier": "model", "split": "val"},
+        "metadata": {"model_name": "model", "split": "val"},
     }
 
     first = evaluate_degree_plan(plan, **kwargs)
@@ -212,7 +212,7 @@ def test_c2_and_c3_reporting_apply_protocol_specific_degree_contracts():
     })
     pa_scores = preferential_attachment_scores(c2, profile)
     metadata = {
-        "classifier": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+        "model_name": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
         "split": "test",
     }
 
@@ -290,7 +290,7 @@ def test_degree_strata_reuse_global_predictions_and_report_one_class_counts():
         predictions=predictions,
         global_threshold=0.6,
         split_strategy="random",
-        metadata={"classifier": "model", "split": "test"},
+        metadata={"model_name": "model", "split": "test"},
     )
 
     assert (rows["global_threshold"] == 0.6).all()
@@ -332,14 +332,14 @@ def test_evaluation_cohort_hash_is_pair_order_symmetric_but_label_sensitive():
 def control_selection_rows(hgb_delta):
     rows = []
     for split_seed in range(5):
-        for classifier, auprc in (
+        for model_name, auprc in (
             ("degree_logistic", 0.60),
             ("degree_hgb", 0.60 + hgb_delta),
         ):
             rows.append({
                 "split": "val",
                 "stratification_axis": "global",
-                "classifier": classifier,
+                "model_name": model_name,
                 "split_strategy": "random",
                 "split_seed": split_seed,
                 "auprc": auprc,
@@ -363,7 +363,7 @@ def test_control_selection_is_context_scoped_and_lift_requires_coverage():
     )
     defaulted = control_selection_rows(0.03)
     defaulted = defaulted[
-        defaulted["classifier"] == "degree_logistic"
+        defaulted["model_name"] == "degree_logistic"
     ].assign(control_selection_context_sha256="context-b")
     selection = select_primary_degree_control(
         pd.concat((promoted, defaulted), ignore_index=True)
@@ -405,22 +405,22 @@ def test_control_selection_is_context_scoped_and_lift_requires_coverage():
         rows.extend((
             {
                 **common,
-                "model_name": f"real-{context}",
-                "classifier": "logistic",
+                "model_name": "logistic",
+                "configuration_id": f"real-{context}",
                 "model_role": "predictive_model",
                 "auprc": 0.8,
             },
             {
                 **common,
                 "model_name": selected_control,
-                "classifier": selected_control,
+                "configuration_id": selected_control,
                 "model_role": "degree_control",
                 "auprc": 0.6,
             },
             {
                 **common,
                 "model_name": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
-                "classifier": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+                "configuration_id": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
                 "model_role": "degree_reference",
                 "auprc": 0.5,
             },
@@ -436,7 +436,7 @@ def test_control_selection_is_context_scoped_and_lift_requires_coverage():
     missing_control = metrics[
         ~(
             (metrics["control_selection_context_sha256"] == "context-b")
-            & (metrics["classifier"] == "degree_logistic")
+            & (metrics["model_name"] == "degree_logistic")
         )
     ]
     with pytest.raises(ValueError, match="required degree_logistic rows"):
@@ -474,8 +474,8 @@ def test_lift_join_refuses_mismatched_identity_gates(mismatch_field):
     }
     model_row = {
             **common,
-            "model_name": "real",
-            "classifier": "logistic",
+            "model_name": "logistic",
+            "configuration_id": "real",
             "model_role": "predictive_model",
             "evaluation_cohort_sha256": "cohort-a",
             "auprc": 0.8,
@@ -483,7 +483,7 @@ def test_lift_join_refuses_mismatched_identity_gates(mismatch_field):
     control_row = {
             **common,
             "model_name": "degree_logistic",
-            "classifier": "degree_logistic",
+            "configuration_id": "degree_logistic",
             "model_role": "primary_degree_control",
             "evaluation_cohort_sha256": "cohort-a",
             "auprc": 0.6,
@@ -492,7 +492,7 @@ def test_lift_join_refuses_mismatched_identity_gates(mismatch_field):
     pa_row = {
             **common,
             "model_name": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
-            "classifier": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+            "configuration_id": PREFERENTIAL_ATTACHMENT_CLASSIFIER,
             "model_role": "degree_reference",
             "evaluation_cohort_sha256": "cohort-a",
             "auprc": 0.5,
@@ -533,9 +533,9 @@ def test_cli_degree_artifact_lifecycle_and_registered_control(
     assert {
         PREFERENTIAL_ATTACHMENT_CLASSIFIER,
         "degree_logistic",
-    } == set(val_metrics["classifier"])
+    } == set(val_metrics["model_name"])
     assert val_metrics[
-        val_metrics["classifier"] == "degree_logistic"
+        val_metrics["model_name"] == "degree_logistic"
     ]["global_threshold"].notna().all()
     metadata = json.loads(
         (run_dir / "splits" / "split_metadata.json").read_text(
@@ -589,7 +589,7 @@ def test_benchmark_aggregation_writes_hash_gated_degree_lift(
     )
     selection = json.loads(selection_path.read_text(encoding="utf-8"))
     assert {"degree_logistic", "logistic"}.issubset(
-        set(summary["classifier"])
+        set(summary["model_name"])
     )
     assert not lift.empty
     assert set(lift["selected_fitted_control"]) == {"degree_logistic"}
@@ -606,7 +606,7 @@ def test_benchmark_aggregation_writes_hash_gated_degree_lift(
     baseline_degree_path = baseline_dir / "val_degree_metrics.csv"
     baseline_degree = pd.read_csv(baseline_degree_path)
     changed = (
-        (baseline_degree["classifier"] == "degree_logistic")
+        (baseline_degree["model_name"] == "degree_logistic")
         & (baseline_degree["stratification_axis"] == "global")
     )
     baseline_degree.loc[changed, "auprc"] += 0.01

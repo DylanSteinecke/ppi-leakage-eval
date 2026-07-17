@@ -6,7 +6,7 @@ set -euo pipefail
 # Add frozen ESM-2 + SGD with CPU-safe batching and a shared embedding cache:
 # bash scripts/run_toy_ppi_example.sh --include-low-resource-esm2
 # Or select approved self-supervised checkpoints with --plm-preset NAME.
-# Optional model switches: --sgd/--no-sgd and --include-torch-mlp.
+# Override the profile's exact model set with --classifier NAME [NAME ...].
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

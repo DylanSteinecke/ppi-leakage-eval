@@ -7,23 +7,24 @@ from ppi_benchmark.backends import (
     ModelBackend,
     SklearnBackend,
     SupervisedSplit,
-    backend_name_for_classifier,
     make_model_backend,
 )
 from ppi_benchmark.backends.models import (
-    CLASSIFIER_CHOICES,
-    CONSTANT_INPUT,
-    DEGREE_INPUT,
-    MODEL_SPECS,
-    classifier_forces_fixed_threshold,
-    is_baseline_classifier,
-    make_classifier,
-    model_input_kind,
-    model_reporting_role,
-    model_spec,
+    ESTIMATOR_IDS,
+    make_estimator,
     score_estimator,
 )
 from ppi_benchmark.reporting.performance import solver_iteration_report
+from ppi_benchmark.tasks.ppi_models import (
+    CONFIGURED_FEATURE_MATRIX,
+    CONTROL_GROUP,
+    NO_MATRIX,
+    PPI_MODEL_CHOICES,
+    PPI_MODEL_SPECS,
+    PPIModelSpec,
+    TRAINING_DEGREE_MATRIX,
+    ppi_model_spec,
+)
 
 
 def test_sklearn_backend_matches_existing_estimator_path():
@@ -40,8 +41,14 @@ def test_sklearn_backend_matches_existing_estimator_path():
     y_train = np.asarray([0, 0, 0, 0, 1, 1, 1, 1])
     x_eval = np.asarray([[-1.5, -1.5], [0.5, 1.0], [2.0, 2.0]])
 
-    estimator = make_classifier(
-        classifier_name="logistic",
+    parameters = {
+        "C": 1.0,
+        "class_weight": "balanced",
+        "solver": "liblinear",
+    }
+    estimator = make_estimator(
+        estimator_id="logistic",
+        estimator_params=parameters,
         max_iter=100,
         random_state=7,
     )
@@ -52,7 +59,8 @@ def test_sklearn_backend_matches_existing_estimator_path():
     )
 
     backend = make_model_backend(
-        classifier_name="logistic",
+        estimator_id="logistic",
+        estimator_params=parameters,
         max_iter=100,
         random_state=7,
     )
@@ -109,50 +117,89 @@ def test_sklearn_backend_fits_only_the_training_split():
 def test_unsupported_and_unknown_backends_fail_clearly():
     with pytest.raises(ValueError, match="requires backend 'sklearn'"):
         make_model_backend(
-            classifier_name="logistic",
+            estimator_id="logistic",
+            estimator_params={},
             max_iter=100,
             random_state=7,
             backend_name="torch",
         )
     with pytest.raises(ValueError, match="Unknown model backend: jax"):
         make_model_backend(
-            classifier_name="logistic",
+            estimator_id="logistic",
+            estimator_params={},
             max_iter=100,
             random_state=7,
             backend_name="jax",
         )
 
 
-def test_model_registry_is_the_single_source_for_choices_and_routing():
-    assert CLASSIFIER_CHOICES == tuple(spec.name for spec in MODEL_SPECS)
-    assert backend_name_for_classifier("logistic") == "sklearn"
-    assert backend_name_for_classifier("torch_mlp") == "torch"
-    assert is_baseline_classifier("always_positive") is True
-    assert is_baseline_classifier("degree_logistic") is True
-    assert is_baseline_classifier("sgd_logistic") is False
-    assert model_input_kind("always_positive") == CONSTANT_INPUT
-    assert model_input_kind("degree_logistic") == DEGREE_INPUT
-    assert classifier_forces_fixed_threshold("always_positive") is True
-    assert classifier_forces_fixed_threshold("degree_logistic") is False
-    assert model_spec("degree_logistic").fixed_max_iter == 1000
-    assert model_spec("degree_hgb").fixed_max_iter == 100
-    assert model_reporting_role("degree_logistic") == "primary_degree_control"
-    assert model_reporting_role("logistic") == "predictive_model"
-    assert model_spec("torch_mlp").estimator_factory is None
-    with pytest.raises(ValueError, match="Unknown classifier: missing"):
-        model_spec("missing")
+def test_ppi_model_registry_owns_public_routing_and_execution_policies():
+    assert PPI_MODEL_CHOICES == tuple(
+        spec.model_name for spec in PPI_MODEL_SPECS
+    )
+    assert set(ESTIMATOR_IDS) == {
+        "constant",
+        "logistic",
+        "linear_svm",
+        "sgd_logistic",
+        "hist_gradient_boosting",
+        "torch_mlp",
+    }
+    positive = ppi_model_spec("always_positive")
+    degree_logistic = ppi_model_spec("degree_logistic")
+    degree_hgb = ppi_model_spec("degree_hgb")
+    logistic = ppi_model_spec("logistic")
+    assert positive.matrix_source == NO_MATRIX
+    assert positive.reporting_group == CONTROL_GROUP
+    assert positive.execution_policy.run_per_model_seed is False
+    assert positive.execution_policy.force_fixed_threshold is True
+    assert degree_logistic.matrix_source == TRAINING_DEGREE_MATRIX
+    assert degree_logistic.estimator_id == "logistic"
+    assert degree_logistic.execution_policy.resolve_iteration_budget(
+        max_iter=17,
+        torch_max_epochs=5,
+    ) == 17
+    assert degree_hgb.execution_policy.resolve_iteration_budget(
+        max_iter=17,
+        torch_max_epochs=5,
+    ) == 100
+    assert logistic.matrix_source == CONFIGURED_FEATURE_MATRIX
+    assert logistic.reporting_role == "predictive_model"
+    with pytest.raises(TypeError):
+        positive.estimator_params["positive_probability"] = 0.5
+    with pytest.raises(ValueError, match="Unknown PPI model: missing"):
+        ppi_model_spec("missing")
+    with pytest.raises(TypeError, match="JSON-compatible"):
+        PPIModelSpec(
+            "invalid",
+            "logistic",
+            CONFIGURED_FEATURE_MATRIX,
+            "predictor",
+            logistic.execution_policy,
+            {"invalid": {1, 2}},
+        )
 
 
 def test_degree_controls_use_the_fixed_predeclared_estimators():
-    logistic = make_classifier(
-        "degree_logistic", max_iter=3, random_state=17
+    logistic_spec = ppi_model_spec("degree_logistic")
+    hgb_spec = ppi_model_spec("degree_hgb")
+    logistic = make_estimator(
+        logistic_spec.estimator_id,
+        estimator_params=logistic_spec.estimator_params,
+        max_iter=3,
+        random_state=17,
     )
-    hgb = make_classifier("degree_hgb", max_iter=3, random_state=17)
+    hgb = make_estimator(
+        hgb_spec.estimator_id,
+        estimator_params=hgb_spec.estimator_params,
+        max_iter=100,
+        random_state=17,
+    )
 
     assert logistic.solver == "liblinear"
     assert logistic.class_weight == "balanced"
     assert logistic.C == 1.0
-    assert logistic.max_iter == 1000
+    assert logistic.max_iter == 3
     assert logistic.random_state == 17
     assert hgb.max_depth == 3
     assert hgb.max_iter == 100
@@ -196,7 +243,8 @@ def test_torch_mlp_batches_sparse_densification_and_early_stops(
 
     monkeypatch.setattr(csr_matrix, "toarray", tracked_toarray)
     backend = make_model_backend(
-        classifier_name="torch_mlp",
+        estimator_id="torch_mlp",
+        estimator_params={},
         max_iter=10,
         random_state=7,
         best_checkpoint_path=best_checkpoint_path,
@@ -291,7 +339,8 @@ def test_torch_mlp_resumes_legacy_last_checkpoint_optimizer_and_rng(tmp_path):
     source_best = tmp_path / "source.best.pt"
     source_last = tmp_path / "source.last.pt"
     first_backend = make_model_backend(
-        classifier_name="torch_mlp",
+        estimator_id="torch_mlp",
+        estimator_params={},
         max_iter=2,
         random_state=19,
         best_checkpoint_path=source_best,
@@ -331,7 +380,8 @@ def test_torch_mlp_resumes_legacy_last_checkpoint_optimizer_and_rng(tmp_path):
     torch.save(legacy_checkpoint, source_last)
 
     best_only_backend = make_model_backend(
-        classifier_name="torch_mlp",
+        estimator_id="torch_mlp",
+        estimator_params={},
         max_iter=4,
         random_state=19,
         resume_from=source_best,
@@ -344,7 +394,8 @@ def test_torch_mlp_resumes_legacy_last_checkpoint_optimizer_and_rng(tmp_path):
         )
 
     resumed_backend = make_model_backend(
-        classifier_name="torch_mlp",
+        estimator_id="torch_mlp",
+        estimator_params={},
         max_iter=4,
         random_state=19,
         best_checkpoint_path=tmp_path / "resumed.best.pt",
@@ -358,7 +409,8 @@ def test_torch_mlp_resumes_legacy_last_checkpoint_optimizer_and_rng(tmp_path):
     )
 
     uninterrupted_backend = make_model_backend(
-        classifier_name="torch_mlp",
+        estimator_id="torch_mlp",
+        estimator_params={},
         max_iter=4,
         random_state=19,
         best_checkpoint_path=tmp_path / "uninterrupted.best.pt",
@@ -390,7 +442,8 @@ def test_torch_mlp_resumes_legacy_last_checkpoint_optimizer_and_rng(tmp_path):
     changed_train = x_train.copy()
     changed_train[0, 0] = 0.0
     mismatched_backend = make_model_backend(
-        classifier_name="torch_mlp",
+        estimator_id="torch_mlp",
+        estimator_params={},
         max_iter=4,
         random_state=19,
         resume_from=source_last,

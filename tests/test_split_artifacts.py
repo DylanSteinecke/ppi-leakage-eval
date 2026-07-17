@@ -211,7 +211,7 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     }
     assert required_keys <= set(metadata)
     assert metadata["execution_id"] == "test-execution"
-    assert metadata["evaluation_schema_version"] == 1
+    assert metadata["evaluation_schema_version"] == 2
     assert metadata["task"] == "ppi"
     assert metadata["n_val"] == 0
     assert metadata["actual_val_size"] == 0.0
@@ -264,6 +264,37 @@ def test_append_rejects_different_split_assignments(tmp_path):
             split_assignments=changed_assignments,
             dropped_pairs=dropped_pairs,
             split_metadata=metadata,
+            output_paths=output_paths,
+            append_results=True,
+        )
+
+
+def test_append_rejects_mixed_evaluation_schema_versions(tmp_path):
+    split_dir = tmp_path / "splits"
+    output_paths = SimpleNamespace(
+        split_assignments_path=split_dir / "split_assignments.csv",
+        dropped_pairs_path=split_dir / "dropped_pairs.csv",
+        split_metadata_path=split_dir / "split_metadata.json",
+    )
+    assignments = pd.DataFrame({
+        "source_row_index": [0, 1],
+        "split": ["train", "test"],
+    })
+    dropped_pairs = pd.DataFrame(
+        columns=["source_row_index", "drop_reason"])
+    write_split_artifacts(
+        split_assignments=assignments,
+        dropped_pairs=dropped_pairs,
+        split_metadata={"evaluation_schema_version": 1},
+        output_paths=output_paths,
+        append_results=False,
+    )
+
+    with pytest.raises(ValueError, match="schema versions differ"):
+        write_split_artifacts(
+            split_assignments=assignments,
+            dropped_pairs=dropped_pairs,
+            split_metadata={"evaluation_schema_version": 2},
             output_paths=output_paths,
             append_results=True,
         )

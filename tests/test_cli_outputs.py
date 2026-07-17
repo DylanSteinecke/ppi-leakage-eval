@@ -5,7 +5,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from ppi_benchmark.cli.train import argument_parser, configure_logging
+from ppi_benchmark.cli.train import (
+    argument_parser,
+    configure_logging,
+    make_configuration_id,
+)
 
 
 REMOVED_OUTPUT_FLAGS = [
@@ -41,7 +45,8 @@ def assert_not_written(*paths):
         assert not path.exists(), f"Unexpected output was written: {path}"
 
 
-def base_cli_args(pairs_path, fasta_path, run_dir):
+def base_cli_args(
+        pairs_path, fasta_path, run_dir, classifier="always_positive"):
     """
     Return fast CLI args shared by workflow regression tests.
     """
@@ -49,7 +54,7 @@ def base_cli_args(pairs_path, fasta_path, run_dir):
         "--pairs", pairs_path,
         "--fasta", fasta_path,
         "--run-dir", run_dir,
-        "--classifier", "always_positive",
+        "--classifier", classifier,
         "--max-iter", "100",
         "--train-size", "0.50",
         "--val-size", "0.0",
@@ -105,13 +110,82 @@ def test_cli_defaults_to_explicit_esm2_adapter(tmp_path, ppi_test_data):
     assert args.plm_adapter == "esm2"
 
 
+def test_classifier_interface_rejects_repetition_and_duplicates(
+        tmp_path, ppi_test_data, capsys):
+    pairs_path, fasta_path = ppi_test_data
+    common_args = [
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", tmp_path / "classifiers",
+    ]
+
+    with pytest.raises(SystemExit) as repeated_error:
+        parse_cli_args(
+            *common_args,
+            "--classifier", "logistic",
+            "--classifier", "linear_svm",
+        )
+    assert repeated_error.value.code == 2
+    assert "exactly once" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as duplicate_error:
+        parse_cli_args(
+            *common_args,
+            "--classifier", "logistic", "logistic",
+        )
+    assert duplicate_error.value.code == 2
+    assert "duplicates" in capsys.readouterr().err
+
+    hidden_alias = parse_cli_args(
+        *common_args,
+        "--classifiers", "logistic", "linear_svm",
+    )
+    assert hidden_alias.classifiers == ["logistic", "linear_svm"]
+
+
+def test_configuration_id_is_exact_deterministic_and_path_safe():
+    assert make_configuration_id(
+        "tfidf+k3 / hash", "model/name"
+    ) == "tfidf_k3_hash__model_name"
+
+
+def test_control_only_selection_ignores_only_implicit_features(
+        tmp_path, ppi_test_data, capsys):
+    pairs_path, fasta_path = ppi_test_data
+    common_args = [
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", tmp_path / "controls",
+        "--classifier", "degree_logistic", "always_positive",
+    ]
+
+    implicit = parse_cli_args(*common_args)
+    assert implicit.features == ("tfidf",)
+    assert implicit.features_explicit is False
+
+    with pytest.raises(SystemExit) as feature_error:
+        parse_cli_args(*common_args, "--features", "tfidf")
+    assert feature_error.value.code == 2
+    assert "unused" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as plm_error:
+        parse_cli_args(*common_args, "--plm-device", "cpu")
+    assert plm_error.value.code == 2
+    assert "unused" in capsys.readouterr().err
+
+
 def test_cli_preset_resolves_identity_and_safe_defaults(
         tmp_path, ppi_test_data, capsys):
     pairs_path, fasta_path = ppi_test_data
     base_args = base_cli_args(
         pairs_path, fasta_path, tmp_path / "preset")
+    base_args[base_args.index("always_positive")] = "sgd_logistic"
 
-    args = parse_cli_args(*base_args, "--plm-preset", "protbert")
+    args = parse_cli_args(
+        *base_args,
+        "--features", "plm",
+        "--plm-preset", "protbert",
+    )
 
     assert args.plm_adapter == "protbert"
     assert args.plm_model == "Rostlab/prot_bert"
@@ -122,6 +196,7 @@ def test_cli_preset_resolves_identity_and_safe_defaults(
     with pytest.raises(SystemExit) as error:
         parse_cli_args(
             *base_args,
+            "--features", "plm",
             "--plm-preset", "protbert",
             "--plm-model", "another/model",
         )
@@ -240,12 +315,24 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
     } <= set(predictions.columns)
     performance = json.loads(
         (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
-    assert performance["evaluation_schema_version"] == 1
+    train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
+    assert performance["evaluation_schema_version"] == 2
     assert performance["task"] == "ppi"
     assert performance["total_seconds"] > 0.0
     assert performance["peak_memory_bytes"] > 0
     assert performance["matrices"] == {}
     assert performance["model_runs"][0]["solver_iterations"] is None
+    assert "classifier" not in train_metrics.columns
+    assert train_metrics.loc[0, "model_name"] == "always_positive"
+    assert train_metrics.loc[0, "estimator_id"] == "constant"
+    assert train_metrics.loc[0, "configuration_id"] == (
+        "none__always_positive"
+    )
+    assert train_metrics.loc[0, "matrix_source"] == "none"
+    assert train_metrics.loc[0, "reporting_group"] == "control"
+    assert json.loads(train_metrics.loc[0, "estimator_params"]) == {
+        "positive_probability": 1.0,
+    }
     assert {
         "load_pairs",
         "load_sequences",
@@ -299,9 +386,9 @@ def test_default_generated_split_is_true_train_val_test(
     val_metrics = pd.read_csv(run_dir / "val_metrics.csv")
     assert set(train_metrics["task"]) == {"ppi"}
     assert set(val_metrics["task"]) == {"ppi"}
-    assert set(train_metrics["evaluation_schema_version"]) == {1}
+    assert set(train_metrics["evaluation_schema_version"]) == {2}
     assert metadata["task"] == "ppi"
-    assert metadata["evaluation_schema_version"] == 1
+    assert metadata["evaluation_schema_version"] == 2
     assert metadata["target_train_size"] == pytest.approx(0.8)
     assert metadata["target_val_size"] == pytest.approx(0.1)
     assert metadata["target_test_size"] == pytest.approx(0.1)
@@ -316,8 +403,8 @@ def test_learned_model_reports_matrix_and_solver_performance(
     run_dir = tmp_path / "learned_performance"
 
     run_train(
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        "--classifier", "sgd_logistic",
+        *base_cli_args(
+            pairs_path, fasta_path, run_dir, classifier="sgd_logistic"),
         "--features", "count",
         "--no-metrics-plots",
     )
@@ -339,6 +426,54 @@ def test_learned_model_reports_matrix_and_solver_performance(
     assert train_metrics.loc[0, "fit_seconds"] > 0.0
     assert train_metrics.loc[0, "solver_iterations"] >= 1
     assert train_metrics.loc[0, "evaluation_seconds"] > 0.0
+    assert train_metrics.loc[0, "threshold_selection"] == (
+        "fixed_no_validation"
+    )
+    assert train_metrics.loc[0, "decision_threshold"] == pytest.approx(0.5)
+    assert train_metrics.loc[0, "default_decision_threshold"] == (
+        pytest.approx(0.5)
+    )
+
+
+def test_mixed_matrix_sources_route_models_and_seed_policies(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "mixed_sources"
+
+    run_train(
+        "--pairs", pairs_path,
+        "--fasta", fasta_path,
+        "--run-dir", run_dir,
+        "--classifier", "always_positive", "degree_logistic", "logistic",
+        "--features", "count",
+        "--train-size", "0.50",
+        "--val-size", "0.0",
+        "--split-seed", "11",
+        "--model-seeds", "3", "7",
+        "--max-iter", "20",
+        "--no-metrics-plots",
+    )
+
+    metrics = pd.read_csv(run_dir / "train_metrics.csv")
+    assert metrics.groupby("model_name").size().to_dict() == {
+        "always_positive": 1,
+        "degree_logistic": 2,
+        "logistic": 2,
+    }
+    assert metrics.groupby("model_name")["matrix_source"].first().to_dict() == {
+        "always_positive": "none",
+        "degree_logistic": "training_degree",
+        "logistic": "configured_features",
+    }
+    assert set(metrics["configuration_id"]) == {
+        "none__always_positive",
+        "training_degree_legacy4__degree_logistic",
+        next(
+            value
+            for value in metrics["configuration_id"]
+            if value.endswith("__logistic")
+        ),
+    }
 
 
 def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
@@ -388,12 +523,12 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
     performance = json.loads(
         (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
     torch_metrics = train_metrics[
-        train_metrics["classifier"] == "torch_mlp"
+        train_metrics["model_name"] == "torch_mlp"
     ].iloc[0]
     model_run = next(
         record
         for record in performance["model_runs"]
-        if record["classifier"] == "torch_mlp"
+        if record["model_name"] == "torch_mlp"
     )
     training = model_run["training"]
     best_checkpoint_path = Path(training["best_checkpoint_path"])
@@ -401,18 +536,18 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
 
     assert history["epoch"].tolist() == [1, 2]
     assert set(history["task"]) == {"ppi"}
-    assert set(history["evaluation_schema_version"]) == {1}
+    assert set(history["evaluation_schema_version"]) == {2}
     assert set(history["backend"]) == {"torch"}
     assert history["validation_loss"].notna().all()
     assert history["validation_auprc"].notna().all()
     assert set(history["monitor_metric"]) == {"validation_auprc"}
     assert history["train_batches"].tolist() == [3, 3]
-    assert set(train_metrics["classifier"]) == {
+    assert set(train_metrics["model_name"]) == {
         "sgd_logistic",
         "torch_mlp",
     }
     assert torch_metrics["max_iter"] == 5
-    assert set(predictions["classifier"]) == {
+    assert set(predictions["model_name"]) == {
         "sgd_logistic",
         "torch_mlp",
     }
@@ -581,7 +716,7 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     assert pd.isna(first_metrics.loc[0, "encoder_checkpoint_sha256"])
     assert pd.isna(first_metrics.loc[0, "encoder_training_split_sha256"])
     assert first_metadata["encoder_fingerprint"][:12] in (
-        first_metrics.loc[0, "features"])
+        first_metrics.loc[0, "feature_identity"])
 
     run_cli(
         *common_args,
@@ -1029,11 +1164,11 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
     ]
 
     assert len(train_metrics) == 2
-    assert set(train_metrics["classifier"]) == {
+    assert set(train_metrics["model_name"]) == {
         "always_positive",
         "always_negative",
     }
-    assert set(train_summary["classifier"]) == {
+    assert set(train_summary["model_name"]) == {
         "always_positive",
         "always_negative",
     }
@@ -1056,10 +1191,10 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         invocations[1]["resolved_args"]
     )
     pa_metrics = degree_metrics[
-        degree_metrics["classifier"] == "preferential_attachment"
+        degree_metrics["model_name"] == "preferential_attachment"
     ]
     pa_summary = degree_summary[
-        degree_summary["classifier"] == "preferential_attachment"
+        degree_summary["model_name"] == "preferential_attachment"
     ]
     assert len(pa_metrics) == len(pa_summary)
     assert set(pa_summary["n_runs"]) == {1}

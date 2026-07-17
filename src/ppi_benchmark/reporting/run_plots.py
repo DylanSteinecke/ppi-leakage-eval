@@ -11,7 +11,6 @@ from .plot_common import (
     ARROW_HEAD_LENGTH,
     ARROW_MARKER_GAP,
     AXIS_HEIGHT,
-    BASELINE_CLASSIFIERS,
     BOTTOM_MARGIN,
     COMPARISON_LINE,
     FONT_FAMILY,
@@ -136,7 +135,8 @@ def combined_summary_key_columns(
     preferred_columns = (
         "model_name",
         "features",
-        "classifier",
+        "reporting_group",
+        "configuration_id",
         "k",
         "bm25_k1",
         "bm25_b",
@@ -790,7 +790,7 @@ def plot_train_test_f1_heatmap(
         comparison_split_name=comparison_split_name,
     )
     required_columns = {
-        "classifier",
+        "model_name",
         "features",
         "f1_mean_train",
         f"f1_mean_{comparison_split_name}",
@@ -801,7 +801,7 @@ def plot_train_test_f1_heatmap(
             f"Cannot plot F1 heatmaps; missing columns: {missing_columns}")
 
     plot_df = combined_df.copy()
-    plot_df["classifier_plot"] = plot_df["classifier"].map(
+    plot_df["classifier_plot"] = plot_df["model_name"].map(
         clean_classifier_name)
     plot_df["features_plot"] = plot_df["features"].map(clean_feature_name)
 
@@ -809,10 +809,7 @@ def plot_train_test_f1_heatmap(
         {
             row["classifier_plot"]
             for _, row in plot_df.iterrows()
-            if (
-                row["features_plot"] != "none"
-                and row["classifier_plot"] not in BASELINE_CLASSIFIERS
-            )
+            if row["reporting_group"] == "predictor"
         },
         key=classifier_sort_key,
     )
@@ -820,7 +817,7 @@ def plot_train_test_f1_heatmap(
         {
             row["features_plot"]
             for _, row in plot_df.iterrows()
-            if row["features_plot"] != "none"
+            if row["reporting_group"] == "predictor"
         },
         key=feature_sort_key,
     )
@@ -828,10 +825,7 @@ def plot_train_test_f1_heatmap(
         {
             row["classifier_plot"]
             for _, row in plot_df.iterrows()
-            if (
-                row["features_plot"] == "none"
-                and row["classifier_plot"] in BASELINE_CLASSIFIERS
-            )
+            if row["reporting_group"] == "control"
         },
         key=classifier_sort_key,
     )
@@ -903,7 +897,14 @@ def plot_train_test_f1_heatmap(
         },
     }
 
-    baseline_features = ["none"] if baseline_classifiers else []
+    baseline_features = sorted(
+        {
+            row["features_plot"]
+            for _, row in plot_df.iterrows()
+            if row["reporting_group"] == "control"
+        },
+        key=feature_sort_key,
+    )
     max_panel_rows = max(len(learned_classifiers), len(baseline_classifiers))
     figure_width = max(
         9.5,
@@ -1140,7 +1141,7 @@ def plot_train_test_f1_heatmap(
     title = title_with_split_strategy(
         base_title=(
             f"Train/{comparison_split_name} F1 heatmaps by feature set and "
-            "classifier"),
+            "model_name"),
         summary_df=combined_df,
     )
     figure.suptitle(

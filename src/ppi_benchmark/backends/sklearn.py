@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any
+from typing import Any, Mapping
 
 from ..reporting.performance import solver_iteration_report
 from .base import BackendFitResult, BackendPrediction, SupervisedSplit
-from .models import make_classifier, score_estimator
+from .models import make_estimator, score_estimator
 
 
 class SklearnBackend:
@@ -19,12 +19,14 @@ class SklearnBackend:
         self.estimator = estimator
 
     @classmethod
-    def from_classifier(
-            cls, classifier_name: str, max_iter: int, random_state: int,
+    def from_estimator(
+            cls, estimator_id: str, estimator_params: Mapping[str, Any],
+            max_iter: int, random_state: int,
         ) -> "SklearnBackend":
-        """Build an adapter with the existing classifier factory."""
-        estimator = make_classifier(
-            classifier_name=classifier_name,
+        """Build an adapter from a task-neutral estimator specification."""
+        estimator = make_estimator(
+            estimator_id=estimator_id,
+            estimator_params=estimator_params,
             max_iter=max_iter,
             random_state=random_state,
         )

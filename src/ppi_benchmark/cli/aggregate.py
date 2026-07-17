@@ -25,6 +25,10 @@ from ..reporting.degree import (
     aggregate_degree_diagnostics,
     protocol_lift_table,
 )
+from ..reporting.schema_compat import (
+    normalize_evaluation_frame,
+    validate_feature_identity_collisions,
+)
 from ..splitting.protocols import C2_SPLIT_STRATEGY, C3_SPLIT_STRATEGY
 
 
@@ -614,6 +618,10 @@ def run_summary_rows(
         summary_df = pd.read_csv(summary_path)
         if summary_df.empty:
             continue
+        summary_df = normalize_evaluation_frame(
+            summary_df,
+            source=summary_path,
+        )
 
         for column_name, column_value in reversed(list(context.items())):
             if column_name not in summary_df.columns:
@@ -688,6 +696,10 @@ def aggregate_benchmark_results(
 
     if summary_frames:
         summary_df = pd.concat(summary_frames, ignore_index=True)
+        validate_feature_identity_collisions(
+            summary_df,
+            source=summary_out,
+        )
     else:
         summary_df = pd.DataFrame()
 

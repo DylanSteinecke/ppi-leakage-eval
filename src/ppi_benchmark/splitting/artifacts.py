@@ -549,6 +549,14 @@ def validate_append_input_files(
 
     with existing_path.open("r", encoding="utf-8") as fin:
         existing_metadata = json.load(fin)
+    existing_schema = existing_metadata.get("evaluation_schema_version")
+    new_schema = new_metadata.get("evaluation_schema_version")
+    if existing_schema != new_schema:
+        raise ValueError(
+            f"Cannot append results to {existing_path.parent.parent}: "
+            "evaluation schema versions differ "
+            f"({existing_schema!r} != {new_schema!r}). Use a new --run-dir."
+        )
     changed_fields = [
         field
         for field in INPUT_HASH_FIELDS

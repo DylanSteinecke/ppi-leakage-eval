@@ -71,7 +71,7 @@ def test_tracker_and_jsonl_writer_report_invocation_resources(tmp_path):
     written = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert written["execution_id"] == "execution-1"
-    assert written["evaluation_schema_version"] == 1
+    assert written["evaluation_schema_version"] == 2
     assert written["task"] == "ppi"
     assert written["total_seconds"] >= written["stages_seconds"][
         "example_stage"]

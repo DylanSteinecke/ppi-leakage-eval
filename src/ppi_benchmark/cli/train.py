@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -29,17 +30,7 @@ from ..artifact_io import (
 )
 from ..backends import (
     TORCH_BACKEND,
-    backend_name_for_classifier,
     make_model_backend,
-)
-from ..backends.models import (
-    BIOLOGICAL_FEATURE_INPUT,
-    CLASSIFIER_CHOICES,
-    CONSTANT_INPUT,
-    DEGREE_INPUT,
-    classifier_forces_fixed_threshold,
-    model_input_kind,
-    model_spec,
 )
 from ..datasets.common import (
     discover_dataset_metadata_path,
@@ -54,12 +45,17 @@ from ..evaluation import (
     VALIDATION_F1_THRESHOLD,
 )
 from ..features import (
+    CONFIGURED_MATRIX_SCHEMA_ID,
     FEATURE_CHOICES,
+    PAIR_COMPOSITION_SCHEMA_ID,
     PLM_FEATURE,
+    FeatureIdentity,
     build_feature_matrices,
     compose_split_feature_matrices,
-    make_feature_name,
+    configured_feature_identity,
+    fixed_feature_identity,
     normalize_feature_types,
+    plm_feature_identity,
     unique_protein_ids,
 )
 from ..reporting.performance import (
@@ -133,6 +129,13 @@ from ..protein_encoders import (
 )
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..tasks import PPI_TASK
+from ..tasks.ppi_models import (
+    CONFIGURED_FEATURE_MATRIX,
+    NO_MATRIX,
+    PPI_MODEL_CHOICES,
+    TRAINING_DEGREE_MATRIX,
+    ppi_model_spec,
+)
 from ..tasks.ppi_degree import (
     DEFAULT_DEGREE_BIN_QUANTILES,
     PREFERENTIAL_ATTACHMENT_CLASSIFIER,
@@ -168,6 +171,7 @@ from .arg_types import (
 )
 
 FEATURELESS_FEATURE = "none"
+LEGACY_DEGREE_FEATURE = "training_degree_legacy4"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LOGGER = logging.getLogger(__name__)
 PLOTS_DIRNAME = "plots"
@@ -195,7 +199,12 @@ TRAINING_HISTORY_COLUMNS = (
     "task",
     "execution_id",
     "model_name",
-    "classifier",
+    "estimator_id",
+    "estimator_params",
+    "feature_identity",
+    "configuration_id",
+    "matrix_source",
+    "reporting_group",
     "backend",
     "features",
     "run_number",
@@ -470,11 +479,11 @@ def argument_parser(
     model_group = parser.add_argument_group("Models")
     model_group.add_argument(
         "--classifier", dest="classifiers",
-        choices=CLASSIFIER_CHOICES, nargs="+", default=["logistic"],
+        choices=PPI_MODEL_CHOICES, nargs="+", default=["logistic"],
         help="One or more classifier model types")
     model_group.add_argument(
         "--classifiers", dest="classifiers",
-        choices=CLASSIFIER_CHOICES, nargs="+", default=argparse.SUPPRESS,
+        choices=PPI_MODEL_CHOICES, nargs="+", default=argparse.SUPPRESS,
         help=argparse.SUPPRESS)
     model_group.add_argument(
         "--threshold-selection",
@@ -577,7 +586,34 @@ def argument_parser(
             "--torch-max-epochs is the total epoch count."
         ))
 
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    classifier_occurrences = sum(
+        token.partition("=")[0] in {"--classifier", "--classifiers"}
+        for token in raw_argv
+    )
+    if classifier_occurrences > 1:
+        parser.error("Pass --classifier exactly once with all selected models.")
+    explicit_features = any(
+        token.partition("=")[0] == "--features" for token in raw_argv
+    )
+    explicit_plm_options = sorted({
+        token.partition("=")[0]
+        for token in raw_argv
+        if token.partition("=")[0].startswith("--plm-")
+        or token.partition("=")[0] == "--embedding-cache-dir"
+    })
+    args = parser.parse_args(raw_argv)
+    duplicate_classifiers = sorted({
+        model_name
+        for model_name in args.classifiers
+        if args.classifiers.count(model_name) > 1
+    })
+    if duplicate_classifiers:
+        parser.error(
+            f"--classifier cannot contain duplicates: {duplicate_classifiers}"
+        )
+    args.features_explicit = explicit_features
+    args.plm_options_explicit = tuple(explicit_plm_options)
     preset = (
         None
         if args.plm_preset is None
@@ -775,6 +811,28 @@ def argument_parser(
     if args.torch_resume_from and "torch_mlp" not in args.classifiers:
         parser.error("--torch-resume-from requires --classifier torch_mlp.")
 
+    configured_feature_models = [
+        model_name
+        for model_name in args.classifiers
+        if ppi_model_spec(model_name).matrix_source
+        == CONFIGURED_FEATURE_MATRIX
+    ]
+    if not configured_feature_models:
+        if args.features_explicit:
+            parser.error(
+                "--features is unused because no selected model consumes "
+                "configured features."
+            )
+        if args.plm_options_explicit:
+            parser.error(
+                f"{args.plm_options_explicit[0]} is unused because no "
+                "selected model consumes configured features."
+            )
+    elif args.plm_options_explicit and PLM_FEATURE not in args.features:
+        parser.error(
+            f"{args.plm_options_explicit[0]} requires --features plm."
+        )
+
     try:
         args.features = normalize_feature_types(args.features)
     except ValueError as exc:
@@ -933,22 +991,21 @@ class ModelRunArtifacts:
     performance: dict[str, Any]
 
 
-def make_model_name(feature_name: str, classifier_name: str) -> str:
-    """
-    Return a stable, machine-readable model configuration name.
-    """
-    if feature_name == FEATURELESS_FEATURE:
-        model_name = classifier_name
-    else:
-        model_name = f"{feature_name}__{classifier_name}"
-
-    return model_name
-
-
 def safe_artifact_component(value: str) -> str:
     """Return a path-safe component for model-specific artifacts."""
     safe_value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
     return safe_value or "unnamed"
+
+
+def make_configuration_id(
+    feature_identity: str,
+    model_name: str,
+) -> str:
+    """Return the stable feature/model identity used by artifacts."""
+    return (
+        f"{safe_artifact_component(feature_identity)}__"
+        f"{safe_artifact_component(model_name)}"
+    )
 
 
 def model_checkpoint_paths(
@@ -969,18 +1026,37 @@ def model_checkpoint_paths(
 
 
 def feature_metadata(
-        feature_name: str, args: argparse.Namespace
+        identity: FeatureIdentity, matrix_source: str,
+        args: argparse.Namespace,
     ) -> dict[str, Any]:
     """
     Return feature metadata stored with each result row.
     """
-    is_featureless = feature_name == FEATURELESS_FEATURE
+    is_featureless = matrix_source != CONFIGURED_FEATURE_MATRIX
     is_plm = (
         not is_featureless
         and getattr(args, "protein_encoder_metadata", None) is not None
     )
     feature_metadata = {
-        "features": FEATURELESS_FEATURE if is_featureless else feature_name,
+        "features": identity.features,
+        "feature_spec_sha256": identity.feature_spec_sha256,
+        "feature_identity": identity.feature_identity,
+        "fitted_extractor_sha256": (
+            np.nan
+            if identity.fitted_extractor_sha256 is None
+            else identity.fitted_extractor_sha256
+        ),
+        "matrix_source": matrix_source,
+        "matrix_schema_id": (
+            CONFIGURED_MATRIX_SCHEMA_ID
+            if matrix_source == CONFIGURED_FEATURE_MATRIX
+            else np.nan
+        ),
+        "pair_composition_schema_id": (
+            PAIR_COMPOSITION_SCHEMA_ID
+            if matrix_source == CONFIGURED_FEATURE_MATRIX
+            else np.nan
+        ),
         "k": np.nan if is_featureless or is_plm else args.k,
         "bm25_k1": np.nan if is_featureless or is_plm else args.bm25_k1,
         "bm25_b": np.nan if is_featureless or is_plm else args.bm25_b,
@@ -1018,21 +1094,12 @@ def feature_metadata(
     return feature_metadata
 
 
-def frozen_plm_feature_name(encoder_metadata: dict[str, Any]) -> str:
-    """Return a model-specific feature name that cannot mix PLM revisions."""
-    encoder_spec = encoder_metadata["encoder_spec"]
-    model_label = Path(str(encoder_spec["model_name"])).name
-    model_label = safe_artifact_component(model_label)
-    fingerprint = str(encoder_metadata["encoder_fingerprint"])
-    return f"plm-{model_label}-{fingerprint[:12]}"
-
-
 def build_frozen_plm_feature_matrices(
         cohort_df: pd.DataFrame, train_df: pd.DataFrame,
         val_df: pd.DataFrame | None,
         test_df: pd.DataFrame, sequences: dict[str, str],
         evaluate_test_metrics: bool, args: argparse.Namespace,
-    ) -> tuple[Any, Any | None, Any | None, str, dict[str, Any]]:
+    ) -> tuple[Any, Any | None, Any | None, FeatureIdentity, dict[str, Any]]:
     """Encode unique proteins once and compose dense symmetric pair rows."""
     encoder = create_protein_encoder(
         adapter=args.plm_adapter,
@@ -1082,7 +1149,7 @@ def build_frozen_plm_feature_matrices(
         x_train,
         x_val,
         x_test,
-        frozen_plm_feature_name(encoder_metadata),
+        plm_feature_identity(encoder_metadata),
         encoder_metadata,
     )
 
@@ -1133,7 +1200,7 @@ def _append_pa_rows_idempotently(
         return
     existing = pd.read_csv(output_path)
     existing = existing[
-        existing["classifier"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
+        existing["model_name"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
     ]
     if existing.empty:
         append_dataframe(rows, output_path)
@@ -1188,12 +1255,24 @@ def append_preferential_attachment_metrics(
         output_path = output_paths_by_split[split_name]
         if output_path is None:
             continue
+        identity = fixed_feature_identity(LEGACY_DEGREE_FEATURE)
         metadata = context.metric_metadata(
             split_name=split_name,
-            classifier_name=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
             model_name=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+            estimator_id=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+            estimator_params="{}",
+            configuration_id=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
+            reporting_group="control",
             model_role="degree_reference",
-            feature_name=DEGREE_INPUT,
+            feature_metadata={
+                "features": identity.features,
+                "feature_spec_sha256": identity.feature_spec_sha256,
+                "feature_identity": identity.feature_identity,
+                "fitted_extractor_sha256": np.nan,
+                "matrix_source": TRAINING_DEGREE_MATRIX,
+                "matrix_schema_id": np.nan,
+                "pair_composition_schema_id": np.nan,
+            },
             run_number=0,
             model_seed=np.nan,
             execution_id=execution_id,
@@ -1224,7 +1303,8 @@ def reset_output_files(
 def train_and_evaluate_model_run(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
-        x_test: Any | None, feature_name: str, classifier_name: str,
+        x_test: Any | None, feature_identity: FeatureIdentity,
+        model_name: str,
         degree_plans: Mapping[str, DegreeEvaluationPlan],
         degree_context: DegreeDiagnosticContext,
         run_number: int,
@@ -1237,31 +1317,39 @@ def train_and_evaluate_model_run(
     Train and evaluate one model configuration for one run number.
     """
     # Define model metadata
-    model_name = make_model_name(feature_name, classifier_name)
-    spec = model_spec(classifier_name)
-    is_constant = spec.input_kind == CONSTANT_INPUT
+    spec = ppi_model_spec(model_name)
+    is_constant = spec.matrix_source == NO_MATRIX
     run_seed = args.model_seeds[run_number - 1]
     model_seed = np.nan if is_constant else run_seed
-    backend_name = backend_name_for_classifier(classifier_name)
-    backend_max_iter = (
-        args.torch_max_epochs
-        if backend_name == TORCH_BACKEND
-        else args.max_iter
+    backend_name = spec.backend
+    iteration_budget = spec.execution_policy.resolve_iteration_budget(
+        max_iter=args.max_iter,
+        torch_max_epochs=args.torch_max_epochs,
     )
-    effective_max_iter = spec.fixed_max_iter or backend_max_iter
-    max_iter = np.nan if is_constant else effective_max_iter
-    feature_meta = feature_metadata(feature_name, args)
+    backend_max_iter = 1 if iteration_budget is None else iteration_budget
+    max_iter = np.nan if iteration_budget is None else iteration_budget
+    feature_meta = feature_metadata(
+        feature_identity,
+        spec.matrix_source,
+        args,
+    )
+    configuration_id = make_configuration_id(
+        feature_identity.feature_identity,
+        model_name,
+    )
     run_identity = {
         "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
         "task": PPI_TASK.name,
         "execution_id": execution_id,
         "model_name": model_name,
+        "estimator_id": spec.estimator_id,
+        "configuration_id": configuration_id,
         "run_number": run_number,
         "model_seed": model_seed,
     }
 
     # Define model backend
-    backend_options = None
+    backend_options: dict[str, Any] | None = None
     if backend_name == TORCH_BACKEND:
         backend_options = {
             "batch_size": args.torch_batch_size,
@@ -1275,9 +1363,23 @@ def train_and_evaluate_model_run(
             "precision": args.torch_precision,
             "validation_monitor": args.torch_validation_monitor,
         }
+    resolved_estimator_params = dict(spec.estimator_params)
+    if iteration_budget is not None:
+        budget_name = (
+            "max_epochs" if backend_name == TORCH_BACKEND else "max_iter"
+        )
+        resolved_estimator_params[budget_name] = iteration_budget
+    if backend_options is not None:
+        resolved_estimator_params.update(backend_options)
+    estimator_params_json = json.dumps(
+        resolved_estimator_params,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     backend = make_model_backend(
-        classifier_name=classifier_name,
-        max_iter=effective_max_iter,
+        estimator_id=spec.estimator_id,
+        estimator_params=spec.estimator_params,
+        max_iter=backend_max_iter,
         random_state=run_seed,
         backend_name=backend_name,
         best_checkpoint_path=best_checkpoint_path,
@@ -1305,7 +1407,7 @@ def train_and_evaluate_model_run(
         test=test_split,
         evaluation_policy=BinaryClassificationPolicy(
             threshold_strategy=args.threshold_selection,
-            force_fixed=classifier_forces_fixed_threshold(classifier_name),
+            force_fixed=spec.execution_policy.force_fixed_threshold,
         ),
     )
     fit_result = model_run_result.fit_result
@@ -1329,7 +1431,10 @@ def train_and_evaluate_model_run(
         "n_val": n_val,
         "n_test": len(test_df),
         **feature_meta,
-        "classifier": classifier_name,
+        "estimator_id": spec.estimator_id,
+        "estimator_params": estimator_params_json,
+        "configuration_id": configuration_id,
+        "reporting_group": spec.reporting_group,
         "max_iter": max_iter,
         "split_strategy": args.effective_split_strategy,
         "split_name": args.split_name,
@@ -1359,7 +1464,10 @@ def train_and_evaluate_model_run(
     if fit_result.training_history:
         history_metadata = {
             **run_identity,
-            "classifier": classifier_name,
+            "estimator_params": estimator_params_json,
+            "feature_identity": feature_identity.feature_identity,
+            "matrix_source": spec.matrix_source,
+            "reporting_group": spec.reporting_group,
             "backend": backend.backend_name,
             "features": feature_meta["features"],
         }
@@ -1400,14 +1508,24 @@ def train_and_evaluate_model_run(
             global_threshold=threshold_selection.threshold,
             metadata=degree_context.metric_metadata(
                 split_name=split_name,
-                classifier_name=classifier_name,
                 model_name=model_name,
+                estimator_id=spec.estimator_id,
+                estimator_params=estimator_params_json,
+                configuration_id=configuration_id,
+                reporting_group=spec.reporting_group,
                 model_role=spec.reporting_role,
-                feature_name=(
-                    DEGREE_INPUT
-                    if spec.input_kind == DEGREE_INPUT
-                    else feature_meta["features"]
-                ),
+                feature_metadata={
+                    key: feature_meta[key]
+                    for key in (
+                        "features",
+                        "feature_spec_sha256",
+                        "feature_identity",
+                        "fitted_extractor_sha256",
+                        "matrix_source",
+                        "matrix_schema_id",
+                        "pair_composition_schema_id",
+                    )
+                },
                 run_number=run_number,
                 model_seed=model_seed,
                 execution_id=execution_id,
@@ -1424,10 +1542,25 @@ def train_and_evaluate_model_run(
             model_metadata={
                 "execution_id": run_identity["execution_id"],
                 "model_name": run_identity["model_name"],
+                "estimator_id": spec.estimator_id,
+                "estimator_params": estimator_params_json,
+                "feature_spec_sha256": feature_meta[
+                    "feature_spec_sha256"
+                ],
+                "feature_identity": feature_meta["feature_identity"],
+                "fitted_extractor_sha256": feature_meta[
+                    "fitted_extractor_sha256"
+                ],
+                "configuration_id": configuration_id,
+                "matrix_source": spec.matrix_source,
+                "matrix_schema_id": feature_meta["matrix_schema_id"],
+                "pair_composition_schema_id": feature_meta[
+                    "pair_composition_schema_id"
+                ],
+                "reporting_group": spec.reporting_group,
                 "run_number": run_identity["run_number"],
                 "model_seed": run_identity["model_seed"],
                 "features": feature_meta["features"],
-                "classifier": classifier_name,
                 "k": feature_meta["k"],
             },
         )
@@ -1445,8 +1578,29 @@ def train_and_evaluate_model_run(
             "evaluation_schema_version"],
         "task": run_identity["task"],
         "model_name": run_identity["model_name"],
-        "feature_name": feature_name,
-        "classifier": classifier_name,
+        "estimator_id": spec.estimator_id,
+        "estimator_params": resolved_estimator_params,
+        "feature_spec_sha256": feature_meta["feature_spec_sha256"],
+        "feature_identity": feature_meta["feature_identity"],
+        "fitted_extractor_sha256": (
+            None
+            if pd.isna(feature_meta["fitted_extractor_sha256"])
+            else feature_meta["fitted_extractor_sha256"]
+        ),
+        "configuration_id": configuration_id,
+        "features": feature_meta["features"],
+        "matrix_source": spec.matrix_source,
+        "matrix_schema_id": (
+            None
+            if pd.isna(feature_meta["matrix_schema_id"])
+            else feature_meta["matrix_schema_id"]
+        ),
+        "pair_composition_schema_id": (
+            None
+            if pd.isna(feature_meta["pair_composition_schema_id"])
+            else feature_meta["pair_composition_schema_id"]
+        ),
+        "reporting_group": spec.reporting_group,
         "backend": backend.backend_name,
         "run_number": run_identity["run_number"],
         "model_seed": None if is_constant else run_seed,
@@ -1462,7 +1616,7 @@ def train_and_evaluate_model_run(
         "training": training_metadata,
         "protein_encoder": (
             args.protein_encoder_metadata
-            if feature_name != FEATURELESS_FEATURE
+            if spec.matrix_source == CONFIGURED_FEATURE_MATRIX
             else None
         ),
         "threshold_selection_seconds": (
@@ -1492,7 +1646,8 @@ def train_and_evaluate_model_run(
 def run_model_reruns(
         train_df: pd.DataFrame, val_df: pd.DataFrame | None,
         test_df: pd.DataFrame, x_train: Any, x_val: Any | None,
-        x_test: Any | None, feature_name: str, classifier_name: str,
+        x_test: Any | None, feature_identity: FeatureIdentity,
+        model_name: str,
         degree_plans: Mapping[str, DegreeEvaluationPlan],
         degree_context: DegreeDiagnosticContext,
         execution_id: str, args: argparse.Namespace,
@@ -1501,17 +1656,26 @@ def run_model_reruns(
     """
     Run one model configuration repeatedly and append each result.
     """
-    model_name = make_model_name(feature_name, classifier_name)
+    spec = ppi_model_spec(model_name)
+    configuration_id = make_configuration_id(
+        feature_identity.feature_identity,
+        model_name,
+    )
     model_performance_records = []
 
     # Re-run the model
-    for run_number, _ in enumerate(args.model_seeds, start=1):
-        if backend_name_for_classifier(classifier_name) == TORCH_BACKEND:
+    model_seeds = (
+        args.model_seeds
+        if spec.execution_policy.run_per_model_seed
+        else args.model_seeds[:1]
+    )
+    for run_number, _ in enumerate(model_seeds, start=1):
+        if spec.backend == TORCH_BACKEND:
             best_checkpoint_path, last_checkpoint_path = (
                 model_checkpoint_paths(
                     checkpoints_dir=output_paths.checkpoints_dir,
                     execution_id=execution_id,
-                    model_name=model_name,
+                    model_name=configuration_id,
                     run_number=run_number,
                 )
             )
@@ -1531,8 +1695,8 @@ def run_model_reruns(
             x_train=x_train,
             x_val=x_val,
             x_test=x_test,
-            feature_name=feature_name,
-            classifier_name=classifier_name,
+            feature_identity=feature_identity,
+            model_name=model_name,
             degree_plans=degree_plans,
             degree_context=degree_context,
             run_number=run_number,
@@ -1563,8 +1727,8 @@ def run_model_reruns(
             if output_df is not None and output_path is not None:
                 append_dataframe(output_df, output_path)
         LOGGER.info(
-            f"Finished model={model_name} "
-            f"run={run_number}/{args.num_reruns}"
+            f"Finished model={configuration_id} "
+            f"run={run_number}/{len(model_seeds)}"
         )
 
     return model_performance_records
@@ -2329,25 +2493,28 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
 
     # Define the model configurations to run
-    constant_classifiers = [
-        classifier_name
-        for classifier_name in args.classifiers
-        if model_input_kind(classifier_name) == CONSTANT_INPUT
+    constant_models = [
+        model_name
+        for model_name in args.classifiers
+        if ppi_model_spec(model_name).matrix_source == NO_MATRIX
     ]
-    degree_classifiers = [
-        classifier_name
-        for classifier_name in args.classifiers
-        if model_input_kind(classifier_name) == DEGREE_INPUT
+    degree_models = [
+        model_name
+        for model_name in args.classifiers
+        if ppi_model_spec(model_name).matrix_source
+        == TRAINING_DEGREE_MATRIX
     ]
-    learned_classifiers = [
-        classifier_name
-        for classifier_name in args.classifiers
-        if model_input_kind(classifier_name) == BIOLOGICAL_FEATURE_INPUT
+    configured_feature_models = [
+        model_name
+        for model_name in args.classifiers
+        if ppi_model_spec(model_name).matrix_source
+        == CONFIGURED_FEATURE_MATRIX
     ]
 
     # Run the baseline models
     with performance.stage("baseline_models"):
-        for classifier_name in constant_classifiers:
+        constant_identity = fixed_feature_identity(FEATURELESS_FEATURE)
+        for model_name in constant_models:
             performance.add_model_runs(
                 run_model_reruns(
                     train_df=train_df,
@@ -2357,8 +2524,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     x_val=val_df,
                     x_test=(
                         test_df if args.evaluate_test_metrics else None),
-                    feature_name=FEATURELESS_FEATURE,
-                    classifier_name=classifier_name,
+                    feature_identity=constant_identity,
+                    model_name=model_name,
                     degree_plans=degree_plans,
                     degree_context=degree_context,
                     execution_id=execution_id,
@@ -2366,7 +2533,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     output_paths=output_paths,
                 )
             )
-        if degree_classifiers:
+        if degree_models:
             degree_x_train, degree_x_val, degree_x_test = (
                 degree_feature_matrices(
                     train_df=train_df,
@@ -2382,7 +2549,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "degree_val": degree_x_val,
                 "degree_test": degree_x_test,
             })
-            for classifier_name in degree_classifiers:
+            degree_identity = fixed_feature_identity(LEGACY_DEGREE_FEATURE)
+            for model_name in degree_models:
                 performance.add_model_runs(
                     run_model_reruns(
                         train_df=train_df,
@@ -2391,8 +2559,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                         x_train=degree_x_train,
                         x_val=degree_x_val,
                         x_test=degree_x_test,
-                        feature_name=FEATURELESS_FEATURE,
-                        classifier_name=classifier_name,
+                        feature_identity=degree_identity,
+                        model_name=model_name,
                         degree_plans=degree_plans,
                         degree_context=degree_context,
                         execution_id=execution_id,
@@ -2402,14 +2570,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
 
     # Extract the combined feature set
-    if learned_classifiers:
+    if configured_feature_models:
         with performance.stage("feature_extraction"):
             if args.features == (PLM_FEATURE,):
                 (
                     x_train,
                     x_val,
                     x_test,
-                    feature_name,
+                    configured_identity,
                     encoder_metadata,
                 ) = build_frozen_plm_feature_matrices(
                     cohort_df=protein_pairs,
@@ -2435,8 +2603,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                     encoder_metadata,
                 )
             else:
-                feature_name = make_feature_name(args.features)
-                x_train, x_val, x_test = build_feature_matrices(
+                (
+                    x_train,
+                    x_val,
+                    x_test,
+                    fitted_extractor_sha256,
+                ) = build_feature_matrices(
                     train_df=train_df,
                     val_df=val_df,
                     test_df=(
@@ -2444,6 +2616,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                     sequences=sequences,
                     feature_types=args.features,
                     args=args,
+                )
+                configured_identity = configured_feature_identity(
+                    args.features,
+                    args,
+                    fitted_extractor_sha256=fitted_extractor_sha256,
                 )
             performance.add_matrices({
                 "train": x_train,
@@ -2453,7 +2630,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Run the learned classifiers
     with performance.stage("learned_models"):
-        for classifier_name in learned_classifiers:
+        for model_name in configured_feature_models:
             performance.add_model_runs(
                 run_model_reruns(
                     train_df=train_df,
@@ -2462,8 +2639,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     x_train=x_train,
                     x_val=x_val,
                     x_test=x_test,
-                    feature_name=feature_name,
-                    classifier_name=classifier_name,
+                    feature_identity=configured_identity,
+                    model_name=model_name,
                     degree_plans=degree_plans,
                     degree_context=degree_context,
                     execution_id=execution_id,

@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..artifact_io import write_dataframe_threadsafe
 from ..evaluation import binary_classification_metrics
+from ..schema import EVALUATION_SCHEMA_VERSION
 from ..splitting.artifacts import (
     SOURCE_ROW_INDEX_COLUMN,
     SPLIT_COLUMN,
@@ -56,13 +57,23 @@ DEGREE_COUNT_COLUMNS = (
     "global_threshold",
 )
 DEGREE_SUMMARY_IDENTITY_COLUMNS = (
+    "evaluation_schema_version",
     "degree_diagnostic_schema_version",
     "task",
     "split",
     "model_name",
-    "classifier",
+    "estimator_id",
+    "estimator_params",
+    "configuration_id",
+    "reporting_group",
     "model_role",
     "features",
+    "feature_spec_sha256",
+    "feature_identity",
+    "fitted_extractor_sha256",
+    "matrix_source",
+    "matrix_schema_id",
+    "pair_composition_schema_id",
     "split_strategy",
     "protocol_id",
     "protocol_version",
@@ -103,10 +114,13 @@ class DegreeDiagnosticContext:
         self,
         *,
         split_name: str,
-        classifier_name: str,
         model_name: str,
+        estimator_id: str,
+        estimator_params: str,
+        configuration_id: str,
+        reporting_group: str,
         model_role: str,
-        feature_name: str,
+        feature_metadata: Mapping[str, Any],
         run_number: int,
         model_seed: float | int,
         execution_id: str,
@@ -123,9 +137,12 @@ class DegreeDiagnosticContext:
             "execution_id": execution_id,
             "split": split_name,
             "model_name": model_name,
-            "classifier": classifier_name,
+            "estimator_id": estimator_id,
+            "estimator_params": estimator_params,
+            "configuration_id": configuration_id,
+            "reporting_group": reporting_group,
             "model_role": model_role,
-            "features": feature_name,
+            **feature_metadata,
             "run_number": run_number,
             "model_seed": model_seed,
             "split_strategy": self.split_strategy,
@@ -1034,7 +1051,8 @@ def degree_metric_rows(
             )
         if (
             plan.split_strategy == C2_SPLIT_STRATEGY
-            and metadata.get("classifier") == PREFERENTIAL_ATTACHMENT_CLASSIFIER
+            and metadata.get("model_name")
+            == PREFERENTIAL_ATTACHMENT_CLASSIFIER
         ):
             assert_c2_preferential_attachment_invariants(
                 targets,
@@ -1043,7 +1061,7 @@ def degree_metric_rows(
             )
         if (
             plan.split_strategy == C3_SPLIT_STRATEGY
-            and metadata.get("classifier") in {
+            and metadata.get("model_name") in {
                 PREFERENTIAL_ATTACHMENT_CLASSIFIER,
                 "degree_logistic",
                 "degree_hgb",
@@ -1057,6 +1075,7 @@ def degree_metric_rows(
         positives = int(targets.sum())
         count = len(targets)
         output_rows.append({
+            "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
             "degree_diagnostic_schema_version": (
                 DEGREE_DIAGNOSTIC_SCHEMA_VERSION
             ),
@@ -1082,9 +1101,9 @@ def deduplicate_preferential_attachment_rows(
     metrics: pd.DataFrame,
 ) -> pd.DataFrame:
     """Collapse execution-level copies of the deterministic PA reference."""
-    if metrics.empty or "classifier" not in metrics.columns:
+    if metrics.empty or "model_name" not in metrics.columns:
         return metrics
-    pa_mask = metrics["classifier"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
+    pa_mask = metrics["model_name"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
     if not pa_mask.any():
         return metrics
     ignored = {"execution_id", "run_dir"}

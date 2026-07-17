@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..backends.models import CLASSIFIER_CHOICES, is_baseline_classifier
 from ..features import FEATURE_CHOICES, PLM_FEATURE
 from ..splitting.grouping import (
     SEQUENCE_CLUSTER_METHODS,
@@ -24,6 +23,11 @@ from ..splitting.grouping import (
 )
 from ..splitting.protocols import SPLIT_STRATEGY_CHOICES, get_split_strategy
 from ..tasks.ppi_degree import DEFAULT_DEGREE_BIN_QUANTILES
+from ..tasks.ppi_models import (
+    CONFIGURED_FEATURE_MATRIX,
+    PPI_MODEL_CHOICES,
+    ppi_model_spec,
+)
 from ..protein_encoders import (
     DEFAULT_ESM2_MODEL,
     DEFAULT_PROTEIN_ENCODER_ADAPTER,
@@ -40,11 +44,6 @@ from .arg_types import (
 
 
 DEFAULT_SPLIT_STRATEGIES = ("random", "c1", "c2", "c3")
-DEFAULT_BASELINE_CLASSIFIERS = (
-    "degree_logistic",
-    "always_positive",
-    "always_negative",
-)
 CONFIG_FILENAME = "benchmark_config.json"
 RUNS_DIRNAME = "runs"
 SAFE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -99,7 +98,7 @@ class BenchmarkProfile:
     max_pairs: int | None
     n_split_trials: int
     feature_sets: tuple[tuple[str, ...], ...]
-    learned_classifiers: tuple[str, ...]
+    classifiers: tuple[str, ...]
 
 
 BUILTIN_PROFILES = {
@@ -107,7 +106,12 @@ BUILTIN_PROFILES = {
         max_pairs=10_000,
         n_split_trials=25,
         feature_sets=(("tfidf",), ("count",)),
-        learned_classifiers=("sgd_logistic",),
+        classifiers=(
+            "degree_logistic",
+            "always_positive",
+            "always_negative",
+            "sgd_logistic",
+        ),
     ),
     "exhaustive": BenchmarkProfile(
         max_pairs=None,
@@ -119,7 +123,14 @@ BUILTIN_PROFILES = {
             ("binary",),
             ("tfidf", "bm25", "count", "binary"),
         ),
-        learned_classifiers=("logistic", "linear_svm", "sgd_logistic"),
+        classifiers=(
+            "degree_logistic",
+            "always_positive",
+            "always_negative",
+            "logistic",
+            "linear_svm",
+            "sgd_logistic",
+        ),
     ),
 }
 
@@ -147,10 +158,7 @@ class BenchmarkGridConfig:
     k: int
     degree_bin_quantiles: tuple[float, float]
     feature_sets: tuple[tuple[str, ...], ...]
-    baseline_classifiers: tuple[str, ...]
-    learned_classifiers: tuple[str, ...]
-    include_sgd: bool
-    include_torch_mlp: bool
+    classifiers: tuple[str, ...]
     include_plm: bool
     plm_presets: tuple[str, ...]
     plm_adapter: str
@@ -270,8 +278,16 @@ class BenchmarkGridConfig:
                 "incompatible grid strategies: "
                 f"{incompatible_grouped_splits}. Use a separate grid."
             )
-        if not self.feature_sets:
-            raise ValueError("At least one feature set is required.")
+        configured_models = tuple(
+            model_name
+            for model_name in self.classifiers
+            if ppi_model_spec(model_name).matrix_source
+            == CONFIGURED_FEATURE_MATRIX
+        )
+        if configured_models and not self.feature_sets:
+            raise ValueError(
+                "Configured-feature models require at least one feature set."
+            )
         for feature_set in self.feature_sets:
             if not feature_set:
                 raise ValueError("Feature sets must not be empty.")
@@ -282,51 +298,15 @@ class BenchmarkGridConfig:
                 raise ValueError("PLM must be a standalone feature set.")
         if len(set(self.feature_sets)) != len(self.feature_sets):
             raise ValueError("feature_sets cannot contain duplicates.")
-        all_classifiers = (
-            *self.baseline_classifiers,
-            *self.learned_classifiers,
-        )
-        unknown_classifiers = set(all_classifiers) - set(CLASSIFIER_CHOICES)
+        if not self.classifiers:
+            raise ValueError("The classifier list must not be empty.")
+        unknown_classifiers = set(self.classifiers) - set(PPI_MODEL_CHOICES)
         if unknown_classifiers:
             raise ValueError(
                 f"Unknown classifiers: {sorted(unknown_classifiers)}"
             )
-        if not self.baseline_classifiers:
-            raise ValueError("The baseline classifier list must not be empty.")
-        if len(set(all_classifiers)) != len(all_classifiers):
-            raise ValueError("Classifier lists cannot contain duplicates.")
-        invalid_baselines = {
-            classifier
-            for classifier in self.baseline_classifiers
-            if not is_baseline_classifier(classifier)
-        }
-        if invalid_baselines:
-            raise ValueError(
-                "baseline_classifiers contains learned models: "
-                f"{sorted(invalid_baselines)}"
-            )
-        learned_baselines = {
-            classifier
-            for classifier in self.learned_classifiers
-            if is_baseline_classifier(classifier)
-        }
-        if learned_baselines:
-            raise ValueError(
-                "learned_classifiers contains baseline models: "
-                f"{sorted(learned_baselines)}"
-            )
-        torch_requested = "torch_mlp" in self.learned_classifiers
-        sgd_requested = "sgd_logistic" in self.learned_classifiers
-        if self.include_sgd != sgd_requested:
-            raise ValueError(
-                "include_sgd must match whether sgd_logistic is in "
-                "learned_classifiers."
-            )
-        if self.include_torch_mlp != torch_requested:
-            raise ValueError(
-                "include_torch_mlp must match whether torch_mlp is in "
-                "learned_classifiers."
-            )
+        if len(set(self.classifiers)) != len(self.classifiers):
+            raise ValueError("Classifiers cannot contain duplicates.")
         plm_requested = (PLM_FEATURE,) in self.feature_sets
         if self.include_plm != plm_requested:
             raise ValueError(
@@ -347,10 +327,9 @@ class BenchmarkGridConfig:
             raise ValueError(
                 f"Unknown protein encoder adapter: {self.plm_adapter}"
             )
-        if plm_requested and not self.learned_classifiers:
+        if plm_requested and not configured_models:
             raise ValueError(
-                "PLM features require at least one learned classifier. "
-                "Enable SGD or another learned backend."
+                "PLM features require at least one configured-feature model."
             )
         if self.profile == "laptop":
             accelerator_presets = [
@@ -548,17 +527,17 @@ def _cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int, default=None)
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument(
+        "--classifier",
+        dest="classifiers",
+        nargs="+",
+        choices=PPI_MODEL_CHOICES,
+        default=None,
+        help="Exact list of PPI models to run.",
+    )
+    parser.add_argument(
         "--degree-bin-quantiles",
         type=_unit_interval,
         nargs=2,
-        default=None,
-    )
-    parser.add_argument(
-        "--include-sgd", action=argparse.BooleanOptionalAction,
-        default=None,
-    )
-    parser.add_argument(
-        "--include-torch-mlp", action=argparse.BooleanOptionalAction,
         default=None,
     )
     parser.add_argument(
@@ -610,6 +589,15 @@ def _nested_feature_sets(value: Sequence[Sequence[str]]) -> tuple[tuple[str, ...
     return tuple(feature_sets)
 
 
+def _string_tuple(value: Sequence[str], key: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"{key} must be an array of strings.")
+    normalized = tuple(str(item) for item in value)
+    if not normalized:
+        raise ValueError(f"{key} must not be empty.")
+    return normalized
+
+
 def _validate_extra_train_args(train_args: Sequence[str]) -> None:
     """Reject extra arguments that would override grid-owned dimensions."""
     conflicting_flags = sorted({
@@ -628,7 +616,13 @@ def _validate_extra_train_args(train_args: Sequence[str]) -> None:
 def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfig:
     """Resolve built-ins, TOML configuration, and CLI overrides."""
     parser = _cli_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    classifier_occurrences = sum(
+        token.partition("=")[0] == "--classifier" for token in raw_argv
+    )
+    if classifier_occurrences > 1:
+        parser.error("Pass --classifier exactly once with all selected models.")
+    args = parser.parse_args(raw_argv)
     try:
         config_values = _load_toml(args.config)
     except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
@@ -645,12 +639,11 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
         "full_cohort", "sampling_seed", "train_size", "val_size",
         "split_strategies", "split_seeds", "model_seeds",
         "n_split_trials", "max_iter", "k", "degree_bin_quantiles",
-        "include_sgd",
-        "include_torch_mlp",
+        "classifiers",
         "include_plm", "plm_presets", "plm_adapter", "plm_model",
         "plm_revision",
         "embedding_cache_dir", "aggregate_results", "feature_sets",
-        "baseline_classifiers", "learned_classifiers", "train_args",
+        "train_args",
     }
     unknown_grid_keys = set(config_values) - allowed_grid_keys
     if unknown_grid_keys:
@@ -679,42 +672,61 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
     feature_sets = _nested_feature_sets(
         config_values.get("feature_sets", profile.feature_sets)
     )
-    learned_classifiers = tuple(
-        str(value) for value in config_values.get(
-            "learned_classifiers", profile.learned_classifiers
+    try:
+        classifiers = _string_tuple(
+            _value(
+                args.classifiers,
+                config_values,
+                "classifiers",
+                profile.classifiers,
+            ),
+            "classifiers",
+        )
+    except (TypeError, ValueError) as exc:
+        parser.error(str(exc))
+    unknown_classifiers = set(classifiers) - set(PPI_MODEL_CHOICES)
+    if unknown_classifiers:
+        parser.error(f"Unknown classifiers: {sorted(unknown_classifiers)}")
+    duplicate_classifiers = sorted({
+        model_name
+        for model_name in classifiers
+        if classifiers.count(model_name) > 1
+    })
+    if duplicate_classifiers:
+        parser.error(
+            f"classifiers cannot contain duplicates: {duplicate_classifiers}"
+        )
+    configured_models = tuple(
+        model_name
+        for model_name in classifiers
+        if ppi_model_spec(model_name).matrix_source
+        == CONFIGURED_FEATURE_MATRIX
+    )
+    explicit_feature_request = (
+        "feature_sets" in config_values
+        or args.include_plm is not None
+        or args.plm_presets is not None
+        or args.plm_adapter is not None
+        or args.plm_model is not None
+        or args.plm_revision is not None
+        or args.embedding_cache_dir is not None
+        or any(
+            key in config_values
+            for key in (
+                "include_plm",
+                "plm_presets",
+                "plm_adapter",
+                "plm_model",
+                "plm_revision",
+                "embedding_cache_dir",
+            )
         )
     )
-    if args.include_sgd is not None:
-        include_sgd = args.include_sgd
-    elif "include_sgd" in config_values:
-        include_sgd = bool(config_values["include_sgd"])
-    else:
-        include_sgd = "sgd_logistic" in learned_classifiers
-    if include_sgd and "sgd_logistic" not in learned_classifiers:
-        learned_classifiers = (*learned_classifiers, "sgd_logistic")
-    elif not include_sgd:
-        learned_classifiers = tuple(
-            classifier
-            for classifier in learned_classifiers
-            if classifier != "sgd_logistic"
+    if not configured_models and explicit_feature_request:
+        parser.error(
+            "Feature and PLM options are unused because no selected model "
+            "consumes configured features."
         )
-    include_sgd = "sgd_logistic" in learned_classifiers
-
-    if args.include_torch_mlp is not None:
-        include_torch_mlp = args.include_torch_mlp
-    elif "include_torch_mlp" in config_values:
-        include_torch_mlp = bool(config_values["include_torch_mlp"])
-    else:
-        include_torch_mlp = "torch_mlp" in learned_classifiers
-    if include_torch_mlp and "torch_mlp" not in learned_classifiers:
-        learned_classifiers = (*learned_classifiers, "torch_mlp")
-    elif not include_torch_mlp:
-        learned_classifiers = tuple(
-            classifier
-            for classifier in learned_classifiers
-            if classifier != "torch_mlp"
-        )
-    include_torch_mlp = "torch_mlp" in learned_classifiers
 
     plm_presets = tuple(str(value) for value in _value(
         args.plm_presets, config_values, "plm_presets", ()
@@ -937,14 +949,7 @@ def resolve_grid_config(argv: Sequence[str] | None = None) -> BenchmarkGridConfi
             k=int(_value(args.k, config_values, "k", 3)),
             degree_bin_quantiles=degree_bin_quantiles,
             feature_sets=feature_sets,
-            baseline_classifiers=tuple(
-                str(value) for value in config_values.get(
-                    "baseline_classifiers", DEFAULT_BASELINE_CLASSIFIERS
-                )
-            ),
-            learned_classifiers=learned_classifiers,
-            include_sgd=include_sgd,
-            include_torch_mlp=include_torch_mlp,
+            classifiers=classifiers,
             include_plm=include_plm,
             plm_presets=plm_presets,
             plm_adapter=str(_value(
@@ -996,6 +1001,18 @@ def _feature_name(feature_set: Sequence[str]) -> str:
 def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
     """Expand a resolved grid into independent ppi-train invocations."""
     specs = []
+    control_models = tuple(
+        model_name
+        for model_name in config.classifiers
+        if ppi_model_spec(model_name).matrix_source
+        != CONFIGURED_FEATURE_MATRIX
+    )
+    configured_models = tuple(
+        model_name
+        for model_name in config.classifiers
+        if ppi_model_spec(model_name).matrix_source
+        == CONFIGURED_FEATURE_MATRIX
+    )
     for split_strategy in config.split_strategies:
         for split_seed in config.split_seeds:
             split_root = (
@@ -1061,23 +1078,25 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
             if config.max_pairs is not None:
                 common_args.extend(["--max-pairs", str(config.max_pairs)])
 
-            baseline_dir = split_root / "baselines"
-            specs.append(GridRunSpec(
-                split_strategy=split_strategy,
-                split_seed=split_seed,
-                configuration_name="baselines",
-                run_dir=baseline_dir,
-                train_args=tuple([
-                    *common_args,
-                    "--run-dir", str(baseline_dir),
-                    "--model-seeds", str(config.model_seeds[0]),
-                    "--classifier", *config.baseline_classifiers,
-                    *config.train_args,
-                ]),
-            ))
+            if control_models:
+                control_dir = split_root / "controls"
+                specs.append(GridRunSpec(
+                    split_strategy=split_strategy,
+                    split_seed=split_seed,
+                    configuration_name="controls",
+                    run_dir=control_dir,
+                    train_args=tuple([
+                        *common_args,
+                        "--run-dir", str(control_dir),
+                        "--model-seeds",
+                        *(str(seed) for seed in config.model_seeds),
+                        "--classifier", *control_models,
+                        *config.train_args,
+                    ]),
+                ))
 
             for feature_set in config.feature_sets:
-                if not config.learned_classifiers:
+                if not configured_models:
                     continue
                 preset_names: tuple[str | None, ...] = (
                     tuple(config.plm_presets)
@@ -1095,7 +1114,7 @@ def build_run_specs(config: BenchmarkGridConfig) -> tuple[GridRunSpec, ...]:
                         "--model-seeds",
                         *(str(seed) for seed in config.model_seeds),
                         "--features", *feature_set,
-                        "--classifier", *config.learned_classifiers,
+                        "--classifier", *configured_models,
                     ]
                     if feature_set == (PLM_FEATURE,):
                         if preset_name is None:

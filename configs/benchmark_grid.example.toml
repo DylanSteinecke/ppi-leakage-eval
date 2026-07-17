@@ -15,6 +15,13 @@ val_size = 0.10
 split_strategies = ["random", "c1", "c2", "c3"]
 split_seeds = [0, 1, 2]
 model_seeds = [100, 101]
+# An explicit list overrides the profile exactly. Omit it to use profile defaults.
+classifiers = [
+  "degree_logistic",
+  "always_positive",
+  "always_negative",
+  "sgd_logistic",
+]
 degree_bin_quantiles = [0.5, 0.9]
 aggregate_results = true
 

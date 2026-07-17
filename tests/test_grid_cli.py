@@ -37,7 +37,7 @@ def test_laptop_profile_expands_to_independent_run_directories(tmp_path):
     assert len(specs) == 24
     assert len({spec.run_dir for spec in specs}) == len(specs)
     assert {spec.configuration_name for spec in specs} == {
-        "baselines",
+        "controls",
         "features-tfidf",
         "features-count",
     }
@@ -46,24 +46,28 @@ def test_laptop_profile_expands_to_independent_run_directories(tmp_path):
     assert all("--execution-id" not in spec.train_args for spec in specs)
     assert all(spec.train_args[-1] == "--no-metrics-plots" for spec in specs)
 
-    baseline_specs = [
-        spec for spec in specs if spec.configuration_name == "baselines"
+    control_specs = [
+        spec for spec in specs if spec.configuration_name == "controls"
     ]
     learned_specs = [
-        spec for spec in specs if spec.configuration_name != "baselines"
+        spec for spec in specs if spec.configuration_name != "controls"
     ]
     assert all(
-        spec.train_args[spec.train_args.index("--model-seeds") + 1] == "11"
-        for spec in baseline_specs
+        spec.train_args[
+            spec.train_args.index("--model-seeds") + 1:
+            spec.train_args.index("--classifier")
+        ] == ("11", "19")
+        for spec in control_specs
     )
-    assert config.baseline_classifiers == (
+    assert config.classifiers == (
         "degree_logistic",
         "always_positive",
         "always_negative",
+        "sgd_logistic",
     )
     assert all(
         "degree_logistic" in spec.train_args
-        for spec in baseline_specs
+        for spec in control_specs
     )
     assert config.degree_bin_quantiles == (0.5, 0.9)
     assert all(
@@ -167,7 +171,8 @@ def test_profile_and_optional_model_expansion(tmp_path):
     laptop_plm = grid_config(
         tmp_path,
         "--profile", "laptop",
-        "--include-torch-mlp",
+        "--classifier", "degree_logistic", "always_positive",
+        "always_negative", "sgd_logistic", "torch_mlp",
         "--include-plm",
         "--plm-revision", "0123456789abcdef",
         "--embedding-cache-dir", str(tmp_path / "embeddings"),
@@ -178,9 +183,8 @@ def test_profile_and_optional_model_expansion(tmp_path):
     assert exhaustive.max_pairs is None
     assert len(build_run_specs(laptop_plm)) == 16
     assert laptop_plm.max_pairs == 10_000
-    assert laptop_plm.include_sgd is True
     assert laptop_plm.plm_adapter == "esm2"
-    assert "torch_mlp" in laptop_plm.learned_classifiers
+    assert "torch_mlp" in laptop_plm.classifiers
     plm_specs = [
         spec
         for spec in build_run_specs(laptop_plm)
@@ -210,7 +214,7 @@ def test_multiple_approved_plms_expand_as_independent_grid_configs(tmp_path):
 
     assert config.plm_presets == ("esm2_8m", "protbert")
     assert [spec.configuration_name for spec in specs] == [
-        "baselines",
+        "controls",
         "features-tfidf",
         "features-count",
         "features-plm-esm2_8m",
@@ -277,28 +281,107 @@ def test_exhaustive_profile_selects_prott5(tmp_path):
     ] == "float16"
 
 
-def test_sgd_model_family_can_be_disabled_independently(tmp_path):
+def test_exact_classifier_override_can_select_controls_only(tmp_path):
     baseline_only = grid_config(
         tmp_path,
         "--profile", "laptop",
         "--split-strategies", "random",
-        "--no-include-sgd",
+        "--classifier", "degree_logistic", "always_positive",
+        "always_negative",
         "--no-aggregate-results",
     )
 
     specs = build_run_specs(baseline_only)
 
-    assert baseline_only.include_sgd is False
-    assert baseline_only.learned_classifiers == ()
-    assert [spec.configuration_name for spec in specs] == ["baselines"]
+    assert baseline_only.classifiers == (
+        "degree_logistic",
+        "always_positive",
+        "always_negative",
+    )
+    assert [spec.configuration_name for spec in specs] == ["controls"]
 
     with pytest.raises(SystemExit):
         grid_config(
             tmp_path,
             "--profile", "laptop",
-            "--no-include-sgd",
+            "--classifier", "always_positive",
             "--include-plm",
             "--plm-revision", "0123456789abcdef",
+        )
+
+
+def test_biological_only_selection_creates_no_control_invocation(tmp_path):
+    config = grid_config(
+        tmp_path,
+        "--profile", "laptop",
+        "--split-strategies", "random",
+        "--classifier", "logistic",
+        "--no-aggregate-results",
+    )
+
+    specs = build_run_specs(config)
+
+    assert specs
+    assert all(spec.configuration_name != "controls" for spec in specs)
+    assert all("logistic" in spec.train_args for spec in specs)
+
+
+def test_classifier_precedence_and_invalid_lists(tmp_path, capsys):
+    config_path = tmp_path / "classifiers.toml"
+    base_lines = [
+        "[grid]",
+        f'pairs = "{tmp_path / "pairs.csv"}"',
+        f'fasta = "{tmp_path / "proteins.fasta"}"',
+        f'out_dir = "{tmp_path / "results"}"',
+        'profile = "laptop"',
+    ]
+    config_path.write_text(
+        "\n".join([*base_lines, 'classifiers = ["linear_svm"]', ""]),
+        encoding="utf-8",
+    )
+
+    from_toml = resolve_grid_config(["--config", str(config_path)])
+    from_cli = resolve_grid_config([
+        "--config", str(config_path),
+        "--classifier", "sgd_logistic",
+    ])
+    from_profile = grid_config(tmp_path, "--profile", "laptop")
+
+    assert from_toml.classifiers == ("linear_svm",)
+    assert from_cli.classifiers == ("sgd_logistic",)
+    assert from_profile.classifiers == (
+        "degree_logistic",
+        "always_positive",
+        "always_negative",
+        "sgd_logistic",
+    )
+    assert "degree_hgb" not in from_profile.classifiers
+
+    with pytest.raises(SystemExit) as repeated_error:
+        grid_config(
+            tmp_path,
+            "--classifier", "logistic",
+            "--classifier", "linear_svm",
+        )
+    assert repeated_error.value.code == 2
+    assert "exactly once" in capsys.readouterr().err
+
+    for invalid_list in ("[]", '["logistic", "logistic"]'):
+        config_path.write_text(
+            "\n".join([
+                *base_lines,
+                f"classifiers = {invalid_list}",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit) as list_error:
+            resolve_grid_config(["--config", str(config_path)])
+        assert list_error.value.code == 2
+        error_output = capsys.readouterr().err
+        assert any(
+            phrase in error_output
+            for phrase in ("must not be empty", "duplicates")
         )
 
 
@@ -317,7 +400,7 @@ def test_toml_config_and_cli_overrides_are_resolved(tmp_path):
             "split_seeds = [2, 5]",
             "model_seeds = [13, 17]",
             'feature_sets = [["binary"]]',
-            'learned_classifiers = ["linear_svm"]',
+            'classifiers = ["linear_svm"]',
             'train_args = ["--no-metrics-plots"]',
             "aggregate_results = false",
             "",
@@ -337,7 +420,7 @@ def test_toml_config_and_cli_overrides_are_resolved(tmp_path):
     assert config.split_seeds == (2, 5)
     assert config.model_seeds == (13, 17)
     assert config.feature_sets == (("binary",),)
-    assert config.learned_classifiers == ("linear_svm",)
+    assert config.classifiers == ("linear_svm",)
     assert config.plm_adapter == "esm2"
     assert config.train_args == ("--no-metrics-plots",)
 

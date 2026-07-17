@@ -5,7 +5,12 @@ import pytest
 from sklearn.feature_extraction.text import CountVectorizer
 
 from ppi_benchmark import features as ppi_features
-from ppi_benchmark.features import build_feature_matrices
+from ppi_benchmark.features import (
+    build_feature_matrices,
+    configured_feature_identity,
+    fitted_vectorizer_sha256,
+    make_vectorizer,
+)
 from ppi_benchmark.splitting.dispatch import (
     load_split_column,
     make_random_pair_split,
@@ -178,7 +183,7 @@ def test_build_feature_matrices_fits_vectorizer_on_train_only():
     }
     args = SimpleNamespace(k=2, bm25_k1=1.5, bm25_b=0.75)
 
-    x_train, x_val, x_test = build_feature_matrices(
+    x_train, x_val, x_test, fitted_extractor_sha256 = build_feature_matrices(
         train_df=train_df,
         val_df=val_df,
         test_df=test_df,
@@ -190,6 +195,37 @@ def test_build_feature_matrices_fits_vectorizer_on_train_only():
     assert x_train.shape[1] == 3
     assert x_val.shape[1] == x_train.shape[1]
     assert x_test.shape[1] == x_train.shape[1]
+    assert len(fitted_extractor_sha256) == 64
+
+
+def test_logical_feature_identity_excludes_split_fitted_state():
+    first_args = SimpleNamespace(
+        k=2,
+        bm25_k1=1.5,
+        bm25_b=0.75,
+        split_seed=3,
+    )
+    second_args = SimpleNamespace(
+        k=2,
+        bm25_k1=1.5,
+        bm25_b=0.75,
+        split_seed=17,
+    )
+    first_vectorizer = make_vectorizer("count", first_args)
+    second_vectorizer = make_vectorizer("count", second_args)
+    first_vectorizer.fit(["AAAA", "AATA"])
+    second_vectorizer.fit(["CCCC", "CGCC"])
+
+    first_identity = configured_feature_identity(("count",), first_args)
+    second_identity = configured_feature_identity(("count",), second_args)
+    first_fitted_hash = fitted_vectorizer_sha256(
+        "count", first_vectorizer)
+    second_fitted_hash = fitted_vectorizer_sha256(
+        "count", second_vectorizer)
+
+    assert first_identity == second_identity
+    assert len(first_identity.feature_spec_sha256) == 64
+    assert first_fitted_hash != second_fitted_hash
 
 
 def test_build_feature_matrices_transforms_each_unique_protein_once(monkeypatch):
@@ -214,6 +250,10 @@ def test_build_feature_matrices_transforms_each_unique_protein_once(monkeypatch)
         def transform(self, sequences):
             transform_calls.append(list(sequences))
             return self.vectorizer.transform(sequences)
+
+        @property
+        def vocabulary_(self):
+            return self.vectorizer.vocabulary_
 
     monkeypatch.setattr(
         ppi_features,

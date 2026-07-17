@@ -386,7 +386,6 @@ MAX_PAIRS=1000 \
 conda run -n ppi bash scripts/run_yeast_biogrid_ppi_example.sh \
     --plm-preset esm2_8m \
     --plm-preset protbert \
-    --sgd \
     --eval-test-set
 ```
 
@@ -395,10 +394,9 @@ ProtT5 is available only through a non-laptop grid profile:
 ```bash
 PREPARE_YEAST_DATA=0 \
 BENCHMARK_PROFILE=exhaustive \
-MAX_PAIRS=40000 \
+    MAX_PAIRS=40000 \
 conda run -n ppi bash scripts/run_yeast_biogrid_ppi_example.sh \
     --plm-preset prott5_xl \
-    --sgd \
     --eval-test-set
 ```
 
@@ -412,7 +410,6 @@ MAX_PAIRS=40000 \
 conda run -n ppi bash scripts/run_yeast_biogrid_ppi_example.sh \
     --plm-preset esm2_150m \
     --plm-preset esm2_650m \
-    --sgd \
     --eval-test-set
 ```
 
@@ -521,7 +518,8 @@ To add the model to every feature set in an existing laptop or exhaustive
 benchmark grid without changing that profile's defaults:
 
 ```bash
-INCLUDE_TORCH_MLP=1 PREPARE_YEAST_DATA=0 \
+CLASSIFIERS="degree_logistic always_positive always_negative logistic \
+linear_svm sgd_logistic torch_mlp" PREPARE_YEAST_DATA=0 \
     bash scripts/run_yeast_biogrid_ppi_example.sh \
     --torch-max-epochs 30 --torch-batch-size 256
 ```

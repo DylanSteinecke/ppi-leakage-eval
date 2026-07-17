@@ -9,24 +9,21 @@ from .base import (
     ModelBackend,
     SupervisedSplit,
 )
-from .models import MODEL_SPECS, model_spec
+from .models import (
+    BACKEND_CHOICES,
+    SKLEARN_BACKEND,
+    TORCH_BACKEND,
+    estimator_spec,
+)
 from .sklearn import SklearnBackend
 
 
-BACKEND_CHOICES = tuple(dict.fromkeys(
-    spec.backend for spec in MODEL_SPECS
-))
-DEFAULT_BACKEND = model_spec("logistic").backend
-TORCH_BACKEND = model_spec("torch_mlp").backend
-
-
-def backend_name_for_classifier(classifier_name: str) -> str:
-    """Return the framework backend that owns a classifier."""
-    return model_spec(classifier_name).backend
+DEFAULT_BACKEND = SKLEARN_BACKEND
 
 
 def make_model_backend(
-        classifier_name: str, max_iter: int, random_state: int,
+        estimator_id: str, estimator_params: Mapping[str, Any],
+        max_iter: int, random_state: int,
         backend_name: str | None = None,
         best_checkpoint_path: str | Path | None = None,
         last_checkpoint_path: str | Path | None = None,
@@ -38,19 +35,20 @@ def make_model_backend(
     """Construct a model backend without coupling the runner to a framework."""
     if backend_name is not None and backend_name not in BACKEND_CHOICES:
         raise ValueError(f"Unknown model backend: {backend_name}")
-    spec = model_spec(classifier_name)
+    spec = estimator_spec(estimator_id)
     resolved_backend = backend_name or spec.backend
     if resolved_backend != spec.backend:
         raise ValueError(
-            f"Classifier {classifier_name!r} requires backend "
+            f"Estimator {estimator_id!r} requires backend "
             f"{spec.backend!r}, not {resolved_backend!r}."
         )
     options = dict(backend_options or {})
     if resolved_backend == DEFAULT_BACKEND:
         if options:
             raise ValueError("sklearn backend does not accept backend options.")
-        return SklearnBackend.from_classifier(
-            classifier_name=classifier_name,
+        return SklearnBackend.from_estimator(
+            estimator_id=estimator_id,
+            estimator_params=estimator_params,
             max_iter=max_iter,
             random_state=random_state,
         )
@@ -86,6 +84,5 @@ __all__ = [
     "ModelBackend",
     "SklearnBackend",
     "SupervisedSplit",
-    "backend_name_for_classifier",
     "make_model_backend",
 ]

@@ -19,6 +19,7 @@ from ..tasks.ppi_degree import (
     stable_json_sha256,
 )
 from ..splitting.artifacts import write_metadata_json
+from .schema_compat import normalize_evaluation_frame
 
 
 BENCHMARK_DEGREE_SUMMARY_FILENAME = "benchmark_degree_summary.csv"
@@ -64,7 +65,9 @@ SUMMARY_IDENTITY_COLUMNS = (
     "task",
     "split",
     "model_name",
-    "classifier",
+    "estimator_id",
+    "configuration_id",
+    "reporting_group",
     "model_role",
     "selected_fitted_control",
     "features",
@@ -122,6 +125,11 @@ def read_degree_metrics(
             frame = pd.read_csv(path)
             if frame.empty:
                 continue
+            frame = normalize_evaluation_frame(
+                frame,
+                source=path,
+                allow_missing_version=True,
+            )
             if "split" not in frame.columns:
                 raise ValueError(f"Degree metrics lack split identity: {path}")
             if not (frame["split"] == expected_split).all():
@@ -135,7 +143,6 @@ def read_degree_metrics(
     metrics = pd.concat(frames, ignore_index=True)
     required = {
         "degree_diagnostic_schema_version",
-        "classifier",
         "model_name",
         "model_role",
         "auprc",
@@ -162,7 +169,7 @@ def _control_selection_evidence(metrics: pd.DataFrame) -> pd.DataFrame:
     evidence = metrics[
         (metrics["split"] == "val")
         & (metrics["stratification_axis"] == "global")
-        & metrics["classifier"].isin((
+        & metrics["model_name"].isin((
             DEFAULT_PRIMARY_DEGREE_CONTROL,
             SENSITIVITY_DEGREE_CONTROL,
         ))
@@ -185,7 +192,7 @@ def _control_selection_evidence(metrics: pd.DataFrame) -> pd.DataFrame:
             if column in evidence.columns
         ],
         "split_seed",
-        "classifier",
+        "model_name",
     ]
     return (
         evidence.groupby(group_columns, dropna=False)["auprc"]
@@ -223,10 +230,10 @@ def _select_context_control(
             }
             by_seed = (
                 context_rows.groupby(
-                    ["split_seed", "classifier"], dropna=False
+                    ["split_seed", "model_name"], dropna=False
                 )["auprc"]
                 .mean()
-                .unstack("classifier")
+                .unstack("model_name")
             )
             required_seeds = sorted(CONTROL_SELECTION_SPLIT_SEEDS)
             complete = (
@@ -475,12 +482,12 @@ def build_degree_lift(
         metrics["stratification_axis"] == "global"
     ].copy()
     models = global_rows[global_rows["model_role"] == "predictive_model"]
-    controls = global_rows[global_rows["classifier"].isin((
+    controls = global_rows[global_rows["model_name"].isin((
         DEFAULT_PRIMARY_DEGREE_CONTROL,
         SENSITIVITY_DEGREE_CONTROL,
     ))]
     pa_rows = global_rows[
-        global_rows["classifier"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
+        global_rows["model_name"] == PREFERENTIAL_ATTACHMENT_CLASSIFIER
     ]
     output = []
     for _, model_row in models.iterrows():
@@ -493,7 +500,7 @@ def build_degree_lift(
             )
         matched_control = _matching_reference(
             model_row,
-            controls[controls["classifier"] == selected_control],
+            controls[controls["model_name"] == selected_control],
             selected_control,
         )
         matched_pa = _matching_reference(
@@ -524,7 +531,8 @@ def build_degree_lift(
                 "task",
                 "split",
                 "model_name",
-                "classifier",
+                "estimator_id",
+                "configuration_id",
                 "features",
                 "run_number",
                 "model_seed",

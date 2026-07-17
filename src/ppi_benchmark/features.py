@@ -7,6 +7,10 @@ descriptors, and additional pair-composition strategies.
 """
 
 import argparse
+import hashlib
+import json
+import struct
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -21,6 +25,154 @@ KMER_FEATURE_CHOICES = ("tfidf", "bm25", "count", "binary")
 FEATURE_CHOICES = KMER_FEATURE_CHOICES + (PLM_FEATURE,)
 FEATURE_NAME_SEPARATOR = "+"
 PAIR_COMPOSER = SymmetricPairComposer()
+CONFIGURED_MATRIX_SCHEMA_ID = "ppi.configured_features.v1"
+PAIR_COMPOSITION_SCHEMA_ID = "ppi.sum_absdiff_product.v1"
+
+
+@dataclass(frozen=True)
+class FeatureIdentity:
+    """Stable feature specification and optional learned-state identity."""
+
+    features: str
+    feature_spec_sha256: str
+    feature_identity: str
+    fitted_extractor_sha256: str | None = None
+    encoder_fingerprint: str | None = None
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def configured_feature_spec(
+    feature_types: list[str] | tuple[str, ...],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Return split-independent configured-feature semantics."""
+    normalized = normalize_feature_types(feature_types)
+    spec: dict[str, Any] = {
+        "matrix_schema_id": CONFIGURED_MATRIX_SCHEMA_ID,
+        "pair_composition_schema_id": PAIR_COMPOSITION_SCHEMA_ID,
+        "feature_types": list(normalized),
+        "k": int(args.k),
+    }
+    if "bm25" in normalized:
+        spec["bm25_k1"] = float(args.bm25_k1)
+        spec["bm25_b"] = float(args.bm25_b)
+    return spec
+
+
+def configured_feature_identity(
+    feature_types: list[str] | tuple[str, ...],
+    args: argparse.Namespace,
+    *,
+    fitted_extractor_sha256: str | None = None,
+) -> FeatureIdentity:
+    """Return the conceptual identity of one k-mer feature configuration."""
+    normalized = normalize_feature_types(feature_types)
+    feature_name = make_feature_name(normalized)
+    spec_hash = _canonical_json_sha256(
+        configured_feature_spec(normalized, args)
+    )
+    return FeatureIdentity(
+        features=feature_name,
+        feature_spec_sha256=spec_hash,
+        feature_identity=f"{feature_name}-k{args.k}-{spec_hash[:12]}",
+        fitted_extractor_sha256=fitted_extractor_sha256,
+    )
+
+
+def fixed_feature_identity(name: str) -> FeatureIdentity:
+    """Return a stable identity for a featureless or task-fixed source."""
+    spec_hash = _canonical_json_sha256({"feature_identity": name})
+    return FeatureIdentity(
+        features=name,
+        feature_spec_sha256=spec_hash,
+        feature_identity=name,
+    )
+
+
+def plm_feature_identity(
+    encoder_metadata: dict[str, Any],
+) -> FeatureIdentity:
+    """Return the stable conceptual identity of a frozen PLM feature set."""
+    encoder_spec = encoder_metadata["encoder_spec"]
+    model_label = str(encoder_spec["model_name"]).rsplit("/", 1)[-1]
+    safe_label = "".join(
+        character if character.isalnum() or character in "_.-" else "_"
+        for character in model_label
+    ).strip("._") or "unnamed"
+    fingerprint = str(encoder_metadata["encoder_fingerprint"])
+    return FeatureIdentity(
+        features="plm",
+        feature_spec_sha256=fingerprint,
+        feature_identity=f"plm-{safe_label}-{fingerprint[:12]}",
+        encoder_fingerprint=fingerprint,
+    )
+
+
+def _hash_component(hasher: Any, name: str, payload: bytes) -> None:
+    name_bytes = name.encode("utf-8")
+    hasher.update(struct.pack("<Q", len(name_bytes)))
+    hasher.update(name_bytes)
+    hasher.update(struct.pack("<Q", len(payload)))
+    hasher.update(payload)
+
+
+def _little_endian_bytes(values: Any) -> tuple[str, bytes]:
+    array = np.asarray(values)
+    dtype = array.dtype.newbyteorder("<")
+    canonical = np.ascontiguousarray(array.astype(dtype, copy=False))
+    return dtype.str, memoryview(canonical).cast("B").tobytes()
+
+
+def fitted_vectorizer_sha256(feature_type: str, vectorizer: Any) -> str:
+    """Hash a fitted k-mer extractor's exact learned state."""
+    vocabulary_owner = (
+        vectorizer.count_vectorizer
+        if isinstance(vectorizer, BM25Vectorizer)
+        else vectorizer
+    )
+    ordered_vocabulary = sorted(
+        vocabulary_owner.vocabulary_.items(),
+        key=lambda item: item[1],
+    )
+    hasher = hashlib.sha256()
+    _hash_component(hasher, "feature_type", feature_type.encode("utf-8"))
+    _hash_component(
+        hasher,
+        "vocabulary",
+        json.dumps(
+            ordered_vocabulary,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8"),
+    )
+    if isinstance(vectorizer, TfidfVectorizer):
+        dtype, payload = _little_endian_bytes(vectorizer.idf_)
+        _hash_component(hasher, "idf_dtype", dtype.encode("ascii"))
+        _hash_component(hasher, "idf", payload)
+    elif isinstance(vectorizer, BM25Vectorizer):
+        dtype, payload = _little_endian_bytes(vectorizer.idf_)
+        _hash_component(hasher, "idf_dtype", dtype.encode("ascii"))
+        _hash_component(hasher, "idf", payload)
+        _hash_component(
+            hasher,
+            "average_document_length",
+            struct.pack("<d", float(vectorizer.avgdl_)),
+        )
+    return hasher.hexdigest()
+
+
+def combined_extractor_sha256(component_hashes: list[str]) -> str:
+    """Hash fitted component extractors in configured column order."""
+    return _canonical_json_sha256(component_hashes)
 
 
 ####################
@@ -242,7 +394,7 @@ def build_feature_matrices(
         test_df: pd.DataFrame | None,
         sequences: dict[str, str], feature_types: tuple[str, ...],
         args: argparse.Namespace,
-    ) -> tuple[Any, Any | None, Any | None]:
+    ) -> tuple[Any, Any | None, Any | None, str]:
     """
     Fit feature extractors on train proteins and concatenate pair features.
     """
@@ -261,12 +413,16 @@ def build_feature_matrices(
     train_feature_blocks = []
     val_feature_blocks = []
     test_feature_blocks = []
+    extractor_hashes = []
     feature_dataframes = (train_df, val_df, test_df)
     all_protein_ids = unique_protein_ids(feature_dataframes)
     all_sequences = [sequences[protein_id] for protein_id in all_protein_ids]
     for feature_type in feature_types:
         vectorizer = make_vectorizer(feature_type, args)
         vectorizer.fit(train_sequences)
+        extractor_hashes.append(
+            fitted_vectorizer_sha256(feature_type, vectorizer)
+        )
         protein_features = vectorizer.transform(all_sequences)
         (
             train_feature_block,
@@ -303,4 +459,9 @@ def build_feature_matrices(
             else None
         )
 
-    return x_train, x_val, x_test
+    return (
+        x_train,
+        x_val,
+        x_test,
+        combined_extractor_sha256(extractor_hashes),
+    )

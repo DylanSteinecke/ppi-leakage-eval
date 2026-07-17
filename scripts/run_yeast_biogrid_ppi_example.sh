@@ -5,7 +5,7 @@ set -euo pipefail
 # BENCHMARK_PROFILE=laptop bash scripts/run_yeast_biogrid_ppi_example.sh
 # Add frozen ESM-2 + SGD with CPU-safe batching and a shared embedding cache:
 # bash scripts/run_yeast_biogrid_ppi_example.sh --include-low-resource-esm2
-# Optional model switches: --sgd/--no-sgd and --include-torch-mlp.
+# Override the profile's exact model set with --classifier NAME [NAME ...].
 # Laptop frozen PLMs: --plm-preset esm2_8m or --plm-preset protbert.
 # Larger ESM2 sizes and ProtT5 require BENCHMARK_PROFILE=exhaustive.
 
