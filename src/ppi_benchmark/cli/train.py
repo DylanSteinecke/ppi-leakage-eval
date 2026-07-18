@@ -138,6 +138,7 @@ from ..tasks.ppi_models import (
 )
 from ..tasks.ppi_degree import (
     DEFAULT_DEGREE_BIN_QUANTILES,
+    DEGREE_MATRIX_SCHEMA_ID,
     PREFERENTIAL_ATTACHMENT_CLASSIFIER,
     TEST_DEGREE_METRICS_FILENAME,
     TEST_DEGREE_SUMMARY_FILENAME,
@@ -154,6 +155,7 @@ from ..tasks.ppi_degree import (
     degree_metric_rows,
     evaluation_cohort_sha256,
     summarize_degree_metrics,
+    training_degree_feature_identity,
     write_training_degree_profile,
 )
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
@@ -171,7 +173,6 @@ from .arg_types import (
 )
 
 FEATURELESS_FEATURE = "none"
-LEGACY_DEGREE_FEATURE = "training_degree_legacy4"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LOGGER = logging.getLogger(__name__)
 PLOTS_DIRNAME = "plots"
@@ -1050,7 +1051,11 @@ def feature_metadata(
         "matrix_schema_id": (
             CONFIGURED_MATRIX_SCHEMA_ID
             if matrix_source == CONFIGURED_FEATURE_MATRIX
-            else np.nan
+            else (
+                DEGREE_MATRIX_SCHEMA_ID
+                if matrix_source == TRAINING_DEGREE_MATRIX
+                else np.nan
+            )
         ),
         "pair_composition_schema_id": (
             PAIR_COMPOSITION_SCHEMA_ID
@@ -1255,7 +1260,7 @@ def append_preferential_attachment_metrics(
         output_path = output_paths_by_split[split_name]
         if output_path is None:
             continue
-        identity = fixed_feature_identity(LEGACY_DEGREE_FEATURE)
+        identity = training_degree_feature_identity()
         metadata = context.metric_metadata(
             split_name=split_name,
             model_name=PREFERENTIAL_ATTACHMENT_CLASSIFIER,
@@ -2549,7 +2554,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "degree_val": degree_x_val,
                 "degree_test": degree_x_test,
             })
-            degree_identity = fixed_feature_identity(LEGACY_DEGREE_FEATURE)
+            degree_identity = training_degree_feature_identity()
             for model_name in degree_models:
                 performance.add_model_runs(
                     run_model_reruns(

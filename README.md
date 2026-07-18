@@ -276,9 +276,14 @@ Benchmark aggregation joins biological models to the fitted control only when
 the dataset, protocol instance, grouping, negative construction, assignments,
 training graph, and exact evaluation cohort hashes agree. The headline AUPRC
 quantity is `residual_over_degree_control`; it is a residual diagnostic, not a
-claim of genuine biological signal. Individual `degree_logistic` coefficients
-must not be interpreted because its four symmetric derived features are
-intentionally correlated.
+claim of genuine biological signal. The task-owned matrix schema
+`ppi.training_degree.v1` uses three ordered symmetric columns:
+`degree_log_min`, `degree_log_max`, and `degree_log_product`, where each
+endpoint degree is transformed with `log1p` first. Training positives use
+leave-one-canonical-positive-edge-out degrees; negatives and held-out examples
+use the complete positive training graph. Individual `degree_logistic`
+coefficients should not be interpreted independently because these derived
+features are correlated.
 
 Aggregation locks the fitted-control decision in
 `benchmark_degree_control_selection.json` using validation evidence only,

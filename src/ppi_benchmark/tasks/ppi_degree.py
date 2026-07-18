@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..artifact_io import write_dataframe_threadsafe
 from ..evaluation import binary_classification_metrics
+from ..features import FeatureIdentity
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..splitting.artifacts import (
     SOURCE_ROW_INDEX_COLUMN,
@@ -33,11 +34,12 @@ TEST_DEGREE_METRICS_FILENAME = "test_degree_metrics.csv"
 VAL_DEGREE_SUMMARY_FILENAME = "val_degree_metrics_summary.csv"
 TEST_DEGREE_SUMMARY_FILENAME = "test_degree_metrics_summary.csv"
 PREFERENTIAL_ATTACHMENT_CLASSIFIER = "preferential_attachment"
+DEGREE_MATRIX_SCHEMA_ID = "ppi.training_degree.v1"
+DEGREE_FEATURE_IDENTITY = "training_degree_v1"
 DEGREE_FEATURE_NAMES = (
-    "log1p_min_positive_degree",
-    "log1p_max_positive_degree",
-    "log1p_sum_positive_degree",
-    "log1p_product_positive_degree",
+    "degree_log_min",
+    "degree_log_max",
+    "degree_log_product",
 )
 POSITIVE_DEGREE_BIN_ORDER = ("unseen", "zero", "low", "mid", "high")
 EXPOSURE_BIN_ORDER = ("unseen", "low", "mid", "high")
@@ -79,6 +81,7 @@ DEGREE_SUMMARY_IDENTITY_COLUMNS = (
     "protocol_version",
     "split_seed",
     "dataset_sha256",
+    "positive_graph_sha256",
     "training_positive_edges_sha256",
     "training_examples_sha256",
     "split_assignments_sha256",
@@ -223,6 +226,24 @@ def stable_json_sha256(value: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def training_degree_feature_identity() -> FeatureIdentity:
+    """Return the task-owned logical identity of the degree matrix."""
+    specification = {
+        "task": "ppi",
+        "matrix_schema_id": DEGREE_MATRIX_SCHEMA_ID,
+        "ordered_columns": list(DEGREE_FEATURE_NAMES),
+        "graph": "undirected_unweighted_simple_positive_training_graph",
+        "degree_transform": "log1p",
+        "training_policy": "leave_one_canonical_positive_edge_out",
+        "held_out_policy": "complete_positive_training_graph",
+    }
+    return FeatureIdentity(
+        features=DEGREE_FEATURE_IDENTITY,
+        feature_spec_sha256=stable_json_sha256(specification),
+        feature_identity=DEGREE_FEATURE_IDENTITY,
+    )
 
 
 def _canonical_pair(protein_a: Any, protein_b: Any) -> tuple[str, str]:
@@ -452,6 +473,11 @@ def build_training_degree_profile(
         protein_a = str(protein_a_raw)
         protein_b = str(protein_b_raw)
         label = int(label_raw)
+        if protein_a == protein_b:
+            raise ValueError(
+                "Training degree graph does not allow self-loop examples: "
+                f"{protein_a!r}."
+            )
         canonical = _canonical_pair(protein_a, protein_b)
         for protein_id in set(canonical):
             exposure[protein_id] = exposure.get(protein_id, 0) + 1
@@ -467,8 +493,8 @@ def build_training_degree_profile(
         })
 
     degree = {
-        protein_id: len(positive_partners.get(protein_id, set()))
-        for protein_id in exposure
+        protein_id: len(partners)
+        for protein_id, partners in sorted(positive_partners.items())
     }
     degree_cutoffs = _quantile_cutoffs(
         [value for value in degree.values() if value > 0],
@@ -484,11 +510,11 @@ def build_training_degree_profile(
                 DEGREE_DIAGNOSTIC_SCHEMA_VERSION
             ),
             "protein_id": protein_id,
-            "positive_degree": degree[protein_id],
+            "positive_degree": degree.get(protein_id, 0),
             "training_exposure": exposure[protein_id],
             "seen_in_training": True,
             "positive_degree_bin": _positive_degree_bin(
-                degree[protein_id], True, degree_cutoffs
+                degree.get(protein_id, 0), True, degree_cutoffs
             ),
             "training_exposure_bin": _exposure_bin(
                 exposure[protein_id], True, exposure_cutoffs
@@ -512,10 +538,11 @@ def build_training_degree_profile(
     training_records.sort(
         key=lambda row: _source_id_key(row[SOURCE_ROW_INDEX_COLUMN])
     )
+    positive_graph_sha256 = stable_json_sha256(positive_edge_records)
     hashes = {
-        "training_positive_edges_sha256": stable_json_sha256(
-            positive_edge_records
-        ),
+        "positive_graph_sha256": positive_graph_sha256,
+        # Compatibility alias for existing degree-diagnostic joins.
+        "training_positive_edges_sha256": positive_graph_sha256,
         "training_examples_sha256": stable_json_sha256(training_records),
         "split_assignments_sha256": split_assignments_sha256(
             split_assignments
@@ -524,7 +551,16 @@ def build_training_degree_profile(
     metadata = {
         "degree_diagnostic_schema_version": DEGREE_DIAGNOSTIC_SCHEMA_VERSION,
         "artifact_filename": TRAINING_POSITIVE_DEGREE_FILENAME,
+        "matrix": {
+            "matrix_schema_id": DEGREE_MATRIX_SCHEMA_ID,
+            "ordered_columns": list(DEGREE_FEATURE_NAMES),
+        },
         "definitions": {
+            "positive_graph": (
+                "undirected, unweighted simple graph containing one edge per "
+                "distinct canonical positive pair in the final retained "
+                "training split"
+            ),
             "positive_degree": (
                 "number of distinct canonical positive training partners"
             ),
@@ -553,6 +589,7 @@ def build_training_degree_profile(
             "training_exposure_bins": list(EXPOSURE_BIN_ORDER),
         },
         "n_seen_training_proteins": len(exposure),
+        "n_positive_graph_proteins": len(degree),
         "n_distinct_training_positive_edges": len(positive_edges),
         "hashes": hashes,
     }
@@ -640,11 +677,10 @@ def degree_feature_matrix(
     leave_one_positive_edge_out: bool,
 ) -> np.ndarray:
     """Return fixed-order symmetric positive-degree features."""
-    _require_columns(
-        examples,
-        ("protein_a", "protein_b", "label"),
-        "PPI examples",
-    )
+    required_columns = ["protein_a", "protein_b"]
+    if leave_one_positive_edge_out:
+        required_columns.append("label")
+    _require_columns(examples, required_columns, "PPI examples")
     degree_a = _mapped_int_values(
         examples["protein_a"], profile.positive_degree
     )
@@ -668,15 +704,12 @@ def degree_feature_matrix(
         if (degree_a < 0).any() or (degree_b < 0).any():
             raise RuntimeError("Leave-one-edge-out degree became negative.")
 
-    minimum = np.minimum(degree_a, degree_b)
-    maximum = np.maximum(degree_a, degree_b)
-    total = degree_a + degree_b
-    product = degree_a * degree_b
+    log_degree_a = np.log1p(degree_a.astype(np.float64, copy=False))
+    log_degree_b = np.log1p(degree_b.astype(np.float64, copy=False))
     return np.column_stack((
-        np.log1p(minimum),
-        np.log1p(maximum),
-        np.log1p(total),
-        np.log1p(product),
+        np.minimum(log_degree_a, log_degree_b),
+        np.maximum(log_degree_a, log_degree_b),
+        log_degree_a * log_degree_b,
     )).astype(np.float64, copy=False)
 
 
@@ -733,6 +766,7 @@ def degree_identity_context(
     hashes = profile.metadata["hashes"]
     return {
         "dataset_sha256": str(dataset_sha256),
+        "positive_graph_sha256": hashes["positive_graph_sha256"],
         "training_positive_edges_sha256": hashes[
             "training_positive_edges_sha256"
         ],

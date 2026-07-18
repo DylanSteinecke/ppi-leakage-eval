@@ -12,7 +12,9 @@ from ppi_benchmark.reporting.degree import (
 )
 from ppi_benchmark.cli.aggregate import aggregate_benchmark_results
 from ppi_benchmark.tasks.ppi_degree import (
+    DEGREE_FEATURE_IDENTITY,
     DEGREE_FEATURE_NAMES,
+    DEGREE_MATRIX_SCHEMA_ID,
     PREFERENTIAL_ATTACHMENT_CLASSIFIER,
     build_degree_evaluation_plan,
     build_training_degree_profile,
@@ -48,12 +50,23 @@ def test_training_degree_profile_rejects_held_out_rows_and_counts_partners():
     profile = build_training_degree_profile(train, assignments)
     repeated = build_training_degree_profile(train.copy(), assignments.copy())
 
-    assert profile.positive_degree == {"A": 2, "B": 1, "C": 1, "D": 0}
+    assert profile.positive_degree == {"A": 2, "B": 1, "C": 1}
     assert profile.training_exposure == {"A": 4, "B": 2, "C": 1, "D": 1}
     assert profile.degree_bin("D") == "zero"
     assert profile.degree_bin("held_out_only") == "unseen"
     assert profile.exposure_bin("held_out_only") == "unseen"
     assert profile.metadata == repeated.metadata
+    assert profile.metadata["matrix"] == {
+        "matrix_schema_id": "ppi.training_degree.v1",
+        "ordered_columns": [
+            "degree_log_min",
+            "degree_log_max",
+            "degree_log_product",
+        ],
+    }
+    assert profile.metadata["hashes"]["positive_graph_sha256"] == (
+        profile.metadata["hashes"]["training_positive_edges_sha256"]
+    )
     pd.testing.assert_frame_equal(profile.frame, repeated.frame)
 
     injected = pd.concat([
@@ -108,14 +121,94 @@ def test_degree_features_are_symmetric_and_leave_positive_edge_out():
         pair, profile, leave_one_positive_edge_out=True
     )
 
-    assert len(DEGREE_FEATURE_NAMES) == 4
+    assert DEGREE_FEATURE_NAMES == (
+        "degree_log_min",
+        "degree_log_max",
+        "degree_log_product",
+    )
+    assert DEGREE_MATRIX_SCHEMA_ID == "ppi.training_degree.v1"
+    assert DEGREE_FEATURE_IDENTITY == "training_degree_v1"
     np.testing.assert_allclose(complete[0], complete[1])
     np.testing.assert_allclose(leave_one_out[0], leave_one_out[1])
     np.testing.assert_allclose(
         leave_one_out[0],
-        np.log1p([0, 1, 1, 0]),
+        [0.0, np.log1p(1), 0.0],
+    )
+    np.testing.assert_allclose(
+        complete[0],
+        [np.log1p(1), np.log1p(2), np.log1p(1) * np.log1p(2)],
     )
     assert not np.array_equal(complete, leave_one_out)
+
+
+def test_negative_training_rows_do_not_change_positive_graph_or_features():
+    positives = pd.DataFrame({
+        "source_row_index": [0, 1],
+        "protein_a": ["A", "A"],
+        "protein_b": ["B", "C"],
+        "label": [1, 1],
+    })
+    with_negative = pd.concat([
+        positives,
+        pd.DataFrame({
+            "source_row_index": [2],
+            "protein_a": ["D"],
+            "protein_b": ["E"],
+            "label": [0],
+        }),
+    ], ignore_index=True)
+    positive_assignments = pd.DataFrame({
+        "source_row_index": [0, 1],
+        "split": ["train", "train"],
+    })
+    negative_assignments = pd.DataFrame({
+        "source_row_index": [0, 1, 2],
+        "split": ["train", "train", "train"],
+    })
+
+    positive_profile = build_training_degree_profile(
+        positives, positive_assignments)
+    negative_profile = build_training_degree_profile(
+        with_negative, negative_assignments)
+    evaluation = pd.DataFrame({
+        "protein_a": ["A", "D"],
+        "protein_b": ["B", "E"],
+    })
+
+    assert positive_profile.positive_degree == negative_profile.positive_degree
+    assert positive_profile.positive_edges == negative_profile.positive_edges
+    assert (
+        positive_profile.metadata["hashes"]["positive_graph_sha256"]
+        == negative_profile.metadata["hashes"]["positive_graph_sha256"]
+    )
+    np.testing.assert_array_equal(
+        degree_feature_matrix(
+            evaluation,
+            positive_profile,
+            leave_one_positive_edge_out=False,
+        ),
+        degree_feature_matrix(
+            evaluation,
+            negative_profile,
+            leave_one_positive_edge_out=False,
+        ),
+    )
+
+
+def test_training_degree_graph_rejects_self_loops():
+    training = pd.DataFrame({
+        "source_row_index": [0],
+        "protein_a": ["A"],
+        "protein_b": ["A"],
+        "label": [1],
+    })
+    assignments = pd.DataFrame({
+        "source_row_index": [0],
+        "split": ["train"],
+    })
+
+    with pytest.raises(ValueError, match="self-loop"):
+        build_training_degree_profile(training, assignments)
 
 
 def test_pair_order_has_identical_degree_bin_assignment():
@@ -546,6 +639,17 @@ def test_cli_degree_artifact_lifecycle_and_registered_control(
     assert diagnostic["degree_diagnostic_schema_version"] == 1
     assert diagnostic["primary_fitted_control"] == "degree_logistic"
     assert diagnostic["coefficient_interpretation_allowed"] is False
+    assert diagnostic["matrix"]["matrix_schema_id"] == (
+        "ppi.training_degree.v1"
+    )
+    assert diagnostic["hashes"]["positive_graph_sha256"]
+    degree_rows = val_metrics[
+        val_metrics["model_name"] == "degree_logistic"
+    ]
+    assert set(degree_rows["features"]) == {"training_degree_v1"}
+    assert set(degree_rows["matrix_schema_id"]) == {
+        "ppi.training_degree.v1"
+    }
 
 
 def test_benchmark_aggregation_writes_hash_gated_degree_lift(

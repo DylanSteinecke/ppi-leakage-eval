@@ -467,7 +467,7 @@ def test_mixed_matrix_sources_route_models_and_seed_policies(
     }
     assert set(metrics["configuration_id"]) == {
         "none__always_positive",
-        "training_degree_legacy4__degree_logistic",
+        "training_degree_v1__degree_logistic",
         next(
             value
             for value in metrics["configuration_id"]
