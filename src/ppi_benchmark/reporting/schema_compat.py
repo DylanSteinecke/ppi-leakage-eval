@@ -118,6 +118,10 @@ def normalize_evaluation_frame(
         "fitted_extractor_sha256",
         "matrix_schema_id",
         "pair_composition_schema_id",
+        "matrix_contract_sha256",
+        "row_identity_sha256",
+        "matrix_sha256",
+        "matrix_persisted",
     ):
         normalized[field] = pd.NA
     normalized = normalized.drop(columns="classifier")

@@ -12,6 +12,7 @@ from scipy import sparse
 from scipy.sparse import hstack
 
 from ..backends.base import SupervisedSplit
+from ..matrix_provenance import canonicalize_matrix
 from ..schema import EVALUATION_SCHEMA_VERSION
 from .base import stable_task_data_signature
 
@@ -21,6 +22,46 @@ if TYPE_CHECKING:
 
 PPI_REQUIRED_COLUMNS = ("protein_a", "protein_b", "label")
 DEFAULT_PAIR_COMPOSITION_CHUNK_SIZE = 8192
+
+
+def ppi_matrix_construction_contract(
+    *,
+    matrix_source: str,
+    matrix_schema_id: str,
+    pair_composition_schema_id: str | None,
+    feature_spec_sha256: str,
+    feature_configuration: Mapping[str, Any],
+    fitted_extractor_sha256: str | None,
+    encoder_fingerprint: str | None,
+    training_fit_policy: str,
+    split_name: str,
+    split_transformation_policy: str,
+    dataset_sha256: str,
+    selected_cohort_sha256: str,
+    training_cohort_sha256: str,
+    split_cohort_sha256: str,
+    positive_graph_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Return the complete PPI-owned construction contract for a matrix."""
+    return {
+        "contract_schema_version": 1,
+        "task": "ppi",
+        "matrix_source": matrix_source,
+        "matrix_schema_id": matrix_schema_id,
+        "pair_composition_schema_id": pair_composition_schema_id,
+        "feature_spec_sha256": feature_spec_sha256,
+        "feature_configuration": dict(feature_configuration),
+        "fitted_extractor_sha256": fitted_extractor_sha256,
+        "encoder_fingerprint": encoder_fingerprint,
+        "training_fit_policy": training_fit_policy,
+        "split": split_name,
+        "split_transformation_policy": split_transformation_policy,
+        "dataset_sha256": dataset_sha256,
+        "selected_cohort_sha256": selected_cohort_sha256,
+        "training_cohort_sha256": training_cohort_sha256,
+        "split_cohort_sha256": split_cohort_sha256,
+        "positive_graph_sha256": positive_graph_sha256,
+    }
 
 
 @dataclass(frozen=True)
@@ -144,11 +185,11 @@ class SymmetricPairComposer:
         if sparse.issparse(protein_features):
             protein_a = protein_features[protein_a_rows]
             protein_b = protein_features[protein_b_rows]
-            return hstack([
+            return canonicalize_matrix(hstack([
                 protein_a + protein_b,
                 np.abs(protein_a - protein_b),
                 protein_a.multiply(protein_b),
-            ], format="csr")
+            ], format="csr"))
 
         dense_features = np.asarray(protein_features)
         if dense_features.ndim != 2:
@@ -181,7 +222,7 @@ class SymmetricPairComposer:
                 protein_b,
                 out=output[:, 2 * n_features:],
             )
-        return pair_features
+        return canonicalize_matrix(pair_features)
 
 
 class PPITask:

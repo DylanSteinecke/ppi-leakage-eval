@@ -52,17 +52,20 @@ from ..features import (
     FeatureIdentity,
     build_feature_matrices,
     compose_split_feature_matrices,
+    configured_feature_spec,
     configured_feature_identity,
     fixed_feature_identity,
     normalize_feature_types,
     plm_feature_identity,
     unique_protein_ids,
 )
+from ..matrix_provenance import CanonicalMatrix, canonical_matrix
 from ..reporting.performance import (
     PERFORMANCE_FILENAME,
     PerformanceTracker,
     append_performance_report,
     peak_memory_bytes,
+    runtime_provenance,
 )
 from ..reporting.plot_common import legacy_f1_heatmap_output_paths
 from ..reporting.run_plots import (
@@ -128,7 +131,7 @@ from ..protein_encoders import (
     get_protein_encoder_preset,
 )
 from ..schema import EVALUATION_SCHEMA_VERSION
-from ..tasks import PPI_TASK
+from ..tasks import PPI_TASK, ppi_matrix_construction_contract
 from ..tasks.ppi_models import (
     CONFIGURED_FEATURE_MATRIX,
     NO_MATRIX,
@@ -139,6 +142,8 @@ from ..tasks.ppi_models import (
 from ..tasks.ppi_degree import (
     DEFAULT_DEGREE_BIN_QUANTILES,
     DEGREE_MATRIX_SCHEMA_ID,
+    DEGREE_SPLIT_TRANSFORMATION_POLICIES,
+    DEGREE_TRAINING_FIT_POLICY,
     PREFERENTIAL_ATTACHMENT_CLASSIFIER,
     TEST_DEGREE_METRICS_FILENAME,
     TEST_DEGREE_SUMMARY_FILENAME,
@@ -156,6 +161,7 @@ from ..tasks.ppi_degree import (
     evaluation_cohort_sha256,
     summarize_degree_metrics,
     training_degree_feature_identity,
+    training_degree_feature_specification,
     write_training_degree_profile,
 )
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
@@ -179,6 +185,12 @@ PLOTS_DIRNAME = "plots"
 PREDICTIONS_FILENAME = "predictions.csv"
 TRAINING_HISTORY_FILENAME = "training_history.csv"
 PROTEIN_ENCODER_METADATA_FILENAME = "protein_encoder.json"
+MATRIX_PROVENANCE_FIELDS = (
+    "matrix_contract_sha256",
+    "row_identity_sha256",
+    "matrix_sha256",
+    "matrix_persisted",
+)
 CHECKPOINTS_DIRNAME = "checkpoints"
 TRAIN_METRICS_FILENAME = "train_metrics.csv"
 VAL_METRICS_FILENAME = "val_metrics.csv"
@@ -205,6 +217,10 @@ TRAINING_HISTORY_COLUMNS = (
     "feature_identity",
     "configuration_id",
     "matrix_source",
+    "matrix_contract_sha256",
+    "row_identity_sha256",
+    "matrix_sha256",
+    "matrix_persisted",
     "reporting_group",
     "backend",
     "features",
@@ -1099,6 +1115,62 @@ def feature_metadata(
     return feature_metadata
 
 
+def ppi_matrix_artifacts(
+    *,
+    matrices: Mapping[str, Any | None],
+    examples: Mapping[str, pd.DataFrame | None],
+    matrix_source: str,
+    matrix_schema_id: str,
+    pair_composition_schema_id: str | None,
+    feature_identity: FeatureIdentity,
+    feature_configuration: Mapping[str, Any],
+    training_fit_policy: str,
+    split_transformation_policies: Mapping[str, str],
+    dataset_sha256: str,
+    selected_cohort_sha256: str,
+    training_cohort_sha256: str,
+    positive_graph_sha256: str | None = None,
+) -> dict[str, CanonicalMatrix]:
+    """Canonicalize and fingerprint every realized PPI matrix split."""
+    artifacts = {}
+    for split_name, matrix in matrices.items():
+        split_examples = examples.get(split_name)
+        if matrix is None or split_examples is None:
+            continue
+        contract = ppi_matrix_construction_contract(
+            matrix_source=matrix_source,
+            matrix_schema_id=matrix_schema_id,
+            pair_composition_schema_id=pair_composition_schema_id,
+            feature_spec_sha256=feature_identity.feature_spec_sha256,
+            feature_configuration=feature_configuration,
+            fitted_extractor_sha256=(
+                feature_identity.fitted_extractor_sha256
+            ),
+            encoder_fingerprint=feature_identity.encoder_fingerprint,
+            training_fit_policy=training_fit_policy,
+            split_name=split_name,
+            split_transformation_policy=(
+                split_transformation_policies[split_name]
+            ),
+            dataset_sha256=dataset_sha256,
+            selected_cohort_sha256=selected_cohort_sha256,
+            training_cohort_sha256=training_cohort_sha256,
+            split_cohort_sha256=evaluation_cohort_sha256(split_examples),
+            positive_graph_sha256=positive_graph_sha256,
+        )
+        artifacts[split_name] = canonical_matrix(
+            matrix,
+            split_examples,
+            matrix_source=matrix_source,
+            split_name=split_name,
+            matrix_schema_id=matrix_schema_id,
+            pair_composition_schema_id=pair_composition_schema_id,
+            construction_contract=contract,
+            task_example_id_columns=("example_id", "pair_id"),
+        )
+    return artifacts
+
+
 def build_frozen_plm_feature_matrices(
         cohort_df: pd.DataFrame, train_df: pd.DataFrame,
         val_df: pd.DataFrame | None,
@@ -1133,6 +1205,7 @@ def build_frozen_plm_feature_matrices(
             protein_ids=all_protein_ids.tolist(),
         )
     model_loaded_for_cache_misses = encoder.is_loaded
+    observed_device = getattr(encoder, "active_device", None)
     encoder.release_model()
     protein_ids = pd.Index(embedding_table.protein_ids)
     x_train, x_val, x_test = compose_split_feature_matrices(
@@ -1147,6 +1220,8 @@ def build_frozen_plm_feature_matrices(
         "adapter": args.plm_adapter,
         "sequence_preprocessing": encoder.sequence_preprocessing,
         "preset": args.plm_preset_metadata,
+        "requested_device": args.plm_device,
+        "observed_device": observed_device,
         "model_loaded_for_cache_misses": model_loaded_for_cache_misses,
         "model_released_after_encoding": model_loaded_for_cache_misses,
     }
@@ -1277,6 +1352,10 @@ def append_preferential_attachment_metrics(
                 "matrix_source": TRAINING_DEGREE_MATRIX,
                 "matrix_schema_id": np.nan,
                 "pair_composition_schema_id": np.nan,
+                "matrix_contract_sha256": np.nan,
+                "row_identity_sha256": np.nan,
+                "matrix_sha256": np.nan,
+                "matrix_persisted": np.nan,
             },
             run_number=0,
             model_seed=np.nan,
@@ -1312,6 +1391,7 @@ def train_and_evaluate_model_run(
         model_name: str,
         degree_plans: Mapping[str, DegreeEvaluationPlan],
         degree_context: DegreeDiagnosticContext,
+        matrix_metadata: Mapping[str, Mapping[str, Any]],
         run_number: int,
         execution_id: str, args: argparse.Namespace,
         best_checkpoint_path: Path | None = None,
@@ -1467,11 +1547,16 @@ def train_and_evaluate_model_run(
 
     training_history_df = None
     if fit_result.training_history:
+        training_matrix_metadata = matrix_metadata.get("train", {})
         history_metadata = {
             **run_identity,
             "estimator_params": estimator_params_json,
             "feature_identity": feature_identity.feature_identity,
             "matrix_source": spec.matrix_source,
+            **{
+                field: training_matrix_metadata.get(field, np.nan)
+                for field in MATRIX_PROVENANCE_FIELDS
+            },
             "reporting_group": spec.reporting_group,
             "backend": backend.backend_name,
             "features": feature_meta["features"],
@@ -1485,8 +1570,15 @@ def train_and_evaluate_model_run(
         evaluation = model_run_result.split_evaluations.get(split_name)
         if evaluation is None:
             return None
+        split_matrix_metadata = matrix_metadata.get(split_name, {})
         frame = make_metrics_df(
-            metadata=metrics_metadata,
+            metadata={
+                **metrics_metadata,
+                **{
+                    field: split_matrix_metadata.get(field, np.nan)
+                    for field in MATRIX_PROVENANCE_FIELDS
+                },
+            },
             metrics=dict(evaluation.metrics),
             split_name=split_name,
         )
@@ -1530,6 +1622,10 @@ def train_and_evaluate_model_run(
                         "matrix_schema_id",
                         "pair_composition_schema_id",
                     )
+                } | {
+                    field: matrix_metadata.get(split_name, {}).get(
+                        field, np.nan)
+                    for field in MATRIX_PROVENANCE_FIELDS
                 },
                 run_number=run_number,
                 model_seed=model_seed,
@@ -1567,6 +1663,11 @@ def train_and_evaluate_model_run(
                 "model_seed": run_identity["model_seed"],
                 "features": feature_meta["features"],
                 "k": feature_meta["k"],
+                **{
+                    field: matrix_metadata.get("test", {}).get(
+                        field, np.nan)
+                    for field in MATRIX_PROVENANCE_FIELDS
+                },
             },
         )
         predictions_df["decision_threshold"] = (
@@ -1606,6 +1707,10 @@ def train_and_evaluate_model_run(
             else feature_meta["pair_composition_schema_id"]
         ),
         "reporting_group": spec.reporting_group,
+        "matrices": {
+            split_name: dict(metadata)
+            for split_name, metadata in matrix_metadata.items()
+        },
         "backend": backend.backend_name,
         "run_number": run_identity["run_number"],
         "model_seed": None if is_constant else run_seed,
@@ -1655,6 +1760,7 @@ def run_model_reruns(
         model_name: str,
         degree_plans: Mapping[str, DegreeEvaluationPlan],
         degree_context: DegreeDiagnosticContext,
+        matrix_metadata: Mapping[str, Mapping[str, Any]],
         execution_id: str, args: argparse.Namespace,
         output_paths: OutputPaths,
     ) -> list[dict[str, Any]]:
@@ -1704,6 +1810,7 @@ def run_model_reruns(
             model_name=model_name,
             degree_plans=degree_plans,
             degree_context=degree_context,
+            matrix_metadata=matrix_metadata,
             run_number=run_number,
             execution_id=execution_id,
             args=args,
@@ -2399,10 +2506,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             "target_test_size": 1.0 - args.train_size - args.val_size,
             "grouping": grouping_identity,
         }
+        selected_cohort_sha256 = evaluation_cohort_sha256(protein_pairs)
+        training_cohort_sha256 = evaluation_cohort_sha256(train_df)
         control_selection_context = {
             "task": PPI_TASK.name,
             "dataset_sha256": split_metadata["pairs_file_sha256"],
-            "selected_cohort_sha256": evaluation_cohort_sha256(protein_pairs),
+            "selected_cohort_sha256": selected_cohort_sha256,
             "negative_construction": negative_construction,
             "sampling_seed": args.sampling_seed,
             "max_pairs": args.max_pairs,
@@ -2533,12 +2642,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                     model_name=model_name,
                     degree_plans=degree_plans,
                     degree_context=degree_context,
+                    matrix_metadata={},
                     execution_id=execution_id,
                     args=args,
                     output_paths=output_paths,
                 )
             )
         if degree_models:
+            degree_identity = training_degree_feature_identity()
             degree_x_train, degree_x_val, degree_x_test = (
                 degree_feature_matrices(
                     train_df=train_df,
@@ -2549,12 +2660,60 @@ def main(argv: Sequence[str] | None = None) -> None:
                     profile=degree_profile,
                 )
             )
-            performance.add_matrices({
-                "degree_train": degree_x_train,
-                "degree_val": degree_x_val,
-                "degree_test": degree_x_test,
-            })
-            degree_identity = training_degree_feature_identity()
+            degree_artifacts = ppi_matrix_artifacts(
+                matrices={
+                    "train": degree_x_train,
+                    "val": degree_x_val,
+                    "test": degree_x_test,
+                },
+                examples={
+                    "train": train_df,
+                    "val": val_df,
+                    "test": (
+                        test_df if args.evaluate_test_metrics else None
+                    ),
+                },
+                matrix_source=TRAINING_DEGREE_MATRIX,
+                matrix_schema_id=DEGREE_MATRIX_SCHEMA_ID,
+                pair_composition_schema_id=None,
+                feature_identity=degree_identity,
+                feature_configuration=(
+                    training_degree_feature_specification()),
+                training_fit_policy=DEGREE_TRAINING_FIT_POLICY,
+                split_transformation_policies=(
+                    DEGREE_SPLIT_TRANSFORMATION_POLICIES),
+                dataset_sha256=split_metadata["pairs_file_sha256"],
+                selected_cohort_sha256=selected_cohort_sha256,
+                training_cohort_sha256=training_cohort_sha256,
+                positive_graph_sha256=degree_context.identity[
+                    "positive_graph_sha256"
+                ],
+            )
+            degree_x_train = degree_artifacts["train"].matrix
+            degree_x_val = (
+                None
+                if "val" not in degree_artifacts
+                else degree_artifacts["val"].matrix
+            )
+            degree_x_test = (
+                None
+                if "test" not in degree_artifacts
+                else degree_artifacts["test"].matrix
+            )
+            degree_matrix_metadata = {
+                split_name: artifact.metadata
+                for split_name, artifact in degree_artifacts.items()
+            }
+            performance.add_matrices(
+                {
+                    f"degree_{split_name}": artifact.matrix
+                    for split_name, artifact in degree_artifacts.items()
+                },
+                metadata={
+                    f"degree_{split_name}": artifact.metadata
+                    for split_name, artifact in degree_artifacts.items()
+                },
+            )
             for model_name in degree_models:
                 performance.add_model_runs(
                     run_model_reruns(
@@ -2568,6 +2727,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         model_name=model_name,
                         degree_plans=degree_plans,
                         degree_context=degree_context,
+                        matrix_metadata=degree_matrix_metadata,
                         execution_id=execution_id,
                         args=args,
                         output_paths=output_paths,
@@ -2607,6 +2767,15 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "protein_encoder",
                     encoder_metadata,
                 )
+                feature_configuration = {
+                    "encoder_spec": encoder_metadata["encoder_spec"],
+                    "encoder_fingerprint": encoder_metadata[
+                        "encoder_fingerprint"
+                    ],
+                }
+                training_fit_policy = (
+                    "frozen_label_independent_encoder_over_selected_cohort"
+                )
             else:
                 (
                     x_train,
@@ -2627,11 +2796,59 @@ def main(argv: Sequence[str] | None = None) -> None:
                     args,
                     fitted_extractor_sha256=fitted_extractor_sha256,
                 )
-            performance.add_matrices({
-                "train": x_train,
-                "val": x_val,
-                "test": x_test,
-            })
+                feature_configuration = configured_feature_spec(
+                    args.features, args)
+                training_fit_policy = (
+                    "fit_extractors_on_distinct_retained_training_proteins"
+                )
+            configured_artifacts = ppi_matrix_artifacts(
+                matrices={"train": x_train, "val": x_val, "test": x_test},
+                examples={
+                    "train": train_df,
+                    "val": val_df,
+                    "test": (
+                        test_df if args.evaluate_test_metrics else None
+                    ),
+                },
+                matrix_source=CONFIGURED_FEATURE_MATRIX,
+                matrix_schema_id=CONFIGURED_MATRIX_SCHEMA_ID,
+                pair_composition_schema_id=PAIR_COMPOSITION_SCHEMA_ID,
+                feature_identity=configured_identity,
+                feature_configuration=feature_configuration,
+                training_fit_policy=training_fit_policy,
+                split_transformation_policies={
+                    "train": "symmetric_pair_composition",
+                    "val": "transform_without_refit_then_symmetric_pair_"
+                    "composition",
+                    "test": "transform_without_refit_then_symmetric_pair_"
+                    "composition",
+                },
+                dataset_sha256=split_metadata["pairs_file_sha256"],
+                selected_cohort_sha256=selected_cohort_sha256,
+                training_cohort_sha256=training_cohort_sha256,
+            )
+            x_train = configured_artifacts["train"].matrix
+            x_val = (
+                None
+                if "val" not in configured_artifacts
+                else configured_artifacts["val"].matrix
+            )
+            x_test = (
+                None
+                if "test" not in configured_artifacts
+                else configured_artifacts["test"].matrix
+            )
+            configured_matrix_metadata = {
+                split_name: artifact.metadata
+                for split_name, artifact in configured_artifacts.items()
+            }
+            performance.add_matrices(
+                {
+                    split_name: artifact.matrix
+                    for split_name, artifact in configured_artifacts.items()
+                },
+                metadata=configured_matrix_metadata,
+            )
 
     # Run the learned classifiers
     with performance.stage("learned_models"):
@@ -2648,6 +2865,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     model_name=model_name,
                     degree_plans=degree_plans,
                     degree_context=degree_context,
+                    matrix_metadata=configured_matrix_metadata,
                     execution_id=execution_id,
                     args=args,
                     output_paths=output_paths,
@@ -2661,10 +2879,59 @@ def main(argv: Sequence[str] | None = None) -> None:
     with performance.stage("plot_results"):
         heatmap_paths = plot_model_outputs(output_paths)
     log_model_outputs(summaries, output_paths, heatmap_paths)
-    append_performance_report(
-        performance.report(execution_id, task=PPI_TASK.name),
-        output_paths.performance_path,
+    torch_devices = sorted({
+        str(model_run["training"]["device"])
+        for model_run in performance.model_runs
+        if model_run.get("training", {}).get("device") is not None
+    })
+    encoder_runtime = getattr(args, "protein_encoder_metadata", None)
+    runtime = runtime_provenance(
+        configured_precisions={
+            "frozen_plm": (
+                args.plm_precision
+                if configured_feature_models
+                and args.features == (PLM_FEATURE,)
+                else None
+            ),
+            "torch_mlp": (
+                args.torch_precision
+                if "torch_mlp" in args.classifiers
+                else None
+            ),
+        },
+        requested_devices={
+            "frozen_plm": (
+                args.plm_device
+                if configured_feature_models
+                and args.features == (PLM_FEATURE,)
+                else None
+            ),
+            "torch_mlp": (
+                args.torch_device
+                if "torch_mlp" in args.classifiers
+                else None
+            ),
+        },
+        observed_devices={
+            "frozen_plm": (
+                None
+                if encoder_runtime is None
+                else encoder_runtime.get("observed_device")
+            ),
+            "torch_mlp": torch_devices,
+        },
     )
+    try:
+        append_performance_report(
+            performance.report(
+                execution_id,
+                task=PPI_TASK.name,
+                runtime=runtime,
+            ),
+            output_paths.performance_path,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     LOGGER.info(
         "Saved performance report to: %s",
         output_paths.performance_path,

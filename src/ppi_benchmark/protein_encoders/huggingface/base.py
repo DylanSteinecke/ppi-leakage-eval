@@ -112,6 +112,11 @@ class HuggingFaceProteinEncoderBase:
         """Return whether model weights have been materialized."""
         return self._model is not None
 
+    @property
+    def active_device(self) -> str | None:
+        """Return the device used by the materialized model, when any."""
+        return None if self._device is None else str(self._device)
+
     def _transformers_imports(self):
         try:
             from transformers import AutoModel, AutoTokenizer

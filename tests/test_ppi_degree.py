@@ -11,6 +11,7 @@ from ppi_benchmark.reporting.degree import (
     selected_control_for_context,
 )
 from ppi_benchmark.cli.aggregate import aggregate_benchmark_results
+from ppi_benchmark.matrix_provenance import canonicalize_matrix
 from ppi_benchmark.tasks.ppi_degree import (
     DEGREE_FEATURE_IDENTITY,
     DEGREE_FEATURE_NAMES,
@@ -129,6 +130,7 @@ def test_degree_features_are_symmetric_and_leave_positive_edge_out():
     assert DEGREE_MATRIX_SCHEMA_ID == "ppi.training_degree.v1"
     assert DEGREE_FEATURE_IDENTITY == "training_degree_v1"
     np.testing.assert_allclose(complete[0], complete[1])
+    assert canonicalize_matrix(complete) is complete
     np.testing.assert_allclose(leave_one_out[0], leave_one_out[1])
     np.testing.assert_allclose(
         leave_one_out[0],
@@ -215,11 +217,13 @@ def test_pair_order_has_identical_degree_bin_assignment():
     train, assignments = training_fixture()
     profile = build_training_degree_profile(train, assignments)
     forward = pd.DataFrame({
+        "source_row_index": [10],
         "protein_a": ["A"],
         "protein_b": ["D"],
         "label": [0],
     })
     reverse = pd.DataFrame({
+        "source_row_index": [10],
         "protein_a": ["D"],
         "protein_b": ["A"],
         "label": [0],
@@ -247,6 +251,7 @@ def test_degree_evaluation_plan_is_reusable_and_immutable():
     train, assignments = training_fixture()
     profile = build_training_degree_profile(train, assignments)
     examples = pd.DataFrame({
+        "source_row_index": [10, 11],
         "protein_a": ["A", "D"],
         "protein_b": ["B", "A"],
         "label": [1, 0],
@@ -299,6 +304,7 @@ def test_c2_and_c3_reporting_apply_protocol_specific_degree_contracts():
     })
     profile = build_training_degree_profile(train, assignments)
     c2 = pd.DataFrame({
+        "source_row_index": [10, 11],
         "protein_a": ["S", "X"],
         "protein_b": ["X", "S"],
         "label": [1, 0],
@@ -330,6 +336,7 @@ def test_c2_and_c3_reporting_apply_protocol_specific_degree_contracts():
     ).any()
 
     c3 = pd.DataFrame({
+        "source_row_index": [12, 13],
         "protein_a": ["X", "Y"],
         "protein_b": ["Y", "Z"],
         "label": [1, 0],
@@ -369,6 +376,7 @@ def test_degree_strata_reuse_global_predictions_and_report_one_class_counts():
     train, assignments = training_fixture()
     profile = build_training_degree_profile(train, assignments)
     examples = pd.DataFrame({
+        "source_row_index": [10, 11, 12],
         "protein_a": ["A", "D", "X"],
         "protein_b": ["B", "A", "Y"],
         "label": [1, 0, 0],
@@ -420,6 +428,17 @@ def test_evaluation_cohort_hash_is_pair_order_symmetric_but_label_sensitive():
     assert evaluation_cohort_sha256(examples) != evaluation_cohort_sha256(
         changed_label
     )
+
+
+def test_evaluation_cohort_hash_forbids_positional_identity_fallback():
+    examples = pd.DataFrame({
+        "protein_a": ["A"],
+        "protein_b": ["B"],
+        "label": [1],
+    })
+
+    with pytest.raises(ValueError, match="unique source_row_index"):
+        evaluation_cohort_sha256(examples)
 
 
 def control_selection_rows(hgb_delta):

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import resource
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 import numpy as np
 import pandas as pd
@@ -18,6 +21,7 @@ from scipy import sparse
 
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..artifact_io import output_lock
+from ..matrix_provenance import matrix_records_by_contract
 
 
 PERFORMANCE_FILENAME = "performance.jsonl"
@@ -97,6 +101,60 @@ def solver_iteration_report(model: Any) -> dict[str, Any] | None:
     }
 
 
+def runtime_provenance(
+    *,
+    configured_precisions: dict[str, str | None],
+    requested_devices: dict[str, str | None],
+    observed_devices: dict[str, Any],
+) -> dict[str, Any]:
+    """Return runtime, library, and observed hardware provenance."""
+    packages = {}
+    for label, distribution in (
+        ("numpy", "numpy"),
+        ("scipy", "scipy"),
+        ("scikit_learn", "scikit-learn"),
+        ("torch", "torch"),
+        ("transformers", "transformers"),
+    ):
+        try:
+            packages[label] = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            packages[label] = None
+
+    accelerator_hardware: dict[str, Any] = {}
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        accelerator_hardware["cuda_available"] = bool(
+            torch.cuda.is_available())
+        accelerator_hardware["cuda_devices"] = [
+            torch.cuda.get_device_name(index)
+            for index in range(torch.cuda.device_count())
+        ]
+        accelerator_hardware["mps_available"] = bool(
+            getattr(torch.backends, "mps", None)
+            and torch.backends.mps.is_available()
+        )
+    return {
+        "python": {
+            "version": platform.python_version(),
+            "implementation": platform.python_implementation(),
+            "executable": sys.executable,
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor() or None,
+            "cpu_count": os.cpu_count(),
+        },
+        "packages": packages,
+        "configured_precisions": configured_precisions,
+        "requested_devices": requested_devices,
+        "observed_devices": observed_devices,
+        "accelerator_hardware": accelerator_hardware,
+    }
+
+
 @dataclass
 class PerformanceTracker:
     """Accumulate named stage durations and model-level observations."""
@@ -119,12 +177,20 @@ class PerformanceTracker:
                 self.stages_seconds.get(name, 0.0) + elapsed
             )
 
-    def add_matrices(self, matrices: dict[str, Any]) -> None:
-        """Record statistics for non-empty feature matrices."""
+    def add_matrices(
+        self,
+        matrices: dict[str, Any],
+        metadata: dict[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Record statistics and provenance for non-empty matrices."""
+        metadata = metadata or {}
         for name, matrix in matrices.items():
             statistics = matrix_statistics(matrix)
             if statistics is not None:
-                self.matrices[name] = statistics
+                self.matrices[name] = {
+                    **statistics,
+                    **dict(metadata.get(name, {})),
+                }
 
     def add_model_runs(self, model_runs: list[dict[str, Any]]) -> None:
         """Append model-level timing and solver observations."""
@@ -136,6 +202,7 @@ class PerformanceTracker:
 
     def report(
             self, execution_id: str, task: str | None = None,
+            runtime: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
         """Return the complete invocation-level performance record."""
         peak_bytes = peak_memory_bytes()
@@ -154,7 +221,31 @@ class PerformanceTracker:
             "matrices": self.matrices,
             "model_runs": self.model_runs,
             "observations": self.observations,
+            "runtime_provenance": runtime,
         }
+
+
+def _validate_append_matrix_hashes(
+    report: Mapping[str, Any],
+    existing_reports: list[Mapping[str, Any]],
+    output_path: Path,
+) -> None:
+    """Require exact bytes when one construction contract is repeated."""
+    incoming = matrix_records_by_contract(report.get("matrices", {}))
+    for existing_report in existing_reports:
+        existing = matrix_records_by_contract(
+            existing_report.get("matrices", {}))
+        for key in incoming.keys() & existing.keys():
+            incoming_record = incoming[key]
+            existing_record = existing[key]
+            for hash_field in ("row_identity_sha256", "matrix_sha256"):
+                if incoming_record.get(hash_field) != existing_record.get(
+                    hash_field
+                ):
+                    raise ValueError(
+                        f"Cannot append to {output_path.parent}: repeated "
+                        f"matrix contract {key} has a different {hash_field}."
+                    )
 
 
 def append_performance_report(
@@ -164,5 +255,14 @@ def append_performance_report(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(report, sort_keys=True) + "\n"
     with output_lock(output_path):
+        existing_reports = []
+        if output_path.exists():
+            existing_reports = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        _validate_append_matrix_hashes(
+            report, existing_reports, output_path)
         with output_path.open("a", encoding="utf-8") as fout:
             fout.write(serialized)

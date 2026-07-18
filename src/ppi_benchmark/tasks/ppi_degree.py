@@ -14,6 +14,7 @@ import pandas as pd
 from ..artifact_io import write_dataframe_threadsafe
 from ..evaluation import binary_classification_metrics
 from ..features import FeatureIdentity
+from ..matrix_provenance import canonicalize_matrix, stable_row_identities
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..splitting.artifacts import (
     SOURCE_ROW_INDEX_COLUMN,
@@ -41,6 +42,14 @@ DEGREE_FEATURE_NAMES = (
     "degree_log_max",
     "degree_log_product",
 )
+DEGREE_TRAINING_FIT_POLICY = (
+    "positive_graph_from_final_retained_canonical_training_split"
+)
+DEGREE_SPLIT_TRANSFORMATION_POLICIES = {
+    "train": "leave_one_canonical_positive_edge_out",
+    "val": "complete_positive_training_graph",
+    "test": "complete_positive_training_graph",
+}
 POSITIVE_DEGREE_BIN_ORDER = ("unseen", "zero", "low", "mid", "high")
 EXPOSURE_BIN_ORDER = ("unseen", "low", "mid", "high")
 DEGREE_METRIC_COLUMNS = (
@@ -76,6 +85,10 @@ DEGREE_SUMMARY_IDENTITY_COLUMNS = (
     "matrix_source",
     "matrix_schema_id",
     "pair_composition_schema_id",
+    "matrix_contract_sha256",
+    "row_identity_sha256",
+    "matrix_sha256",
+    "matrix_persisted",
     "split_strategy",
     "protocol_id",
     "protocol_version",
@@ -228,17 +241,23 @@ def stable_json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def training_degree_feature_identity() -> FeatureIdentity:
-    """Return the task-owned logical identity of the degree matrix."""
-    specification = {
+def training_degree_feature_specification() -> dict[str, Any]:
+    """Return the complete split-independent degree feature contract."""
+    return {
         "task": "ppi",
         "matrix_schema_id": DEGREE_MATRIX_SCHEMA_ID,
         "ordered_columns": list(DEGREE_FEATURE_NAMES),
         "graph": "undirected_unweighted_simple_positive_training_graph",
         "degree_transform": "log1p",
-        "training_policy": "leave_one_canonical_positive_edge_out",
-        "held_out_policy": "complete_positive_training_graph",
+        "training_fit_policy": DEGREE_TRAINING_FIT_POLICY,
+        "split_transformation_policies": dict(
+            DEGREE_SPLIT_TRANSFORMATION_POLICIES),
     }
+
+
+def training_degree_feature_identity() -> FeatureIdentity:
+    """Return the task-owned logical identity of the degree matrix."""
+    specification = training_degree_feature_specification()
     return FeatureIdentity(
         features=DEGREE_FEATURE_IDENTITY,
         feature_spec_sha256=stable_json_sha256(specification),
@@ -330,12 +349,10 @@ def evaluation_cohort_sha256(examples: pd.DataFrame) -> str:
         ("protein_a", "protein_b", "label"),
         "evaluation examples",
     )
-    if SOURCE_ROW_INDEX_COLUMN in examples.columns:
-        example_ids = examples[SOURCE_ROW_INDEX_COLUMN].tolist()
-    elif "pair_id" in examples.columns:
-        example_ids = examples["pair_id"].tolist()
-    else:
-        example_ids = list(range(len(examples)))
+    _, example_ids = stable_row_identities(
+        examples,
+        task_example_id_columns=("example_id", "pair_id"),
+    )
     records = []
     for example_id, protein_a, protein_b, label in zip(
         example_ids,
@@ -706,11 +723,11 @@ def degree_feature_matrix(
 
     log_degree_a = np.log1p(degree_a.astype(np.float64, copy=False))
     log_degree_b = np.log1p(degree_b.astype(np.float64, copy=False))
-    return np.column_stack((
+    return canonicalize_matrix(np.column_stack((
         np.minimum(log_degree_a, log_degree_b),
         np.maximum(log_degree_a, log_degree_b),
         log_degree_a * log_degree_b,
-    )).astype(np.float64, copy=False)
+    )).astype(np.float64, copy=False))
 
 
 def degree_feature_matrices(

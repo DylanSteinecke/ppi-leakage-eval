@@ -18,6 +18,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 
+from .matrix_provenance import canonicalize_matrix
 from .tasks import SymmetricPairComposer
 
 PLM_FEATURE = "plm"
@@ -460,8 +461,8 @@ def build_feature_matrices(
         )
 
     return (
-        x_train,
-        x_val,
-        x_test,
+        canonicalize_matrix(x_train),
+        None if x_val is None else canonicalize_matrix(x_val),
+        None if x_test is None else canonicalize_matrix(x_test),
         combined_extractor_sha256(extractor_hashes),
     )

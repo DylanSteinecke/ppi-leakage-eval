@@ -322,6 +322,7 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
     assert performance["peak_memory_bytes"] > 0
     assert performance["matrices"] == {}
     assert performance["model_runs"][0]["solver_iterations"] is None
+    assert performance["runtime_provenance"]["packages"]["numpy"]
     assert "classifier" not in train_metrics.columns
     assert train_metrics.loc[0, "model_name"] == "always_positive"
     assert train_metrics.loc[0, "estimator_id"] == "constant"
@@ -330,6 +331,7 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
     )
     assert train_metrics.loc[0, "matrix_source"] == "none"
     assert train_metrics.loc[0, "reporting_group"] == "control"
+    assert pd.isna(train_metrics.loc[0, "matrix_sha256"])
     assert json.loads(train_metrics.loc[0, "estimator_params"]) == {
         "positive_probability": 1.0,
     }
@@ -420,6 +422,24 @@ def test_learned_model_reports_matrix_and_solver_performance(
     assert train_matrix["n_columns"] > 0
     assert 0.0 < train_matrix["density"] <= 1.0
     assert train_matrix["storage_bytes"] > 0
+    assert train_matrix["matrix_source"] == "configured_features"
+    assert train_matrix["split"] == "train"
+    assert train_matrix["matrix_schema_id"] == (
+        "ppi.configured_features.v1"
+    )
+    assert train_matrix["pair_composition_schema_id"] == (
+        "ppi.sum_absdiff_product.v1"
+    )
+    assert train_matrix["matrix_persisted"] is False
+    assert len(train_matrix["matrix_contract_sha256"]) == 64
+    assert len(train_matrix["row_identity_sha256"]) == 64
+    assert len(train_matrix["matrix_sha256"]) == 64
+    assert train_matrix["matrix_contract"][
+        "fitted_extractor_sha256"
+    ] == model_run["fitted_extractor_sha256"]
+    assert model_run["matrices"]["train"]["matrix_sha256"] == (
+        train_matrix["matrix_sha256"]
+    )
     assert model_run["fit_seconds"] > 0.0
     assert model_run["solver_iterations"]["maximum"] >= 1
     assert model_run["evaluation_seconds"]["train"] > 0.0
@@ -432,6 +452,20 @@ def test_learned_model_reports_matrix_and_solver_performance(
     assert train_metrics.loc[0, "decision_threshold"] == pytest.approx(0.5)
     assert train_metrics.loc[0, "default_decision_threshold"] == (
         pytest.approx(0.5)
+    )
+    assert train_metrics.loc[0, "matrix_contract_sha256"] == (
+        train_matrix["matrix_contract_sha256"]
+    )
+    assert train_metrics.loc[0, "row_identity_sha256"] == (
+        train_matrix["row_identity_sha256"]
+    )
+    assert train_metrics.loc[0, "matrix_sha256"] == (
+        train_matrix["matrix_sha256"]
+    )
+    assert not bool(train_metrics.loc[0, "matrix_persisted"])
+    assert not any(
+        path.suffix in {".npy", ".npz", ".mtx"}
+        for path in run_dir.rglob("*")
     )
 
 
@@ -707,6 +741,17 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     assert set(first_performance["matrices"]) == {"train", "val"}
     assert first_performance["observations"]["protein_encoder"] == (
         first_metadata)
+    plm_train_matrix = first_performance["matrices"]["train"]
+    assert plm_train_matrix["matrix_contract"]["encoder_fingerprint"] == (
+        first_metadata["encoder_fingerprint"]
+    )
+    assert plm_train_matrix["matrix_contract"][
+        "fitted_extractor_sha256"
+    ] is None
+    assert plm_train_matrix["matrix_persisted"] is False
+    assert first_performance["runtime_provenance"][
+        "configured_precisions"
+    ]["frozen_plm"] == "float32"
     assert not (first_run_dir / "test_metrics.csv").exists()
     first_metrics = pd.read_csv(first_run_dir / "train_metrics.csv")
     assert first_metrics.loc[0, "encoder_fingerprint"] == (
@@ -777,7 +822,14 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
             pd.read_csv(run_dir / "val_metrics.csv"),
         ], ignore_index=True)
         invariant_metrics.append(split_metrics.drop(
-            columns=["execution_id", "fit_seconds", "evaluation_seconds"],
+            columns=[
+                "execution_id",
+                "fit_seconds",
+                "evaluation_seconds",
+                # The construction contract intentionally binds the full
+                # input-dataset identity, including held-out labels.
+                "matrix_contract_sha256",
+            ],
         ))
 
     pd.testing.assert_frame_equal(

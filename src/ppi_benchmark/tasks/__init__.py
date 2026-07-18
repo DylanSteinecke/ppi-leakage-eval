@@ -9,6 +9,7 @@ from .ppi import (
     PPIPairExample,
     PPITask,
     SymmetricPairComposer,
+    ppi_matrix_construction_contract,
 )
 from .ptm import (
     PTM_TASK,
@@ -35,6 +36,7 @@ __all__ = [
     "PTMWindowCollator",
     "SymmetricPairComposer",
     "TaskAdapter",
+    "ppi_matrix_construction_contract",
     "split_ptm_examples_by_protein",
 ]
 

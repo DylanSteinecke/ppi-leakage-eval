@@ -253,6 +253,17 @@ shape/density/storage statistics, and per-model fit/evaluation timings and
 solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
 `evaluation_seconds`, and `solver_iterations` columns.
 
+Every realized matrix is canonicalized at construction (`C`-contiguous,
+little-endian dense data or canonical CSR), then recorded per source and split
+with its construction-contract, ordered-row, and exact-byte SHA-256 identities.
+These hashes bind fitted vocabularies or frozen encoders, schemas, cohort
+identities, and degree-graph policy without writing the matrix itself;
+`matrix_persisted` is `false` by default. Exact matrix hashes are reproducibility
+diagnostics, so matching contracts can still differ across PLM hardware or
+numeric runtimes. Runtime records include configured precision, observed
+devices, host details, and relevant library versions. Matrix caching remains
+outside the current contract.
+
 ## Degree and hub-bias diagnostic
 
 Every PPI run profiles the retained training graph without consulting

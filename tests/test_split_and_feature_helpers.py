@@ -11,6 +11,7 @@ from ppi_benchmark.features import (
     fitted_vectorizer_sha256,
     make_vectorizer,
 )
+from ppi_benchmark.matrix_provenance import canonicalize_matrix
 from ppi_benchmark.splitting.dispatch import (
     load_split_column,
     make_random_pair_split,
@@ -196,6 +197,9 @@ def test_build_feature_matrices_fits_vectorizer_on_train_only():
     assert x_val.shape[1] == x_train.shape[1]
     assert x_test.shape[1] == x_train.shape[1]
     assert len(fitted_extractor_sha256) == 64
+    assert x_train.has_canonical_format
+    assert x_train.has_sorted_indices
+    assert canonicalize_matrix(x_train) is x_train
 
 
 def test_logical_feature_identity_excludes_split_fitted_state():
