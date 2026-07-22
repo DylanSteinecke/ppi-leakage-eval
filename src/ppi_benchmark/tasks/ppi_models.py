@@ -47,7 +47,18 @@ def _immutable_parameters(
             "Estimator parameters must contain JSON-compatible values."
         ) from exc
     ordered = json.loads(canonical)
-    return MappingProxyType(ordered)
+
+    def freeze(value: Any) -> Any:
+        if isinstance(value, dict):
+            return MappingProxyType({
+                key: freeze(item)
+                for key, item in value.items()
+            })
+        if isinstance(value, list):
+            return tuple(freeze(item) for item in value)
+        return value
+
+    return freeze(ordered)
 
 
 @dataclass(frozen=True)

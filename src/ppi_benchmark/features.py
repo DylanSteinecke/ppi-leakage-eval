@@ -18,6 +18,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 
+from .artifact_io import canonical_json_sha256
 from .matrix_provenance import canonicalize_matrix
 from .tasks import SymmetricPairComposer
 
@@ -39,16 +40,6 @@ class FeatureIdentity:
     feature_identity: str
     fitted_extractor_sha256: str | None = None
     encoder_fingerprint: str | None = None
-
-
-def _canonical_json_sha256(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def configured_feature_spec(
@@ -78,7 +69,7 @@ def configured_feature_identity(
     """Return the conceptual identity of one k-mer feature configuration."""
     normalized = normalize_feature_types(feature_types)
     feature_name = make_feature_name(normalized)
-    spec_hash = _canonical_json_sha256(
+    spec_hash = canonical_json_sha256(
         configured_feature_spec(normalized, args)
     )
     return FeatureIdentity(
@@ -91,7 +82,7 @@ def configured_feature_identity(
 
 def fixed_feature_identity(name: str) -> FeatureIdentity:
     """Return a stable identity for a featureless or task-fixed source."""
-    spec_hash = _canonical_json_sha256({"feature_identity": name})
+    spec_hash = canonical_json_sha256({"feature_identity": name})
     return FeatureIdentity(
         features=name,
         feature_spec_sha256=spec_hash,
@@ -173,7 +164,7 @@ def fitted_vectorizer_sha256(feature_type: str, vectorizer: Any) -> str:
 
 def combined_extractor_sha256(component_hashes: list[str]) -> str:
     """Hash fitted component extractors in configured column order."""
-    return _canonical_json_sha256(component_hashes)
+    return canonical_json_sha256(component_hashes)
 
 
 ####################

@@ -99,6 +99,21 @@ class ConstantClassifier:
 EstimatorFactory = Callable[[int, int, Mapping[str, Any]], Any]
 
 
+def plain_estimator_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return mutable JSON containers from an immutable parameter mapping."""
+
+    def thaw(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): thaw(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [thaw(item) for item in value]
+        return value
+
+    return {str(key): thaw(value) for key, value in parameters.items()}
+
+
 def _make_logistic(
     max_iter: int,
     random_state: int,
@@ -208,7 +223,11 @@ def make_estimator(
             f"Estimator {estimator_id!r} is owned by the {spec.backend!r} "
             "backend and has no sklearn factory."
         )
-    return spec.factory(max_iter, random_state, dict(estimator_params))
+    return spec.factory(
+        max_iter,
+        random_state,
+        plain_estimator_parameters(estimator_params),
+    )
 
 
 def score_estimator(model: Any, x: Any) -> tuple[np.ndarray, float]:

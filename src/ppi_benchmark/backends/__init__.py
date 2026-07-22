@@ -14,6 +14,7 @@ from .models import (
     SKLEARN_BACKEND,
     TORCH_BACKEND,
     estimator_spec,
+    plain_estimator_parameters,
 )
 from .sklearn import SklearnBackend
 
@@ -85,4 +86,5 @@ __all__ = [
     "SklearnBackend",
     "SupervisedSplit",
     "make_model_backend",
+    "plain_estimator_parameters",
 ]

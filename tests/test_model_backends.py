@@ -8,6 +8,7 @@ from ppi_benchmark.backends import (
     SklearnBackend,
     SupervisedSplit,
     make_model_backend,
+    plain_estimator_parameters,
 )
 from ppi_benchmark.backends.models import (
     ESTIMATOR_IDS,
@@ -178,6 +179,28 @@ def test_ppi_model_registry_owns_public_routing_and_execution_policies():
             logistic.execution_policy,
             {"invalid": {1, 2}},
         )
+
+
+def test_ppi_model_parameters_are_deeply_immutable_and_detached():
+    source = {"nested": {"layers": [8, 4]}}
+    policy = ppi_model_spec("logistic").execution_policy
+    spec = PPIModelSpec(
+        "nested_model",
+        "logistic",
+        CONFIGURED_FEATURE_MATRIX,
+        "predictor",
+        policy,
+        source,
+    )
+
+    source["nested"]["layers"].append(2)
+
+    assert spec.estimator_params["nested"]["layers"] == (8, 4)
+    with pytest.raises(TypeError):
+        spec.estimator_params["nested"]["other"] = True
+    assert plain_estimator_parameters(spec.estimator_params) == {
+        "nested": {"layers": [8, 4]}
+    }
 
 
 def test_degree_controls_use_the_fixed_predeclared_estimators():

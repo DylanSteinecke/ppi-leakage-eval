@@ -21,7 +21,7 @@ from scipy import sparse
 
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..artifact_io import output_lock
-from ..matrix_provenance import matrix_records_by_contract
+from ..matrix_provenance import matrix_records_by_source_split
 
 
 PERFORMANCE_FILENAME = "performance.jsonl"
@@ -225,27 +225,71 @@ class PerformanceTracker:
         }
 
 
-def _validate_append_matrix_hashes(
+def _validate_append_compatibility(
     report: Mapping[str, Any],
-    existing_reports: list[Mapping[str, Any]],
+    existing_reports: Iterator[Mapping[str, Any]],
     output_path: Path,
 ) -> None:
-    """Require exact bytes when one construction contract is repeated."""
-    incoming = matrix_records_by_contract(report.get("matrices", {}))
+    """Require one schema and exact matrices within an append run."""
+    incoming_version = report.get("evaluation_schema_version")
+    if incoming_version is None:
+        raise ValueError("Performance reports require evaluation_schema_version.")
+    incoming = matrix_records_by_source_split(report.get("matrices", {}))
     for existing_report in existing_reports:
-        existing = matrix_records_by_contract(
+        existing_version = existing_report.get("evaluation_schema_version")
+        if existing_version != incoming_version:
+            raise ValueError(
+                f"Cannot append to {output_path.parent}: evaluation schema "
+                f"versions differ ({existing_version!r} != "
+                f"{incoming_version!r})."
+            )
+        existing = matrix_records_by_source_split(
             existing_report.get("matrices", {}))
         for key in incoming.keys() & existing.keys():
             incoming_record = incoming[key]
             existing_record = existing[key]
-            for hash_field in ("row_identity_sha256", "matrix_sha256"):
+            for hash_field in (
+                "matrix_contract_sha256",
+                "row_identity_sha256",
+                "matrix_sha256",
+            ):
                 if incoming_record.get(hash_field) != existing_record.get(
                     hash_field
                 ):
                     raise ValueError(
-                        f"Cannot append to {output_path.parent}: repeated "
-                        f"matrix contract {key} has a different {hash_field}."
+                        f"Cannot append to {output_path.parent}: matrix "
+                        f"{key} has a different {hash_field}."
                     )
+
+
+def _performance_reports(output_path: Path) -> Iterator[Mapping[str, Any]]:
+    if not output_path.exists():
+        return
+    with output_path.open("r", encoding="utf-8") as input_file:
+        for line in input_file:
+            if line.strip():
+                yield json.loads(line)
+
+
+def validate_performance_append(
+    *,
+    evaluation_schema_version: int,
+    matrices: Mapping[str, Mapping[str, Any]],
+    output_path: Path,
+) -> None:
+    """Preflight append compatibility before model artifacts are written."""
+    if not output_path.exists():
+        return
+    report = {
+        "evaluation_schema_version": evaluation_schema_version,
+        "matrices": matrices,
+    }
+    with output_lock(output_path):
+        _validate_append_compatibility(
+            report,
+            _performance_reports(output_path),
+            output_path,
+        )
 
 
 def append_performance_report(
@@ -255,14 +299,10 @@ def append_performance_report(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(report, sort_keys=True) + "\n"
     with output_lock(output_path):
-        existing_reports = []
-        if output_path.exists():
-            existing_reports = [
-                json.loads(line)
-                for line in output_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-        _validate_append_matrix_hashes(
-            report, existing_reports, output_path)
+        _validate_append_compatibility(
+            report,
+            _performance_reports(output_path),
+            output_path,
+        )
         with output_path.open("a", encoding="utf-8") as fout:
             fout.write(serialized)

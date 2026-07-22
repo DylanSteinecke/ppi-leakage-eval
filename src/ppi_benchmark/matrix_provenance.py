@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import struct
 import sys
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -13,8 +10,12 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
+from .artifact_io import (
+    LengthDelimitedHasher,
+    canonical_json_bytes,
+    canonical_json_snapshot,
+)
 
-HASH_CHUNK_BYTES = 8 * 1024 * 1024
 MATRIX_HASH_DOMAIN = b"ppi-benchmark.matrix-bytes.v1"
 ROW_HASH_DOMAIN = b"ppi-benchmark.matrix-rows.v1"
 CONTRACT_HASH_DOMAIN = b"ppi-benchmark.matrix-contract.v1"
@@ -26,46 +27,6 @@ class CanonicalMatrix:
 
     matrix: Any
     metadata: Mapping[str, Any]
-
-
-class _FieldHasher:
-    """Domain-separated, length-delimited streaming SHA-256 helper."""
-
-    def __init__(self, domain: bytes):
-        self._hasher = hashlib.sha256()
-        self.add_bytes("domain", domain)
-
-    def add_bytes(self, name: str, payload: Any) -> None:
-        """Hash one named bytes-like payload without materializing a copy."""
-        name_bytes = name.encode("utf-8")
-        view = memoryview(payload).cast("B")
-        self._hasher.update(struct.pack("<Q", len(name_bytes)))
-        self._hasher.update(name_bytes)
-        self._hasher.update(struct.pack("<Q", view.nbytes))
-        for start in range(0, view.nbytes, HASH_CHUNK_BYTES):
-            self._hasher.update(view[start:start + HASH_CHUNK_BYTES])
-
-    def add_int64_values(self, name: str, values: Any) -> None:
-        """Hash integers as fixed-width little-endian chunks."""
-        array = np.asarray(values)
-        n_values = int(array.size)
-        name_bytes = name.encode("utf-8")
-        self._hasher.update(struct.pack("<Q", len(name_bytes)))
-        self._hasher.update(name_bytes)
-        self._hasher.update(struct.pack("<Q", n_values * 8))
-        values_per_chunk = max(1, HASH_CHUNK_BYTES // 8)
-        flat = array.reshape(-1)
-        for start in range(0, n_values, values_per_chunk):
-            chunk = np.asarray(
-                flat[start:start + values_per_chunk],
-                dtype="<i8",
-                order="C",
-            )
-            self._hasher.update(memoryview(chunk).cast("B"))
-
-    def hexdigest(self) -> str:
-        """Return the final hexadecimal digest."""
-        return self._hasher.hexdigest()
 
 
 def _is_little_endian(dtype: np.dtype[Any]) -> bool:
@@ -88,12 +49,42 @@ def canonicalize_matrix(matrix: Any) -> Any:
     if sparse.issparse(matrix):
         canonical = matrix.tocsr(copy=False)
         _require_numeric_matrix_dtype(canonical.dtype)
-        if not _is_little_endian(canonical.dtype):
-            canonical = canonical.astype(
-                canonical.dtype.newbyteorder("<"), copy=True)
-        canonical.sum_duplicates()
-        canonical.sort_indices()
-        canonical.eliminate_zeros()
+        has_explicit_zeros = np.count_nonzero(canonical.data) != canonical.nnz
+        needs_cleanup = (
+            not canonical.has_canonical_format
+            or not canonical.has_sorted_indices
+            or has_explicit_zeros
+        )
+        writable = all(
+            values.flags.writeable
+            for values in (
+                canonical.data,
+                canonical.indices,
+                canonical.indptr,
+            )
+        )
+        if needs_cleanup:
+            if not writable:
+                canonical = canonical.copy()
+            if not _is_little_endian(canonical.dtype):
+                canonical = canonical.astype(
+                    canonical.dtype.newbyteorder("<"), copy=True)
+            canonical.sum_duplicates()
+            canonical.sort_indices()
+            canonical.eliminate_zeros()
+        if (
+            not _is_little_endian(canonical.dtype)
+            or not canonical.data.flags.c_contiguous
+        ):
+            data = np.ascontiguousarray(
+                canonical.data.astype(
+                    canonical.dtype.newbyteorder("<"), copy=False)
+            )
+            canonical = sparse.csr_matrix(
+                (data, canonical.indices, canonical.indptr),
+                shape=canonical.shape,
+                copy=False,
+            )
         return canonical
 
     canonical = np.asarray(matrix)
@@ -117,13 +108,16 @@ def matrix_sha256(matrix: Any) -> str:
     if sparse.issparse(matrix):
         if not sparse.isspmatrix_csr(matrix):
             raise ValueError("Sparse matrix hashing requires canonical CSR.")
+        _require_numeric_matrix_dtype(matrix.dtype)
         if not matrix.has_canonical_format or not matrix.has_sorted_indices:
             raise ValueError("Sparse matrix hashing requires canonical CSR.")
         if np.count_nonzero(matrix.data) != matrix.nnz:
             raise ValueError("Sparse matrix hashing forbids explicit zeros.")
         if not _is_little_endian(matrix.dtype):
             raise ValueError("Sparse matrix hashing requires little-endian data.")
-        hasher = _FieldHasher(MATRIX_HASH_DOMAIN)
+        if not matrix.data.flags.c_contiguous:
+            raise ValueError("Sparse matrix hashing requires contiguous data.")
+        hasher = LengthDelimitedHasher(MATRIX_HASH_DOMAIN)
         hasher.add_bytes("format", b"csr")
         hasher.add_bytes(
             "dtype", _canonical_dtype_name(matrix.dtype).encode("ascii"))
@@ -136,21 +130,22 @@ def matrix_sha256(matrix: Any) -> str:
     array = np.asarray(matrix)
     if array.ndim != 2 or not array.flags.c_contiguous:
         raise ValueError("Dense matrix hashing requires C-contiguous storage.")
+    _require_numeric_matrix_dtype(array.dtype)
     if not _is_little_endian(array.dtype):
         raise ValueError("Dense matrix hashing requires little-endian data.")
-    hasher = _FieldHasher(MATRIX_HASH_DOMAIN)
+    hasher = LengthDelimitedHasher(MATRIX_HASH_DOMAIN)
     hasher.add_bytes("format", b"dense")
     hasher.add_bytes(
         "dtype", _canonical_dtype_name(array.dtype).encode("ascii"))
     hasher.add_int64_values("shape", array.shape)
-    hasher.add_bytes("data", memoryview(array).cast("B"))
+    hasher.add_bytes("data", memoryview(array.reshape(-1)).cast("B"))
     return hasher.hexdigest()
 
 
 def stable_row_identities(
     examples: pd.DataFrame,
     task_example_id_columns: Sequence[str],
-) -> tuple[str, list[Any]]:
+) -> tuple[str, pd.Series]:
     candidates = ("source_row_index", *task_example_id_columns)
     for column in candidates:
         if column not in examples.columns:
@@ -164,7 +159,7 @@ def stable_row_identities(
             raise ValueError(
                 f"Stable matrix row identity {column!r} must be unique."
             )
-        return column, values.tolist()
+        return column, values
     raise ValueError(
         "Matrix rows require unique source_row_index values or a unique "
         f"task example ID from {tuple(task_example_id_columns)!r}."
@@ -179,28 +174,20 @@ def row_identity_sha256(
     """Hash stable example identities in exact matrix-row order."""
     identity_kind, values = stable_row_identities(
         examples, task_example_id_columns)
-    hasher = _FieldHasher(ROW_HASH_DOMAIN)
+    hasher = LengthDelimitedHasher(ROW_HASH_DOMAIN)
     hasher.add_bytes("identity_kind", identity_kind.encode("utf-8"))
     for value in values:
-        encoded = json.dumps(
-            value.item() if isinstance(value, np.generic) else value,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
+        encoded = canonical_json_bytes(
+            value.item() if isinstance(value, np.generic) else value
+        )
         hasher.add_bytes("row_identity", encoded)
     return identity_kind, hasher.hexdigest()
 
 
 def matrix_contract_sha256(contract: Mapping[str, Any]) -> str:
     """Hash a complete matrix construction contract."""
-    payload = json.dumps(
-        contract,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    hasher = _FieldHasher(CONTRACT_HASH_DOMAIN)
+    payload = canonical_json_bytes(contract)
+    hasher = LengthDelimitedHasher(CONTRACT_HASH_DOMAIN)
     hasher.add_bytes("contract", payload)
     return hasher.hexdigest()
 
@@ -227,7 +214,7 @@ def canonical_matrix(
         examples,
         task_example_id_columns=task_example_id_columns,
     )
-    contract = dict(construction_contract)
+    contract = canonical_json_snapshot(construction_contract)
     return CanonicalMatrix(
         matrix=canonical,
         metadata={
@@ -246,9 +233,9 @@ def canonical_matrix(
     )
 
 
-def matrix_records_by_contract(
+def matrix_records_by_source_split(
     matrices: Mapping[str, Mapping[str, Any]],
-) -> dict[tuple[str, str, str], Mapping[str, Any]]:
+) -> dict[tuple[str, str], Mapping[str, Any]]:
     """Index serialized matrix records for append compatibility checks."""
     indexed = {}
     for name, metadata in matrices.items():
@@ -257,7 +244,7 @@ def matrix_records_by_contract(
         split_name = metadata.get("split")
         if not contract_hash or not matrix_source or not split_name:
             continue
-        key = (str(matrix_source), str(split_name), str(contract_hash))
+        key = (str(matrix_source), str(split_name))
         if key in indexed and indexed[key] != metadata:
             raise ValueError(f"Duplicate incompatible matrix record {name!r}.")
         indexed[key] = metadata

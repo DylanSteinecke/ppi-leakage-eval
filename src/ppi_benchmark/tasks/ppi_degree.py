@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from ..artifact_io import write_dataframe_threadsafe
+from ..artifact_io import canonical_json_sha256, write_dataframe_threadsafe
 from ..evaluation import binary_classification_metrics
 from ..features import FeatureIdentity
 from ..matrix_provenance import canonicalize_matrix, stable_row_identities
@@ -232,13 +231,7 @@ def _native(value: Any) -> Any:
 
 def stable_json_sha256(value: Any) -> str:
     """Hash a JSON-compatible value using one canonical representation."""
-    encoded = json.dumps(
-        _native(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return canonical_json_sha256(_native(value))
 
 
 def training_degree_feature_specification() -> dict[str, Any]:
@@ -478,7 +471,7 @@ def build_training_degree_profile(
     validate_training_assignment_rows(train_df, split_assignments)
 
     exposure: dict[str, int] = {}
-    positive_partners: dict[str, set[str]] = {}
+    positive_degree: dict[str, int] = {}
     positive_edges: set[tuple[str, str]] = set()
     training_records = []
     for source_row_index, protein_a_raw, protein_b_raw, label_raw in zip(
@@ -498,10 +491,14 @@ def build_training_degree_profile(
         canonical = _canonical_pair(protein_a, protein_b)
         for protein_id in set(canonical):
             exposure[protein_id] = exposure.get(protein_id, 0) + 1
-        if label == 1:
+        if label == 1 and canonical not in positive_edges:
             positive_edges.add(canonical)
-            positive_partners.setdefault(protein_a, set()).add(protein_b)
-            positive_partners.setdefault(protein_b, set()).add(protein_a)
+            positive_degree[canonical[0]] = (
+                positive_degree.get(canonical[0], 0) + 1
+            )
+            positive_degree[canonical[1]] = (
+                positive_degree.get(canonical[1], 0) + 1
+            )
         training_records.append({
             SOURCE_ROW_INDEX_COLUMN: _native(source_row_index),
             "protein_a": canonical[0],
@@ -509,10 +506,7 @@ def build_training_degree_profile(
             "target": label,
         })
 
-    degree = {
-        protein_id: len(partners)
-        for protein_id, partners in sorted(positive_partners.items())
-    }
+    degree = dict(sorted(positive_degree.items()))
     degree_cutoffs = _quantile_cutoffs(
         [value for value in degree.values() if value > 0],
         quantile_values,
@@ -987,6 +981,8 @@ def build_degree_evaluation_plan(
     examples: pd.DataFrame,
     profile: TrainingDegreeProfile,
     split_strategy: str,
+    *,
+    cohort_sha256: str | None = None,
 ) -> DegreeEvaluationPlan:
     """Prepare cohort degree annotations once for reuse by every model."""
     targets = examples["label"].to_numpy(dtype=int)
@@ -998,7 +994,11 @@ def build_degree_evaluation_plan(
         targets=targets,
         preferential_attachment_scores=scores,
         strata=_degree_strata(examples, profile, split_strategy),
-        cohort_sha256=evaluation_cohort_sha256(examples),
+        cohort_sha256=(
+            evaluation_cohort_sha256(examples)
+            if cohort_sha256 is None
+            else cohort_sha256
+        ),
     )
 
 

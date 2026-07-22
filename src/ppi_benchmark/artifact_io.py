@@ -2,11 +2,77 @@
 
 import fcntl
 import hashlib
+import json
+import struct
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
+import numpy as np
 import pandas as pd
+
+
+HASH_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+class LengthDelimitedHasher:
+    """Domain-separated, length-delimited streaming SHA-256 helper."""
+
+    def __init__(self, domain: bytes):
+        self._hasher = hashlib.sha256()
+        self.add_bytes("domain", domain)
+
+    def add_bytes(self, name: str, payload: Any) -> None:
+        """Hash one named contiguous bytes-like payload without copying."""
+        name_bytes = name.encode("utf-8")
+        view = memoryview(payload).cast("B")
+        self._hasher.update(struct.pack("<Q", len(name_bytes)))
+        self._hasher.update(name_bytes)
+        self._hasher.update(struct.pack("<Q", view.nbytes))
+        for start in range(0, view.nbytes, HASH_CHUNK_BYTES):
+            self._hasher.update(view[start:start + HASH_CHUNK_BYTES])
+
+    def add_int64_values(self, name: str, values: Any) -> None:
+        """Hash integers as fixed-width little-endian bounded chunks."""
+        array = np.asarray(values)
+        n_values = int(array.size)
+        name_bytes = name.encode("utf-8")
+        self._hasher.update(struct.pack("<Q", len(name_bytes)))
+        self._hasher.update(name_bytes)
+        self._hasher.update(struct.pack("<Q", n_values * 8))
+        values_per_chunk = max(1, HASH_CHUNK_BYTES // 8)
+        flat = array.reshape(-1)
+        for start in range(0, n_values, values_per_chunk):
+            chunk = np.asarray(
+                flat[start:start + values_per_chunk],
+                dtype="<i8",
+                order="C",
+            )
+            self._hasher.update(memoryview(chunk).cast("B"))
+
+    def hexdigest(self) -> str:
+        """Return the final hexadecimal digest."""
+        return self._hasher.hexdigest()
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize a JSON-compatible value canonically."""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def canonical_json_snapshot(value: Any) -> Any:
+    """Return a detached JSON-compatible snapshot with stable key order."""
+    return json.loads(canonical_json_bytes(value))
+
+
+def canonical_json_sha256(value: Any) -> str:
+    """Hash a JSON-compatible value using its canonical serialization."""
+    return bytes_sha256(canonical_json_bytes(value))
 
 
 def bytes_sha256(data: bytes) -> str:

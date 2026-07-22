@@ -45,6 +45,13 @@ def test_dense_canonicalization_is_stable_and_avoids_recopying():
     assert matrix_sha256(canonical) != matrix_sha256(changed)
 
 
+@pytest.mark.parametrize("shape", ((0, 3), (2, 0), (0, 0)))
+def test_empty_dense_matrices_have_stable_hashes(shape):
+    matrix = np.empty(shape, dtype="<f8")
+
+    assert matrix_sha256(matrix) == matrix_sha256(matrix.copy())
+
+
 def test_sparse_canonicalization_and_hashing_do_not_densify(monkeypatch):
     noncanonical = sparse.coo_matrix((
         np.asarray([1.0, 2.0, -3.0, 4.0, 0.0]),
@@ -73,6 +80,44 @@ def test_sparse_canonicalization_and_hashing_do_not_densify(monkeypatch):
     changed = equivalent.copy()
     changed.data[0] = 5.0
     assert matrix_sha256(canonical) != matrix_sha256(changed)
+
+
+def test_sparse_canonicalization_handles_strided_and_read_only_storage():
+    backing = np.asarray([1.0, 99.0, 2.0, 99.0])
+    strided = sparse.csr_matrix(
+        (
+            backing[::2],
+            np.asarray([0, 1], dtype=np.int32),
+            np.asarray([0, 1, 2], dtype=np.int32),
+        ),
+        shape=(2, 2),
+        copy=False,
+    )
+    assert not strided.data.flags.c_contiguous
+
+    canonical = canonicalize_matrix(strided)
+
+    assert canonical.data.flags.c_contiguous
+    assert matrix_sha256(canonical) == matrix_sha256(
+        sparse.csr_matrix(np.diag([1.0, 2.0]))
+    )
+
+    read_only = sparse.csr_matrix(
+        (
+            np.asarray([1.0, 0.0, 2.0]),
+            np.asarray([0, 1, 1], dtype=np.int32),
+            np.asarray([0, 2, 3], dtype=np.int32),
+        ),
+        shape=(2, 2),
+    )
+    read_only.data.flags.writeable = False
+    read_only.indices.flags.writeable = False
+    read_only.indptr.flags.writeable = False
+
+    cleaned = canonicalize_matrix(read_only)
+
+    assert cleaned.nnz == 2
+    assert matrix_sha256(cleaned) == matrix_sha256(canonical)
 
 
 def test_row_identity_hash_requires_stable_unique_identifiers():
@@ -161,6 +206,28 @@ def test_canonical_matrix_records_contract_rows_and_non_persistence():
     assert artifact.metadata["matrix_persisted"] is False
 
 
+def test_canonical_matrix_snapshots_nested_contract_values():
+    contract = {"schema": {"columns": ["a", "b"]}}
+    artifact = canonical_matrix(
+        np.asarray([[1.0], [2.0]]),
+        examples(),
+        matrix_source="configured_features",
+        split_name="train",
+        matrix_schema_id="ppi.configured_features.v1",
+        pair_composition_schema_id="ppi.sum_absdiff_product.v1",
+        construction_contract=contract,
+        task_example_id_columns=("pair_id",),
+    )
+    original_hash = artifact.metadata["matrix_contract_sha256"]
+
+    contract["schema"]["columns"].append("changed")
+
+    assert artifact.metadata["matrix_contract"] == {
+        "schema": {"columns": ["a", "b"]}
+    }
+    assert artifact.metadata["matrix_contract_sha256"] == original_hash
+
+
 def test_append_rejects_changed_bytes_for_a_repeated_contract(tmp_path):
     output_path = tmp_path / "performance.jsonl"
     base_matrix = {
@@ -171,13 +238,18 @@ def test_append_rejects_changed_bytes_for_a_repeated_contract(tmp_path):
         "matrix_sha256": "values-a",
     }
     append_performance_report(
-        {"execution_id": "first", "matrices": {"train": base_matrix}},
+        {
+            "evaluation_schema_version": 2,
+            "execution_id": "first",
+            "matrices": {"train": base_matrix},
+        },
         output_path,
     )
 
     with pytest.raises(ValueError, match="different matrix_sha256"):
         append_performance_report(
             {
+                "evaluation_schema_version": 2,
                 "execution_id": "second",
                 "matrices": {
                     "train": {**base_matrix, "matrix_sha256": "values-b"}
@@ -186,20 +258,44 @@ def test_append_rejects_changed_bytes_for_a_repeated_contract(tmp_path):
             output_path,
         )
 
+    with pytest.raises(ValueError, match="different matrix_contract_sha256"):
+        append_performance_report(
+            {
+                "evaluation_schema_version": 2,
+                "execution_id": "different-contract",
+                "matrices": {
+                    "train": {
+                        **base_matrix,
+                        "matrix_contract_sha256": "another-contract",
+                        "matrix_sha256": "values-b",
+                    }
+                },
+            },
+            output_path,
+        )
+
     append_performance_report(
         {
-            "execution_id": "different-contract",
-            "matrices": {
-                "train": {
-                    **base_matrix,
-                    "matrix_contract_sha256": "another-contract",
-                    "matrix_sha256": "values-b",
-                }
-            },
+            "evaluation_schema_version": 2,
+            "execution_id": "same-matrix",
+            "matrices": {"train": base_matrix},
         },
         output_path,
     )
-    assert len(output_path.read_text(encoding="utf-8").splitlines()) == 2
-    assert json.loads(
-        output_path.read_text(encoding="utf-8").splitlines()[1]
-    )["execution_id"] == "different-contract"
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[1])["execution_id"] == "same-matrix"
+
+
+def test_append_rejects_mixed_evaluation_schemas(tmp_path):
+    output_path = tmp_path / "performance.jsonl"
+    append_performance_report(
+        {"evaluation_schema_version": 1, "matrices": {}},
+        output_path,
+    )
+
+    with pytest.raises(ValueError, match="schema versions differ"):
+        append_performance_report(
+            {"evaluation_schema_version": 2, "matrices": {}},
+            output_path,
+        )

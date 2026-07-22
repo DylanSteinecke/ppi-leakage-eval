@@ -440,6 +440,7 @@ def test_learned_model_reports_matrix_and_solver_performance(
     assert model_run["matrices"]["train"]["matrix_sha256"] == (
         train_matrix["matrix_sha256"]
     )
+    assert "matrix_contract" not in model_run["matrices"]["train"]
     assert model_run["fit_seconds"] > 0.0
     assert model_run["solver_iterations"]["maximum"] >= 1
     assert model_run["evaluation_seconds"]["train"] > 0.0
@@ -572,6 +573,18 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
     assert set(history["task"]) == {"ppi"}
     assert set(history["evaluation_schema_version"]) == {2}
     assert set(history["backend"]) == {"torch"}
+    assert set(history["feature_spec_sha256"]) == {
+        torch_metrics["feature_spec_sha256"]
+    }
+    assert set(history["fitted_extractor_sha256"]) == {
+        torch_metrics["fitted_extractor_sha256"]
+    }
+    assert set(history["matrix_schema_id"]) == {
+        "ppi.configured_features.v1"
+    }
+    assert set(history["pair_composition_schema_id"]) == {
+        "ppi.sum_absdiff_product.v1"
+    }
     assert history["validation_loss"].notna().all()
     assert history["validation_auprc"].notna().all()
     assert set(history["monitor_metric"]) == {"validation_auprc"}
@@ -1126,6 +1139,45 @@ def test_append_results_requires_identical_split(
         run_train(*changed_split, "--append-results")
 
     assert summary_path.read_bytes() == summary_before_failure
+
+
+def test_matrix_append_preflight_does_not_partially_mutate_outputs(
+        tmp_path, ppi_test_data, run_train):
+    pairs_path, fasta_path = ppi_test_data
+    run_dir = tmp_path / "matrix_preflight"
+    common_args = [
+        *base_cli_args(
+            pairs_path,
+            fasta_path,
+            run_dir,
+            classifier="sgd_logistic",
+        ),
+        "--features", "count",
+        "--no-metrics-plots",
+    ]
+    run_train(*common_args)
+
+    guarded_paths = [
+        run_dir / "train_metrics.csv",
+        run_dir / "test_metrics.csv",
+        run_dir / "predictions.csv",
+        run_dir / "train_metrics_summary.csv",
+        run_dir / "invocations.jsonl",
+    ]
+    before = {path: path.read_bytes() for path in guarded_paths}
+    performance_path = run_dir / "performance.jsonl"
+    report = json.loads(performance_path.read_text(encoding="utf-8"))
+    report["matrices"]["train"]["matrix_sha256"] = "0" * 64
+    performance_path.write_text(
+        json.dumps(report, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="different matrix_sha256"):
+        run_train(*common_args, "--append-results")
+
+    assert {path: path.read_bytes() for path in guarded_paths} == before
+    assert len(performance_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_append_results_rejects_changed_fasta_contents(

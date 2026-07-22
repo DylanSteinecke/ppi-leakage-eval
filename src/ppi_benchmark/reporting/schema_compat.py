@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..backends import plain_estimator_parameters
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..tasks.ppi_models import (
     CONTROL_GROUP,
@@ -43,7 +44,7 @@ def _legacy_identity(model_name: str) -> dict[str, Any]:
     return {
         "estimator_id": estimator_id,
         "estimator_params": json.dumps(
-            dict(spec.estimator_params),
+            plain_estimator_parameters(spec.estimator_params),
             sort_keys=True,
             separators=(",", ":"),
         ),
