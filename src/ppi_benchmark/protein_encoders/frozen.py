@@ -7,12 +7,78 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from ..artifact_io import LengthDelimitedHasher
 from .base import (
     ProteinEncoder,
+    SEQUENCE_NORMALIZATION_SCHEMA_ID,
+    encoder_identity_strength,
     normalize_protein_sequence,
     sequence_sha256,
 )
 from .cache import CachedEmbedding, EmbeddingCache
+
+
+UNIQUE_EMBEDDING_INPUTS_HASH_DOMAIN = (
+    b"protein-benchmark.unique-embedding-inputs.v1"
+)
+EMBEDDING_CONTRACT_HASH_DOMAIN = b"protein-benchmark.embedding-contract.v1"
+EMBEDDING_TABLE_HASH_DOMAIN = b"protein-benchmark.embedding-table.v1"
+
+
+def _embedding_hashes(
+    *,
+    sequence_hashes: Sequence[str],
+    records: Mapping[str, CachedEmbedding],
+    encoder_fingerprint: str,
+) -> tuple[str, str, str]:
+    """Hash unique inputs, the declared contract, and realized embeddings."""
+    inputs_hasher = LengthDelimitedHasher(
+        UNIQUE_EMBEDDING_INPUTS_HASH_DOMAIN)
+    inputs_hasher.add_bytes(
+        "sequence_normalization_schema_id",
+        SEQUENCE_NORMALIZATION_SCHEMA_ID.encode("utf-8"),
+    )
+    for sequence_hash in sequence_hashes:
+        inputs_hasher.add_bytes(
+            "sequence_sha256", sequence_hash.encode("ascii"))
+    unique_inputs_hash = inputs_hasher.hexdigest()
+
+    contract_hasher = LengthDelimitedHasher(EMBEDDING_CONTRACT_HASH_DOMAIN)
+    contract_hasher.add_bytes(
+        "encoder_fingerprint", encoder_fingerprint.encode("ascii"))
+    contract_hasher.add_bytes(
+        "sequence_normalization_schema_id",
+        SEQUENCE_NORMALIZATION_SCHEMA_ID.encode("utf-8"),
+    )
+    contract_hasher.add_bytes(
+        "unique_embedding_inputs_sha256",
+        unique_inputs_hash.encode("ascii"),
+    )
+
+    table_hasher = LengthDelimitedHasher(EMBEDDING_TABLE_HASH_DOMAIN)
+    table_hasher.add_bytes(
+        "sequence_normalization_schema_id",
+        SEQUENCE_NORMALIZATION_SCHEMA_ID.encode("utf-8"),
+    )
+    for sequence_hash in sequence_hashes:
+        record = records[sequence_hash]
+        embedding = np.asarray(record.embedding)
+        little_dtype = embedding.dtype.newbyteorder("<")
+        canonical = np.ascontiguousarray(
+            embedding.astype(little_dtype, copy=False))
+        table_hasher.add_bytes(
+            "sequence_sha256", sequence_hash.encode("ascii"))
+        table_hasher.add_int64_values(
+            "sequence_length", (record.sequence_length,))
+        table_hasher.add_bytes("dtype", little_dtype.str.encode("ascii"))
+        table_hasher.add_int64_values("shape", canonical.shape)
+        table_hasher.add_bytes(
+            "embedding", memoryview(canonical.reshape(-1)).cast("B"))
+    return (
+        unique_inputs_hash,
+        contract_hasher.hexdigest(),
+        table_hasher.hexdigest(),
+    )
 
 
 @dataclass(frozen=True)
@@ -242,9 +308,25 @@ class FrozenProteinEncoder:
         embeddings = np.stack(embedding_rows)
         n_unique_sequences = len(sequence_hashes)
         cache_misses = len(missing_hashes)
+        (
+            unique_inputs_hash,
+            embedding_contract_hash,
+            embedding_table_hash,
+        ) = _embedding_hashes(
+            sequence_hashes=sequence_hashes,
+            records=cached,
+            encoder_fingerprint=self.encoder.spec.fingerprint,
+        )
         metadata: dict[str, object] = {
             "encoder_fingerprint": self.encoder.spec.fingerprint,
             "encoder_spec": self.encoder.spec.to_dict(),
+            "encoder_identity_strength": encoder_identity_strength(
+                self.encoder.spec),
+            "sequence_normalization_schema_id": (
+                SEQUENCE_NORMALIZATION_SCHEMA_ID),
+            "unique_embedding_inputs_sha256": unique_inputs_hash,
+            "embedding_contract_sha256": embedding_contract_hash,
+            "embedding_table_sha256": embedding_table_hash,
             "embedding_cache_path": str(self.cache.path),
             "n_proteins": len(selected_ids),
             "n_unique_sequences": n_unique_sequences,

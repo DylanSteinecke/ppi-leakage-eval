@@ -9,8 +9,10 @@ from typing import Any
 import pandas as pd
 
 from ..backends import plain_estimator_parameters
+from ..matrix_provenance import nested_matrix_records
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..tasks.ppi_models import (
+    CONFIGURED_FEATURE_MATRIX,
     CONTROL_GROUP,
     LEGACY_CLASSIFIER_ESTIMATOR_IDS,
     TRAINING_DEGREE_MATRIX,
@@ -19,6 +21,24 @@ from ..tasks.ppi_models import (
 
 
 PREFERENTIAL_ATTACHMENT_MODEL = "preferential_attachment"
+LEGACY_MATRIX_NAMES = {
+    **{
+        split: (CONFIGURED_FEATURE_MATRIX, split)
+        for split in ("train", "val", "test")
+    },
+    **{
+        f"degree_{split}": (TRAINING_DEGREE_MATRIX, split)
+        for split in ("train", "val", "test")
+    },
+}
+MATRIX_PROVENANCE_FIELDS = (
+    "matrix_schema_id",
+    "pair_composition_schema_id",
+    "matrix_contract_sha256",
+    "row_identity_sha256",
+    "matrix_sha256",
+    "matrix_persisted",
+)
 
 
 def _source_label(source: str | Path | None) -> str:
@@ -53,13 +73,55 @@ def _legacy_identity(model_name: str) -> dict[str, Any]:
     }
 
 
+def normalize_performance_matrices(
+    matrices: dict[str, Any],
+    *,
+    schema_version: int,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Normalize PPI performance matrices from schemas v1, v2, or v3."""
+    if schema_version == 1:
+        normalized: dict[str, dict[str, dict[str, Any]]] = {}
+        for legacy_name, raw_record in matrices.items():
+            if legacy_name not in LEGACY_MATRIX_NAMES:
+                raise ValueError(
+                    f"Unknown schema-v1 matrix record {legacy_name!r}."
+                )
+            if not isinstance(raw_record, dict):
+                raise ValueError(
+                    f"Schema-v1 matrix record {legacy_name!r} must be an "
+                    "object."
+                )
+            matrix_source, split_name = LEGACY_MATRIX_NAMES[legacy_name]
+            record = dict(raw_record)
+            record["matrix_source"] = matrix_source
+            record["split"] = split_name
+            for field in MATRIX_PROVENANCE_FIELDS:
+                record.setdefault(field, None)
+            normalized.setdefault(matrix_source, {})[split_name] = record
+        return normalized
+    if schema_version in {2, 3}:
+        return {
+            source: {
+                split: dict(record)
+                for split, record in split_records.items()
+            }
+            for source, split_records in nested_matrix_records(
+                matrices,
+                schema_version=schema_version,
+            ).items()
+        }
+    raise ValueError(
+        f"Unsupported evaluation schema version {schema_version}."
+    )
+
+
 def normalize_evaluation_frame(
     frame: pd.DataFrame,
     *,
     source: str | Path | None = None,
     allow_missing_version: bool = False,
 ) -> pd.DataFrame:
-    """Return schema-v2 identities for a schema-v1 or schema-v2 table."""
+    """Normalize schema-v1, schema-v2, or current evaluation tables."""
     if frame.empty:
         return frame.copy()
     normalized = frame.copy()
@@ -81,11 +143,34 @@ def normalize_evaluation_frame(
             f"{sorted(versions)}."
         )
     version = versions.pop()
-    if version == EVALUATION_SCHEMA_VERSION:
+    if version in {2, EVALUATION_SCHEMA_VERSION}:
         if "classifier" in normalized.columns:
             raise ValueError(
                 f"Schema-v{version} {_source_label(source)} must not contain "
                 "the legacy classifier field."
+            )
+        required = {
+            "model_name",
+            "estimator_id",
+            "configuration_id",
+            "matrix_source",
+        }
+        if version == EVALUATION_SCHEMA_VERSION:
+            required.update({
+                "estimator_params",
+                "feature_spec_sha256",
+                "feature_identity",
+                "fitted_extractor_sha256",
+                "features",
+                "matrix_schema_id",
+                "pair_composition_schema_id",
+                "reporting_group",
+            })
+        missing = required - set(normalized.columns)
+        if missing:
+            raise ValueError(
+                f"Schema-v{version} {_source_label(source)} lacks columns: "
+                f"{sorted(missing)}."
             )
         return normalized
     if version != 1:

@@ -1,5 +1,3 @@
-import json
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,10 +7,15 @@ from ppi_benchmark.matrix_provenance import (
     canonical_matrix,
     canonicalize_matrix,
     matrix_contract_sha256,
+    matrix_records_by_source_split,
     matrix_sha256,
+    nested_matrix_records,
     row_identity_sha256,
 )
-from ppi_benchmark.reporting.performance import append_performance_report
+from ppi_benchmark.reporting.schema_compat import (
+    normalize_performance_matrices,
+)
+from ppi_benchmark.reporting.performance import write_performance_report
 
 
 def examples():
@@ -228,7 +231,7 @@ def test_canonical_matrix_snapshots_nested_contract_values():
     assert artifact.metadata["matrix_contract_sha256"] == original_hash
 
 
-def test_append_rejects_changed_bytes_for_a_repeated_contract(tmp_path):
+def test_performance_writer_rejects_reusing_an_immutable_output(tmp_path):
     output_path = tmp_path / "performance.jsonl"
     base_matrix = {
         "matrix_source": "configured_features",
@@ -237,65 +240,71 @@ def test_append_rejects_changed_bytes_for_a_repeated_contract(tmp_path):
         "row_identity_sha256": "rows",
         "matrix_sha256": "values-a",
     }
-    append_performance_report(
+    write_performance_report(
         {
-            "evaluation_schema_version": 2,
+            "evaluation_schema_version": 3,
             "execution_id": "first",
-            "matrices": {"train": base_matrix},
+            "matrices": {"configured_features": {"train": base_matrix}},
         },
         output_path,
     )
 
-    with pytest.raises(ValueError, match="different matrix_sha256"):
-        append_performance_report(
+    with pytest.raises(ValueError, match="already exists"):
+        write_performance_report(
             {
-                "evaluation_schema_version": 2,
+                "evaluation_schema_version": 3,
                 "execution_id": "second",
-                "matrices": {
-                    "train": {**base_matrix, "matrix_sha256": "values-b"}
-                },
+                "matrices": {},
             },
             output_path,
         )
+    assert len(output_path.read_text(encoding="utf-8").splitlines()) == 1
 
-    with pytest.raises(ValueError, match="different matrix_contract_sha256"):
-        append_performance_report(
-            {
-                "evaluation_schema_version": 2,
-                "execution_id": "different-contract",
-                "matrices": {
-                    "train": {
-                        **base_matrix,
-                        "matrix_contract_sha256": "another-contract",
-                        "matrix_sha256": "values-b",
-                    }
-                },
-            },
-            output_path,
-        )
 
-    append_performance_report(
+def test_matrix_record_normalization_handles_schema_v2_and_v3():
+    record = {
+        "matrix_source": "configured_features",
+        "split": "train",
+        "matrix_contract_sha256": "contract",
+        "row_identity_sha256": "rows",
+        "matrix_sha256": "values",
+    }
+    flat = {"train": record}
+    nested = {"configured_features": {"train": record}}
+
+    assert matrix_records_by_source_split(flat, schema_version=2) == {
+        ("configured_features", "train"): record
+    }
+    assert matrix_records_by_source_split(nested, schema_version=3) == {
+        ("configured_features", "train"): record
+    }
+    assert nested_matrix_records(flat, schema_version=2) == nested
+
+
+def test_schema_v1_matrix_normalization_infers_legacy_names():
+    normalized = normalize_performance_matrices(
         {
-            "evaluation_schema_version": 2,
-            "execution_id": "same-matrix",
-            "matrices": {"train": base_matrix},
+            "degree_train": {"shape": [4, 3]},
+            "val": {"shape": [2, 12]},
         },
-        output_path,
-    )
-    lines = output_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2
-    assert json.loads(lines[1])["execution_id"] == "same-matrix"
-
-
-def test_append_rejects_mixed_evaluation_schemas(tmp_path):
-    output_path = tmp_path / "performance.jsonl"
-    append_performance_report(
-        {"evaluation_schema_version": 1, "matrices": {}},
-        output_path,
+        schema_version=1,
     )
 
-    with pytest.raises(ValueError, match="schema versions differ"):
-        append_performance_report(
-            {"evaluation_schema_version": 2, "matrices": {}},
-            output_path,
+    degree = normalized["training_degree"]["train"]
+    configured = normalized["configured_features"]["val"]
+    assert degree["matrix_source"] == "training_degree"
+    assert degree["split"] == "train"
+    assert degree["matrix_sha256"] is None
+    assert configured["matrix_source"] == "configured_features"
+    assert configured["split"] == "val"
+    assert configured["matrix_contract_sha256"] is None
+
+
+def test_matrix_normalization_rejects_invalid_version_or_missing_v2_keys():
+    with pytest.raises(ValueError, match="matrix_source and split"):
+        normalize_performance_matrices(
+            {"train": {"shape": [4, 3]}},
+            schema_version=2,
         )
+    with pytest.raises(ValueError, match="Unsupported evaluation schema"):
+        normalize_performance_matrices({}, schema_version=4)

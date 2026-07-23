@@ -7,10 +7,10 @@ from scipy.sparse import csr_matrix
 
 from ppi_benchmark.reporting.performance import (
     PerformanceTracker,
-    append_performance_report,
     matrix_statistics,
     peak_memory_bytes,
     solver_iteration_report,
+    write_performance_report,
 )
 
 
@@ -67,15 +67,15 @@ def test_tracker_and_jsonl_writer_report_invocation_resources(tmp_path):
 
     report = tracker.report("execution-1", task="ppi")
     output_path = tmp_path / "performance.jsonl"
-    append_performance_report(report, output_path)
+    write_performance_report(report, output_path)
     written = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert written["execution_id"] == "execution-1"
-    assert written["evaluation_schema_version"] == 2
+    assert written["evaluation_schema_version"] == 3
     assert written["task"] == "ppi"
     assert written["total_seconds"] >= written["stages_seconds"][
         "example_stage"]
     assert written["stages_seconds"]["example_stage"] > 0.0
-    assert written["matrices"]["train"]["density"] == 1.0
+    assert written["matrices"]["unspecified"]["train"]["density"] == 1.0
     assert written["model_runs"][0]["fit_seconds"] == 0.1
     assert 0 < written["peak_memory_bytes"] <= peak_memory_bytes()

@@ -619,23 +619,8 @@ def build_training_degree_profile(
 def write_training_degree_profile(
     profile: TrainingDegreeProfile,
     output_path: Path,
-    append_results: bool,
 ) -> None:
-    """Write the training-only profile or validate append compatibility."""
-    if append_results and output_path.exists():
-        existing = pd.read_csv(output_path)
-        try:
-            pd.testing.assert_frame_equal(
-                existing,
-                profile.frame,
-                check_dtype=False,
-            )
-        except AssertionError as exc:
-            raise ValueError(
-                f"Cannot append to {output_path.parent.parent}: existing "
-                "training_positive_degree.csv does not match this split."
-            ) from exc
-        return
+    """Write the training-only profile for one immutable run."""
     write_dataframe_threadsafe(profile.frame, output_path)
 
 

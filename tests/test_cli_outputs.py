@@ -315,14 +315,28 @@ def test_cli_with_run_dir_writes_no_validation_outputs(
     } <= set(predictions.columns)
     performance = json.loads(
         (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
+    fingerprint = json.loads(
+        (run_dir / "run_fingerprint.json").read_text(encoding="utf-8")
+    )
     train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
-    assert performance["evaluation_schema_version"] == 2
+    assert performance["evaluation_schema_version"] == 3
     assert performance["task"] == "ppi"
     assert performance["total_seconds"] > 0.0
     assert performance["peak_memory_bytes"] > 0
     assert performance["matrices"] == {}
     assert performance["model_runs"][0]["solver_iterations"] is None
     assert performance["runtime_provenance"]["packages"]["numpy"]
+    assert fingerprint["schema_version"] == 1
+    assert fingerprint["payload"]["identity"]["task"] == {
+        "task_id": "ppi",
+        "task_schema_version": 1,
+    }
+    protocol_instances = fingerprint["payload"]["identity"][
+        "run_contract"
+    ]["protocols"]["ppi.random_pair.v1"]
+    protocol_instance = next(iter(protocol_instances.values()))
+    assert protocol_instance["split_col"] is None
+    assert protocol_instance["candidate_trial_count"] == 100
     assert "classifier" not in train_metrics.columns
     assert train_metrics.loc[0, "model_name"] == "always_positive"
     assert train_metrics.loc[0, "estimator_id"] == "constant"
@@ -388,9 +402,9 @@ def test_default_generated_split_is_true_train_val_test(
     val_metrics = pd.read_csv(run_dir / "val_metrics.csv")
     assert set(train_metrics["task"]) == {"ppi"}
     assert set(val_metrics["task"]) == {"ppi"}
-    assert set(train_metrics["evaluation_schema_version"]) == {2}
+    assert set(train_metrics["evaluation_schema_version"]) == {3}
     assert metadata["task"] == "ppi"
-    assert metadata["evaluation_schema_version"] == 2
+    assert metadata["evaluation_schema_version"] == 3
     assert metadata["target_train_size"] == pytest.approx(0.8)
     assert metadata["target_val_size"] == pytest.approx(0.1)
     assert metadata["target_test_size"] == pytest.approx(0.1)
@@ -413,7 +427,9 @@ def test_learned_model_reports_matrix_and_solver_performance(
 
     performance = json.loads(
         (run_dir / "performance.jsonl").read_text(encoding="utf-8"))
-    train_matrix = performance["matrices"]["train"]
+    train_matrix = performance["matrices"][
+        "configured_features"
+    ]["train"]
     model_run = performance["model_runs"][0]
     train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
 
@@ -509,6 +525,24 @@ def test_mixed_matrix_sources_route_models_and_seed_policies(
             if value.endswith("__logistic")
         ),
     }
+    performance = json.loads(
+        (run_dir / "performance.jsonl").read_text(encoding="utf-8")
+    )
+    assert set(performance["matrices"]) == {
+        "training_degree", "configured_features",
+    }
+    assert set(performance["matrices"]["training_degree"]) == {
+        "train", "test",
+    }
+    assert set(performance["matrices"]["configured_features"]) == {
+        "train", "test",
+    }
+    fingerprint = json.loads(
+        (run_dir / "run_fingerprint.json").read_text(encoding="utf-8")
+    )
+    assert set(fingerprint["payload"]["identity"]["matrices"]) == {
+        "training_degree", "configured_features",
+    }
 
 
 def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
@@ -571,7 +605,7 @@ def test_torch_mlp_writes_history_checkpoint_and_all_benchmark_outputs(
 
     assert history["epoch"].tolist() == [1, 2]
     assert set(history["task"]) == {"ppi"}
-    assert set(history["evaluation_schema_version"]) == {2}
+    assert set(history["evaluation_schema_version"]) == {3}
     assert set(history["backend"]) == {"torch"}
     assert set(history["feature_spec_sha256"]) == {
         torch_metrics["feature_spec_sha256"]
@@ -749,12 +783,26 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     assert first_metadata["n_unique_sequences"] == 10
     assert first_metadata["cache_hits"] == 0
     assert first_metadata["cache_misses"] == 10
+    assert first_metadata["encoder_identity_strength"] == (
+        "declared_local_revision"
+    )
+    for hash_field in (
+        "unique_embedding_inputs_sha256",
+        "embedding_contract_sha256",
+        "embedding_table_sha256",
+    ):
+        assert len(first_metadata[hash_field]) == 64
     assert first_metadata["model_loaded_for_cache_misses"] is True
     assert first_metadata["model_released_after_encoding"] is True
-    assert set(first_performance["matrices"]) == {"train", "val"}
+    assert set(first_performance["matrices"]) == {"configured_features"}
+    assert set(first_performance["matrices"]["configured_features"]) == {
+        "train", "val",
+    }
     assert first_performance["observations"]["protein_encoder"] == (
         first_metadata)
-    plm_train_matrix = first_performance["matrices"]["train"]
+    plm_train_matrix = first_performance["matrices"][
+        "configured_features"
+    ]["train"]
     assert plm_train_matrix["matrix_contract"]["encoder_fingerprint"] == (
         first_metadata["encoder_fingerprint"]
     )
@@ -792,6 +840,15 @@ def test_frozen_plm_cli_caches_the_cohort_and_reuses_it_across_splits(
     assert second_metadata["cache_misses"] == 0
     assert second_metadata["encoded_batches"] == 0
     assert second_metadata["model_loaded_for_cache_misses"] is False
+    assert second_metadata["unique_embedding_inputs_sha256"] == (
+        first_metadata["unique_embedding_inputs_sha256"]
+    )
+    assert second_metadata["embedding_contract_sha256"] == (
+        first_metadata["embedding_contract_sha256"]
+    )
+    assert second_metadata["embedding_table_sha256"] == (
+        first_metadata["embedding_table_sha256"]
+    )
 
 
     # Freeze the first assignment, then change only held-out labels. Neither
@@ -979,7 +1036,7 @@ def test_cli_samples_the_whole_cohort_before_splitting(
         selection_path)
 
 
-def test_cli_sampling_append_requires_the_same_selection(
+def test_cli_sampling_run_directory_is_immutable(
         tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "sample_append"
@@ -991,14 +1048,11 @@ def test_cli_sampling_append_requires_the_same_selection(
     ]
 
     run_train(*common_args)
-    run_train(*common_args, "--append-results")
-    changed_selection = common_args.copy()
-    changed_selection[changed_selection.index("--sampling-seed") + 1] = "18"
-    with pytest.raises(
-            SystemExit,
-            match=r"selected_examples\.csv does not match",
-        ):
-        run_train(*changed_selection, "--append-results")
+    selection_path = run_dir / "sampling" / "selected_examples.csv"
+    selection_before = selection_path.read_bytes()
+    with pytest.raises(SystemExit, match="Run directory is not empty"):
+        run_train(*common_args)
+    assert selection_path.read_bytes() == selection_before
 
 
 def test_cli_rejects_two_sampling_size_options(
@@ -1119,123 +1173,41 @@ def test_validation_with_eval_test_set_writes_train_val_test_outputs(
     assert "predictions_path" in metadata
 
 
-def test_append_results_requires_identical_split(
-        tmp_path, ppi_test_data, run_train):
+def test_removed_append_results_flag_is_rejected(
+        tmp_path, ppi_test_data, capsys):
     pairs_path, fasta_path = ppi_test_data
-    run_dir = tmp_path / "append_run"
-    common_args = [
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        "--no-metrics-plots",
-    ]
-
-    run_train(*common_args)
-    run_train(*common_args, "--append-results")
-    summary_path = run_dir / "train_metrics_summary.csv"
-    summary_before_failure = summary_path.read_bytes()
-
-    changed_split = common_args.copy()
-    changed_split[changed_split.index("--split-seed") + 1] = "12"
-    with pytest.raises(SystemExit, match="different split"):
-        run_train(*changed_split, "--append-results")
-
-    assert summary_path.read_bytes() == summary_before_failure
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            *base_cli_args(pairs_path, fasta_path, tmp_path / "removed"),
+            "--append-results",
+        )
+    assert error.value.code == 2
+    assert "unrecognized arguments: --append-results" in capsys.readouterr().err
 
 
-def test_matrix_append_preflight_does_not_partially_mutate_outputs(
-        tmp_path, ppi_test_data, run_train):
+def test_embedding_cache_must_be_outside_immutable_run(
+        tmp_path, ppi_test_data, monkeypatch, capsys):
     pairs_path, fasta_path = ppi_test_data
-    run_dir = tmp_path / "matrix_preflight"
-    common_args = [
-        *base_cli_args(
-            pairs_path,
-            fasta_path,
-            run_dir,
-            classifier="sgd_logistic",
-        ),
-        "--features", "count",
-        "--no-metrics-plots",
-    ]
-    run_train(*common_args)
-
-    guarded_paths = [
-        run_dir / "train_metrics.csv",
-        run_dir / "test_metrics.csv",
-        run_dir / "predictions.csv",
-        run_dir / "train_metrics_summary.csv",
-        run_dir / "invocations.jsonl",
-    ]
-    before = {path: path.read_bytes() for path in guarded_paths}
-    performance_path = run_dir / "performance.jsonl"
-    report = json.loads(performance_path.read_text(encoding="utf-8"))
-    report["matrices"]["train"]["matrix_sha256"] = "0" * 64
-    performance_path.write_text(
-        json.dumps(report, sort_keys=True) + "\n",
-        encoding="utf-8",
+    run_dir = tmp_path / "run"
+    monkeypatch.setenv(
+        "PROTEIN_BENCHMARK_EMBEDDING_CACHE_DIR",
+        str(run_dir / "embedding-cache"),
     )
 
-    with pytest.raises(SystemExit, match="different matrix_sha256"):
-        run_train(*common_args, "--append-results")
+    with pytest.raises(SystemExit) as error:
+        parse_cli_args(
+            *base_cli_args(
+                pairs_path, fasta_path, run_dir, classifier="logistic"
+            ),
+            "--features", "plm",
+            "--plm-revision", "a" * 40,
+        )
 
-    assert {path: path.read_bytes() for path in guarded_paths} == before
-    assert len(performance_path.read_text(encoding="utf-8").splitlines()) == 1
-
-
-def test_append_results_rejects_changed_fasta_contents(
-        tmp_path, ppi_test_data, run_train):
-    pairs_path, fasta_path = ppi_test_data
-    run_dir = tmp_path / "append_changed_fasta"
-    common_args = [
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        "--no-metrics-plots",
-    ]
-    run_train(*common_args)
-    summary_path = run_dir / "train_metrics_summary.csv"
-    summary_before_failure = summary_path.read_bytes()
-    changed_fasta_path = tmp_path / "changed_proteins.fasta"
-    changed_fasta_path.write_text(
-        fasta_path.read_text(encoding="utf-8").replace(
-            "ACDEFGHIKL",
-            "ACDEYGHIKL",
-        ),
-        encoding="utf-8",
-    )
-    changed_args = common_args.copy()
-    changed_args[changed_args.index("--fasta") + 1] = changed_fasta_path
-
-    with pytest.raises(SystemExit, match="input file contents changed"):
-        run_train(*changed_args, "--append-results")
-
-    assert summary_path.read_bytes() == summary_before_failure
+    assert error.value.code == 2
+    assert "must be outside --run-dir" in capsys.readouterr().err
 
 
-def test_append_results_rejects_changed_protein_metadata(
-        tmp_path, ppi_test_data, run_train):
-    pairs_path, fasta_path = ppi_test_data
-    protein_ids = sorted(
-        set(pd.read_csv(pairs_path)["protein_a"])
-        | set(pd.read_csv(pairs_path)["protein_b"])
-    )
-    protein_metadata_path = tmp_path / "taxa.csv"
-    pd.DataFrame({
-        "protein_id": protein_ids,
-        "taxon_id": ["1"] * len(protein_ids),
-    }).to_csv(protein_metadata_path, index=False)
-    run_dir = tmp_path / "append_changed_taxa"
-    common_args = [
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        "--protein-metadata", protein_metadata_path,
-        "--no-metrics-plots",
-    ]
-
-    run_train(*common_args)
-    protein_metadata = pd.read_csv(protein_metadata_path, dtype="string")
-    protein_metadata.loc[0, "taxon_id"] = "2"
-    protein_metadata.to_csv(protein_metadata_path, index=False)
-    with pytest.raises(SystemExit, match="protein_metadata_file_sha256"):
-        run_train(*common_args, "--append-results")
-
-
-def test_append_results_adds_model_rows_and_regenerates_summary(
+def test_one_invocation_runs_multiple_selected_classifiers(
         tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "append_success"
@@ -1250,11 +1222,9 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         "--no-metrics-plots",
     ]
 
-    run_train(*common_args, "--classifier", "always_positive")
     run_train(
         *common_args,
-        "--classifier", "always_negative",
-        "--append-results",
+        "--classifier", "always_positive", "always_negative",
     )
 
     train_metrics = pd.read_csv(run_dir / "train_metrics.csv")
@@ -1276,14 +1246,9 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         "always_positive",
         "always_negative",
     }
-    assert len(invocations) == 2
-    assert invocations[0]["append_results"] is False
-    assert invocations[1]["append_results"] is True
+    assert len(invocations) == 1
     assert invocations[0]["resolved_args"]["classifiers"] == [
-        "always_positive",
-    ]
-    assert invocations[1]["resolved_args"]["classifiers"] == [
-        "always_negative",
+        "always_positive", "always_negative",
     ]
     internal_degree_keys = {
         "degree_evaluation_cohort_sha256",
@@ -1292,7 +1257,7 @@ def test_append_results_adds_model_rows_and_regenerates_summary(
         "degree_protocol_version",
     }
     assert internal_degree_keys.isdisjoint(
-        invocations[1]["resolved_args"]
+        invocations[0]["resolved_args"]
     )
     pa_metrics = degree_metrics[
         degree_metrics["model_name"] == "preferential_attachment"
@@ -1453,53 +1418,7 @@ def test_dataset_metadata_rejects_malformed_negative_construction(
         )
 
 
-def test_append_results_rejects_changed_dataset_metadata(
-        tmp_path, ppi_test_data, run_train):
-    pairs_path, fasta_path = ppi_test_data
-    dataset_metadata_path = tmp_path / "dataset_metadata.json"
-    base_metadata = {
-        "output_pairs_path": str(pairs_path),
-        "working_directory": str(tmp_path),
-        "sampled_negatives": True,
-        "species_aware_sampling": True,
-        "negative_ratio": 1.0,
-        "seed": 3,
-    }
-    dataset_metadata_path.write_text(
-        json.dumps(base_metadata),
-        encoding="utf-8",
-    )
-    run_dir = tmp_path / "append_changed_dataset_metadata"
-    common_args = [
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        "--no-metrics-plots",
-    ]
-    run_train(*common_args)
-    split_metadata = json.loads(
-        (run_dir / "splits" / "split_metadata.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert (
-        split_metadata["negative_construction"]["policy"]
-        == "taxon_pair_matched"
-    )
-    assert split_metadata["negative_construction"]["seed"] == 3
-    assert (
-        split_metadata["dataset_metadata_pairs_binding"]
-        == "legacy_path_only"
-    )
-    base_metadata["seed"] = 4
-    dataset_metadata_path.write_text(
-        json.dumps(base_metadata),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit, match="dataset_metadata_file_sha256"):
-        run_train(*common_args, "--append-results")
-
-
-def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
+def test_completed_run_cannot_be_reused_with_different_evaluation_policy(
         tmp_path, ppi_test_data, run_train):
     pairs_path, fasta_path = ppi_test_data
     run_dir = tmp_path / "fresh_cleanup"
@@ -1512,21 +1431,14 @@ def test_fresh_rerun_removes_stale_test_outputs_when_test_is_held_out(
     )
     assert_exists(run_dir / "test_metrics.csv", run_dir / "predictions.csv")
 
-    run_train(
-        *base_cli_args(pairs_path, fasta_path, run_dir),
-        "--val-size", "0.25",
-        "--no-metrics-plots",
-    )
-
-    assert_exists(run_dir / "train_metrics.csv", run_dir / "val_metrics.csv")
-    assert_not_written(run_dir / "test_metrics.csv", run_dir / "predictions.csv")
-    invocations = [
-        json.loads(line)
-        for line in (run_dir / "invocations.jsonl").read_text(
-            encoding="utf-8").splitlines()
-    ]
-    assert len(invocations) == 1
-    assert invocations[0]["resolved_args"]["evaluate_test_metrics"] is False
+    test_metrics_before = (run_dir / "test_metrics.csv").read_bytes()
+    with pytest.raises(SystemExit, match="Run directory is not empty"):
+        run_train(
+            *base_cli_args(pairs_path, fasta_path, run_dir),
+            "--val-size", "0.25",
+            "--no-metrics-plots",
+        )
+    assert (run_dir / "test_metrics.csv").read_bytes() == test_metrics_before
 
 
 def test_no_metrics_plots_writes_metrics_without_plot_artifacts(

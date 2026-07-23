@@ -16,6 +16,7 @@ CLI_ENTRY_POINTS = (
     ("ppi-aggregate", "ppi_benchmark.cli.aggregate:main"),
     ("ppi-grid", "ppi_benchmark.cli.grid:main"),
     ("ppi-make-toy-data", "ppi_benchmark.cli.make_toy_data:main"),
+    ("protein-benchmark", "ppi_benchmark.cli.benchmark:main"),
 )
 CLI_MODULES = (
     "ppi_benchmark.cli.train",
@@ -23,6 +24,7 @@ CLI_MODULES = (
     "ppi_benchmark.cli.aggregate",
     "ppi_benchmark.cli.grid",
     "ppi_benchmark.cli.make_toy_data",
+    "ppi_benchmark.cli.benchmark",
 )
 
 

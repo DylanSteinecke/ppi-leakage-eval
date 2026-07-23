@@ -178,6 +178,40 @@ def test_schema_v1_unknown_models_and_feature_hash_collisions_fail():
         validate_feature_identity_collisions(collision)
 
 
+def test_schema_v2_identity_is_supported_explicitly():
+    schema_v2 = pd.DataFrame([{
+        "evaluation_schema_version": 2,
+        "model_name": "logistic",
+        "estimator_id": "logistic",
+        "configuration_id": "tfidf__logistic",
+        "matrix_source": "configured_features",
+    }])
+
+    normalized = normalize_evaluation_frame(schema_v2)
+
+    pd.testing.assert_frame_equal(normalized, schema_v2)
+
+
+def test_schema_v3_requires_complete_model_identity():
+    incomplete = pd.DataFrame([{
+        "evaluation_schema_version": 3,
+        "model_name": "logistic",
+    }])
+
+    with pytest.raises(ValueError, match="Schema-v3.*lacks columns"):
+        normalize_evaluation_frame(incomplete)
+
+
+def test_unknown_evaluation_schema_fails_actionably():
+    unknown = pd.DataFrame([{
+        "evaluation_schema_version": 99,
+        "model_name": "logistic",
+    }])
+
+    with pytest.raises(ValueError, match="Unsupported evaluation schema"):
+        normalize_evaluation_frame(unknown)
+
+
 def test_aggregate_benchmark_results_writes_manifest_and_summary(tmp_path):
     benchmark_dir = tmp_path / "benchmark"
     run_dir = benchmark_dir / "runs" / "random" / "seed_0" / "tfidf"
@@ -780,7 +814,7 @@ source "$GRID_PATH" --no-metrics-plots "$@"
         "--plm-revision c731040fcd8d73dceaa04b0a8e6329b345b0f5df"
         in laptop_esm2_call
     )
-    assert "--embedding-cache-dir results/embedding_cache" in laptop_esm2_call
+    assert "--embedding-cache-dir" not in laptop_esm2_call
     assert "--plm-pooling mean" in laptop_esm2_call
     assert "--plm-device cpu" in laptop_esm2_call
     assert "--plm-precision float32" in laptop_esm2_call

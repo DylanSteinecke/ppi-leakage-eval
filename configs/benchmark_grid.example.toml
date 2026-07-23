@@ -30,6 +30,8 @@ train_args = ["--no-metrics-plots"]
 
 [plm]
 enabled = false
+# Omit embedding_cache_dir to use the automatic per-user cache. Set it only
+# when a shared or explicitly managed cache location is required.
 # Optional approved checkpoints; sizes above ESM2 8M require exhaustive mode.
 # Example: ["esm2_150m", "esm2_650m"]
 presets = []

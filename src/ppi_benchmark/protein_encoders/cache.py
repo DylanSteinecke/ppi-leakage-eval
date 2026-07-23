@@ -22,7 +22,10 @@ SQLITE_QUERY_CHUNK_SIZE = 500
 
 def default_embedding_cache_dir() -> Path:
     """Return the shared user cache used across benchmark run directories."""
-    explicit_path = os.environ.get("PPI_EMBEDDING_CACHE_DIR")
+    explicit_path = (
+        os.environ.get("PROTEIN_BENCHMARK_EMBEDDING_CACHE_DIR")
+        or os.environ.get("PPI_EMBEDDING_CACHE_DIR")
+    )
     if explicit_path:
         return Path(explicit_path).expanduser()
     cache_root = Path(

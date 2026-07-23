@@ -12,7 +12,6 @@ import argparse
 import json
 import logging
 import re
-import shutil
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
@@ -25,7 +24,6 @@ import pandas as pd
 
 from ..artifact_io import (
     append_dataframe,
-    reset_output_file,
     write_dataframe_threadsafe,
 )
 from ..backends import (
@@ -64,12 +62,10 @@ from ..matrix_provenance import CanonicalMatrix, canonical_matrix
 from ..reporting.performance import (
     PERFORMANCE_FILENAME,
     PerformanceTracker,
-    append_performance_report,
     peak_memory_bytes,
     runtime_provenance,
-    validate_performance_append,
+    write_performance_report,
 )
-from ..reporting.plot_common import legacy_f1_heatmap_output_paths
 from ..reporting.run_plots import (
     plot_metrics_summary,
     plot_train_test_f1_heatmap,
@@ -130,9 +126,15 @@ from ..protein_encoders import (
     EmbeddingCache,
     FrozenProteinEncoder,
     create_protein_encoder,
+    default_embedding_cache_dir,
     get_protein_encoder_preset,
 )
 from ..schema import EVALUATION_SCHEMA_VERSION
+from ..run_integrity import (
+    RunIntegrityError,
+    claim_run_directory,
+    write_run_fingerprint,
+)
 from ..tasks import PPI_TASK, ppi_matrix_construction_contract
 from ..tasks.ppi_models import (
     CONFIGURED_FEATURE_MATRIX,
@@ -166,6 +168,7 @@ from ..tasks.ppi_degree import (
     training_degree_feature_specification,
     write_training_degree_profile,
 )
+from ..tasks.ppi_run_identity import build_ppi_run_identity
 from ..torch_utils import TORCH_DEVICE_CHOICES, TORCH_TRAINING_PRECISIONS
 from ..training import TaskSplitData, fit_and_evaluate_task
 from .arg_types import (
@@ -406,9 +409,6 @@ def argument_parser(
         help="Directory where canonical metrics, predictions, and plots are "
             "written.")
     output_group.add_argument(
-        "--append-results", action="store_true",
-        help=argparse.SUPPRESS)
-    output_group.add_argument(
         "--execution-id", default=None,
         help=argparse.SUPPRESS)
     output_group.add_argument(
@@ -502,7 +502,8 @@ def argument_parser(
         default=None,
         help=(
             "Shared frozen-embedding cache directory. Defaults to "
-            "$PPI_EMBEDDING_CACHE_DIR or the user cache directory."
+            "$PROTEIN_BENCHMARK_EMBEDDING_CACHE_DIR, then the legacy "
+            "$PPI_EMBEDDING_CACHE_DIR, then the user cache directory."
         ))
 
     # Model args
@@ -717,11 +718,6 @@ def argument_parser(
             "--model-seed/--num-reruns are deprecated; pass every seed "
             "explicitly with --model-seeds."
         )
-    if args.append_results:
-        args.cli_deprecation_warnings.append(
-            "--append-results is deprecated; use one immutable run "
-            "directory per configuration and aggregate run directories."
-        )
     if args.execution_id is not None:
         args.cli_deprecation_warnings.append(
             "--execution-id is reserved for legacy orchestration and is "
@@ -882,6 +878,16 @@ def argument_parser(
                 "--torch-resume-from must be outside --run-dir. Resume into "
                 "a new output directory so the source checkpoint remains "
                 "immutable."
+            )
+    if PLM_FEATURE in args.features:
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        cache_dir = Path(
+            args.embedding_cache_dir or default_embedding_cache_dir()
+        ).expanduser().resolve()
+        if cache_dir == run_dir or run_dir in cache_dir.parents:
+            parser.error(
+                "The embedding cache must be outside --run-dir so later "
+                "cache reuse cannot modify a completed run."
             )
 
     args.protein_encoder_metadata = None
@@ -1260,18 +1266,8 @@ def build_frozen_plm_feature_matrices(
 
 def write_protein_encoder_metadata(
         metadata: dict[str, Any], output_path: Path,
-        append_results: bool,
     ) -> None:
-    """Write encoder/cache provenance without mixing incompatible specs."""
-    if append_results and output_path.exists():
-        with output_path.open("r", encoding="utf-8") as input_file:
-            existing_metadata = json.load(input_file)
-        if existing_metadata.get("encoder_fingerprint") != metadata.get(
-                "encoder_fingerprint"):
-            raise ValueError(
-                f"Cannot append a different frozen encoder to "
-                f"{output_path.parent}. Use a new --run-dir."
-            )
+    """Write encoder and cache provenance for one immutable run."""
     write_metadata_json(metadata, output_path)
 
 
@@ -1393,19 +1389,6 @@ def append_preferential_attachment_metrics(
             metadata=metadata,
         )
         _append_pa_rows_idempotently(rows, output_path)
-
-
-def reset_output_files(
-        output_paths: list[Path | None], append_results: bool,
-    ) -> None:
-    """
-    Reset all non-empty output paths with one append policy.
-    """
-    for output_path in filter(None, output_paths):
-        reset_output_file(
-            output_path,
-            append_results=append_results,
-        )
 
 
 def train_and_evaluate_model_run(
@@ -2013,103 +1996,6 @@ def prepare_outputs(args: argparse.Namespace) -> OutputPaths:
     return output_paths
 
 
-def initialize_output_files(
-        args: argparse.Namespace, output_paths: OutputPaths,
-    ) -> None:
-    """
-    Clear stale outputs after append compatibility has been validated.
-    """
-    run_dir = output_paths.run_dir
-    plots_dir = output_paths.plots_dir
-    metric_prediction_paths = [
-        run_dir / filename
-        for filename in (
-            PREDICTIONS_FILENAME,
-            PROTEIN_ENCODER_METADATA_FILENAME,
-            TRAINING_HISTORY_FILENAME,
-            TRAIN_METRICS_FILENAME,
-            VAL_METRICS_FILENAME,
-            TEST_METRICS_FILENAME,
-            VAL_DEGREE_METRICS_FILENAME,
-            TEST_DEGREE_METRICS_FILENAME,
-        )
-    ]
-    summary_paths = [
-        run_dir / filename
-        for filename in (
-            TRAIN_SUMMARY_FILENAME,
-            VAL_SUMMARY_FILENAME,
-            TEST_SUMMARY_FILENAME,
-            VAL_DEGREE_SUMMARY_FILENAME,
-            TEST_DEGREE_SUMMARY_FILENAME,
-        )
-    ]
-    plot_paths = [
-        plots_dir / filename
-        for filename in (
-            TRAIN_PLOT_FILENAME,
-            VAL_PLOT_FILENAME,
-            TEST_PLOT_FILENAME,
-            TRAIN_VAL_PLOT_FILENAME,
-            TRAIN_VAL_PNG_FILENAME,
-            TRAIN_VAL_F1_HEATMAP_FILENAME,
-            TRAIN_TEST_PLOT_FILENAME,
-            TRAIN_TEST_PNG_FILENAME,
-            TRAIN_TEST_F1_HEATMAP_FILENAME,
-        )
-    ]
-    legacy_heatmap_paths = [
-        *legacy_f1_heatmap_output_paths(
-            plots_dir / TRAIN_VAL_F1_HEATMAP_FILENAME,
-            comparison_split_name="val",
-        ).values(),
-        *legacy_f1_heatmap_output_paths(
-            plots_dir / TRAIN_TEST_F1_HEATMAP_FILENAME,
-            comparison_split_name="test",
-        ).values(),
-    ]
-
-    if not args.append_results:
-        if output_paths.checkpoints_dir.exists():
-            shutil.rmtree(output_paths.checkpoints_dir)
-        reset_output_files(
-            metric_prediction_paths
-            + summary_paths
-            + plot_paths
-            + legacy_heatmap_paths
-            + [output_paths.invocations_path, output_paths.performance_path],
-            append_results=False,
-        )
-        return
-
-    active_derived_paths = [
-        output_paths.train_summary_path,
-        plots_dir / TRAIN_PLOT_FILENAME,
-    ]
-    if args.has_validation_split:
-        active_derived_paths.extend([
-            output_paths.val_summary_path,
-            output_paths.val_degree_summary_path,
-            plots_dir / VAL_PLOT_FILENAME,
-            plots_dir / TRAIN_VAL_PLOT_FILENAME,
-            plots_dir / TRAIN_VAL_PNG_FILENAME,
-            plots_dir / TRAIN_VAL_F1_HEATMAP_FILENAME,
-        ])
-    if args.evaluate_test_metrics:
-        active_derived_paths.extend([
-            output_paths.test_summary_path,
-            output_paths.test_degree_summary_path,
-            plots_dir / TEST_PLOT_FILENAME,
-            plots_dir / TRAIN_TEST_PLOT_FILENAME,
-            plots_dir / TRAIN_TEST_PNG_FILENAME,
-            plots_dir / TRAIN_TEST_F1_HEATMAP_FILENAME,
-        ])
-    reset_output_files(
-        active_derived_paths + legacy_heatmap_paths,
-        append_results=False,
-    )
-
-
 def summarize_model_outputs(
         output_paths: OutputPaths,
     ) -> dict[str, pd.DataFrame]:
@@ -2333,6 +2219,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     performance = PerformanceTracker()
     with performance.stage("argument_parsing"):
         args = argument_parser(argv)
+        try:
+            claim_run_directory(args.run_dir, task_id=PPI_TASK.name)
+        except RunIntegrityError as exc:
+            raise SystemExit(str(exc)) from None
         split_spec = get_split_strategy(
             PPI_TASK.name,
             args.effective_split_strategy,
@@ -2544,8 +2434,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             "protocol_id": split_spec.protocol_id,
             "protocol_version": split_spec.protocol_version,
             "split_strategy": args.effective_split_strategy,
+            "split_col": args.split_col,
             "split_name": args.split_name,
             "split_seed": args.split_seed,
+            "candidate_trial_count": args.n_split_trials,
             "target_train_size": args.train_size,
             "target_val_size": args.val_size,
             "target_test_size": 1.0 - args.train_size - args.val_size,
@@ -2818,42 +2710,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                 metadata=configured_matrix_metadata,
             )
 
-    if args.append_results:
-        try:
-            validate_performance_append(
-                evaluation_schema_version=EVALUATION_SCHEMA_VERSION,
-                matrices=performance.matrices,
-                output_path=output_paths.performance_path,
-            )
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from None
-
-    # Append incompatibility cannot now leave partial tabular outputs.
     try:
         write_selection_manifest(
             selection_manifest=selection_manifest,
             output_path=output_paths.selected_examples_path,
-            append_results=args.append_results,
         )
         write_split_artifacts(
             split_assignments=split_assignments,
             dropped_pairs=dropped_pairs,
             split_metadata=split_metadata,
             output_paths=output_paths,
-            append_results=args.append_results,
             sequence_cluster_assignments=sequence_cluster_assignments,
         )
         write_training_degree_profile(
             degree_profile,
             output_paths.training_positive_degree_path,
-            append_results=args.append_results,
         )
-        initialize_output_files(args, output_paths)
         if encoder_metadata_to_write is not None:
             write_protein_encoder_metadata(
                 metadata=encoder_metadata_to_write,
                 output_path=output_paths.protein_encoder_metadata_path,
-                append_results=args.append_results,
             )
         append_invocation_log(
             invocation_log_entry(
@@ -2988,7 +2864,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         },
     )
     try:
-        append_performance_report(
+        write_performance_report(
             performance.report(
                 execution_id,
                 task=PPI_TASK.name,
@@ -3002,6 +2878,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         "Saved performance report to: %s",
         output_paths.performance_path,
     )
+    try:
+        run_identity = build_ppi_run_identity(
+            task_schema_version=PPI_TASK.schema_version,
+            split_metadata=split_metadata,
+            protocol_instance=protocol_instance,
+            evaluation_cohort_hashes=evaluation_cohort_hashes,
+            split_assignments_sha256=degree_context.identity[
+                "split_assignments_sha256"
+            ],
+            matrices=performance.matrices,
+            model_runs=performance.model_runs,
+            encoder_metadata=encoder_runtime,
+            threshold_selection=args.threshold_selection,
+            has_validation_split=args.has_validation_split,
+            evaluate_test_metrics=args.evaluate_test_metrics,
+        )
+        fingerprint_path = write_run_fingerprint(
+            output_paths.run_dir,
+            identity=run_identity,
+        )
+    except (OSError, ValueError, RunIntegrityError) as exc:
+        raise SystemExit(str(exc)) from None
+    LOGGER.info("Finalized immutable run: %s", fingerprint_path)
 
 
 if __name__ == "__main__":

@@ -84,6 +84,12 @@ Hard invariant failures must make the result unusable as a conforming protocol
 instance. Diagnostic overlap that the protocol permits should be reported
 without being mislabeled as a failed hard constraint.
 
+Run directories are immutable scientific artifacts. Construction must claim a
+new or empty directory atomically before expensive work, and a final completion
+fingerprint must bind scientific identity separately from the integrity hashes
+of realized files. Interrupted claimed directories remain visibly incomplete;
+aggregation must not silently ignore or reuse them.
+
 ## Minimal registry boundary
 
 A small registry uses this compatibility contract:

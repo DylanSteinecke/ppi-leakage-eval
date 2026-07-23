@@ -19,6 +19,8 @@ from ppi_benchmark.protein_encoders import (
     ResidueTokenAlignment,
     TokenRepresentationEncoder,
     create_protein_encoder,
+    default_embedding_cache_dir,
+    encoder_identity_strength,
     get_protein_encoder_preset,
     prepare_prottrans_sequence,
     sequence_sha256,
@@ -253,6 +255,70 @@ def test_embedding_cache_detects_corrupt_payloads(tmp_path):
             )
         with pytest.raises(ValueError, match="Corrupt embedding payload"):
             cache.get_many([sequence_hash])
+
+
+def test_embedding_cache_directory_environment_precedence(tmp_path, monkeypatch):
+    generic = tmp_path / "generic"
+    legacy = tmp_path / "legacy"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("PROTEIN_BENCHMARK_EMBEDDING_CACHE_DIR", str(generic))
+    monkeypatch.setenv("PPI_EMBEDDING_CACHE_DIR", str(legacy))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(xdg))
+    assert default_embedding_cache_dir() == generic
+
+    monkeypatch.delenv("PROTEIN_BENCHMARK_EMBEDDING_CACHE_DIR")
+    assert default_embedding_cache_dir() == legacy
+    monkeypatch.delenv("PPI_EMBEDDING_CACHE_DIR")
+    assert default_embedding_cache_dir() == (
+        xdg / "ppi-leakage" / "protein_embeddings"
+    )
+
+
+def test_embedding_contract_and_realized_table_hashes_are_independent(tmp_path):
+    first_spec = encoder_spec(model_name=str(tmp_path / "model-a"))
+    second_spec = encoder_spec(model_name=str(tmp_path / "model-b"))
+    proteins = {"P1": "ACDE", "P2": "GGGG"}
+    with EmbeddingCache(first_spec, tmp_path / "cache-a") as cache:
+        first = FrozenProteinEncoder(
+            encoder=RecordingProteinEncoder(first_spec),
+            cache=cache,
+            max_batch_tokens=32,
+        ).encode(proteins)
+    with EmbeddingCache(second_spec, tmp_path / "cache-b") as cache:
+        second = FrozenProteinEncoder(
+            encoder=RecordingProteinEncoder(second_spec),
+            cache=cache,
+            max_batch_tokens=32,
+        ).encode({"different-a": "GGGG", "different-b": "ACDE"})
+
+    assert first.metadata["unique_embedding_inputs_sha256"] == (
+        second.metadata["unique_embedding_inputs_sha256"]
+    )
+    assert first.metadata["embedding_table_sha256"] == (
+        second.metadata["embedding_table_sha256"]
+    )
+    assert first.metadata["embedding_contract_sha256"] != (
+        second.metadata["embedding_contract_sha256"]
+    )
+
+
+def test_encoder_identity_strength_distinguishes_exact_and_declared(tmp_path):
+    local_model = tmp_path / "model"
+    local_model.mkdir()
+    local = encoder_spec(model_name=str(local_model))
+    remote = encoder_spec(
+        model_revision="a" * 40,
+        tokenizer_revision="b" * 40,
+    )
+    checkpoint = encoder_spec(
+        label_independent=False,
+        checkpoint_sha256="c" * 64,
+        training_split_sha256="d" * 64,
+    )
+
+    assert encoder_identity_strength(local) == "declared_local_revision"
+    assert encoder_identity_strength(remote) == "immutable_remote_revision"
+    assert encoder_identity_strength(checkpoint) == "checkpoint_hash"
 
 
 def test_token_budget_batches_bound_padding_and_group_similar_lengths():

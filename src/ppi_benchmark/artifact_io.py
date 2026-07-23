@@ -129,10 +129,3 @@ def write_dataframe_threadsafe(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_lock(output_path):
         df.to_csv(output_path, index=False)
-
-
-def reset_output_file(output_path: Path, append_results: bool) -> None:
-    """Start with a clean output file unless append mode is requested."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not append_results and output_path.exists():
-        output_path.unlink()

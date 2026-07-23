@@ -29,6 +29,12 @@ from ..reporting.schema_compat import (
     normalize_evaluation_frame,
     validate_feature_identity_collisions,
 )
+from ..run_integrity import (
+    RUN_CLAIM_FILENAME,
+    RUN_FINGERPRINT_FILENAME,
+    RunIntegrityError,
+    read_run_fingerprint,
+)
 from ..splitting.protocols import C2_SPLIT_STRATEGY, C3_SPLIT_STRATEGY
 
 
@@ -361,15 +367,58 @@ def fallback_arg_values(metadata: dict[str, Any], arg_name: str) -> list[Any]:
 
 
 def run_directories(benchmark_dir: Path) -> list[Path]:
-    """
-    Return descendant run directories that contain split metadata.
-    """
+    """Discover completed current runs and historical split artifacts."""
     metadata_paths = sorted(benchmark_dir.rglob(str(METADATA_RELATIVE_PATH)))
-    directories = [
+    metadata_directories = {
         metadata_path.parent.parent
         for metadata_path in metadata_paths
-    ]
-
+    }
+    claim_directories = {
+        claim_path.parent
+        for claim_path in benchmark_dir.rglob(RUN_CLAIM_FILENAME)
+    }
+    fingerprint_directories = {
+        fingerprint_path.parent
+        for fingerprint_path in benchmark_dir.rglob(
+            RUN_FINGERPRINT_FILENAME)
+    }
+    candidates = sorted(
+        metadata_directories | claim_directories | fingerprint_directories)
+    directories = []
+    for run_dir in candidates:
+        has_claim = (run_dir / RUN_CLAIM_FILENAME).is_file()
+        has_fingerprint = (run_dir / RUN_FINGERPRINT_FILENAME).is_file()
+        has_metadata = (run_dir / METADATA_RELATIVE_PATH).is_file()
+        if has_claim:
+            if not has_fingerprint:
+                raise ValueError(
+                    f"Claimed run is incomplete; missing "
+                    f"{RUN_FINGERPRINT_FILENAME}: {run_dir}"
+                )
+            try:
+                fingerprint = read_run_fingerprint(run_dir)
+            except RunIntegrityError as exc:
+                raise ValueError(str(exc)) from None
+            artifacts = fingerprint["payload"]["artifacts"]
+            metadata_key = METADATA_RELATIVE_PATH.as_posix()
+            if (
+                not has_metadata
+                or artifacts.get(metadata_key, {}).get("role")
+                != "split_artifact"
+            ):
+                raise ValueError(
+                    f"Completed run does not certify {metadata_key}: "
+                    f"{run_dir}"
+                )
+            directories.append(run_dir)
+            continue
+        if has_fingerprint:
+            raise ValueError(
+                f"Malformed current-format run has a fingerprint without "
+                f"{RUN_CLAIM_FILENAME}: {run_dir}"
+            )
+        if has_metadata:
+            directories.append(run_dir)
     return directories
 
 

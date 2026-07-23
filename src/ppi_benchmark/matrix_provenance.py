@@ -235,17 +235,76 @@ def canonical_matrix(
 
 def matrix_records_by_source_split(
     matrices: Mapping[str, Mapping[str, Any]],
+    *,
+    schema_version: int | None = None,
 ) -> dict[tuple[str, str], Mapping[str, Any]]:
-    """Index serialized matrix records for append compatibility checks."""
-    indexed = {}
+    """Index source-aware schema-v1/v2 flat or schema-v3 nested records."""
+    if schema_version not in {None, 1, 2, 3}:
+        raise ValueError(
+            f"Unsupported evaluation schema version {schema_version}."
+        )
+    nested = schema_version == 3 or (
+        schema_version is None
+        and any(
+            isinstance(value, Mapping)
+            and "matrix_contract_sha256" not in value
+            for value in matrices.values()
+        )
+    )
+    indexed: dict[tuple[str, str], Mapping[str, Any]] = {}
+    if nested:
+        for matrix_source, split_records in matrices.items():
+            if not isinstance(split_records, Mapping):
+                raise ValueError(
+                    f"Matrix source {matrix_source!r} must map split names "
+                    "to records."
+                )
+            for split_name, metadata in split_records.items():
+                if not isinstance(metadata, Mapping):
+                    raise ValueError(
+                        f"Matrix {matrix_source}/{split_name} must be a record."
+                    )
+                if metadata.get("matrix_source") != matrix_source:
+                    raise ValueError(
+                        f"Matrix {matrix_source}/{split_name} records a "
+                        "different matrix_source."
+                    )
+                if metadata.get("split") != split_name:
+                    raise ValueError(
+                        f"Matrix {matrix_source}/{split_name} records a "
+                        "different split."
+                    )
+                indexed[(str(matrix_source), str(split_name))] = metadata
+        return indexed
+
     for name, metadata in matrices.items():
-        contract_hash = metadata.get("matrix_contract_sha256")
+        if not isinstance(metadata, Mapping):
+            raise ValueError(f"Matrix record {name!r} must be an object.")
         matrix_source = metadata.get("matrix_source")
         split_name = metadata.get("split")
-        if not contract_hash or not matrix_source or not split_name:
-            continue
+        if not matrix_source or not split_name:
+            raise ValueError(
+                f"Flat matrix record {name!r} requires matrix_source and "
+                "split metadata."
+            )
         key = (str(matrix_source), str(split_name))
         if key in indexed and indexed[key] != metadata:
             raise ValueError(f"Duplicate incompatible matrix record {name!r}.")
         indexed[key] = metadata
     return indexed
+
+
+def nested_matrix_records(
+    matrices: Mapping[str, Mapping[str, Any]],
+    *,
+    schema_version: int | None = None,
+) -> dict[str, dict[str, Mapping[str, Any]]]:
+    """Return deterministic matrix records keyed by source and split."""
+    indexed = matrix_records_by_source_split(
+        matrices,
+        schema_version=schema_version,
+    )
+    nested: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for (matrix_source, split_name), metadata in sorted(indexed.items()):
+        nested.setdefault(matrix_source, {})[split_name] = metadata
+    return nested

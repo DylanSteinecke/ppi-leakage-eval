@@ -134,9 +134,6 @@ case "$INCLUDE_LOW_RESOURCE_ESM2" in
                 && "$PLM_MODEL" == "facebook/esm2_t6_8M_UR50D" ]]; then
             PLM_REVISION="c731040fcd8d73dceaa04b0a8e6329b345b0f5df"
         fi
-        if [[ -z "$EMBEDDING_CACHE_DIR" ]]; then
-            EMBEDDING_CACHE_DIR="results/embedding_cache"
-        fi
         LOW_RESOURCE_ESM2_ARGS=(
             --plm-pooling "$PLM_POOLING"
             --plm-device "$PLM_DEVICE"

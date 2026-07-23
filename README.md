@@ -22,8 +22,8 @@ Install frozen protein language-model features with:
 python -m pip install -e '.[plm]'
 ```
 
-This provides `ppi-train`, `ppi-grid`, `ppi-prepare`, `ppi-aggregate`, and
-`ppi-make-toy-data`.
+This provides `ppi-train`, `ppi-grid`, `ppi-prepare`, `ppi-aggregate`,
+`ppi-make-toy-data`, and the task-neutral `protein-benchmark` utility.
 
 The installable implementation lives under `src/ppi_benchmark/`. Command-line
 orchestration is in `cli/`, dataset preparation and source-specific loaders are
@@ -247,7 +247,7 @@ The selected source rows and deterministic ranks are written to
 
 ## Performance reporting
 
-Every `ppi-train` invocation appends one record to `performance.jsonl`. Each
+Every immutable `ppi-train` run writes one record to `performance.jsonl`. Each
 record contains stage durations, process peak resident memory, feature-matrix
 shape/density/storage statistics, and per-model fit/evaluation timings and
 solver iteration counts. Per-run metric CSVs also include `fit_seconds`,
@@ -263,6 +263,26 @@ diagnostics, so matching contracts can still differ across PLM hardware or
 numeric runtimes. Runtime records include configured precision, observed
 devices, host details, and relevant library versions. Matrix caching remains
 outside the current contract.
+
+`ppi-train` atomically claims `--run-dir` before loading data or accessing
+embedding caches. The directory must be new or empty and cannot be reused,
+including after an interrupted run. A successful run finishes by writing
+`run_fingerprint.json`, which separates scientific identity from a hash and
+size inventory of every run artifact. Use independent run directories and
+`ppi-aggregate` to combine results.
+
+Compare two completed runs with:
+
+```bash
+protein-benchmark compare-runs REFERENCE_RUN CANDIDATE_RUN
+```
+
+The command separately checks run and encoder contracts, realized embedding
+bytes, matrix construction, matrix row identity, matrix bytes, and model
+configuration. Exit status zero means the runs match through realized model
+inputs; fitted model state, predictions, and metric equality are explicitly
+not checked. Artifact hashes are validated within each run but are not compared
+between runs because timings, hardware records, plots, and outputs may differ.
 
 ## Degree and hub-bias diagnostic
 
@@ -334,12 +354,26 @@ does not re-hash multi-gigabyte local weights on every cache-only grid process.
 
 By default, per-encoder SQLite caches live under
 `~/.cache/ppi-leakage/protein_embeddings/`, outside timestamped run
-directories. Override this globally with `PPI_EMBEDDING_CACHE_DIR` or per
-command with `--embedding-cache-dir`. This shared location lets random,
-C1, C2, C3, and repeated split-seed runs reuse the same frozen embeddings.
-Writes are transactional, payload checksums are verified on read, and every run
-writes cache/encoder provenance to `protein_encoder.json` and
-`performance.jsonl`.
+directories. Cache selection is CLI, then TOML, then
+`PROTEIN_BENCHMARK_EMBEDDING_CACHE_DIR`, then the legacy
+`PPI_EMBEDDING_CACHE_DIR`, then `$XDG_CACHE_HOME`, then the home default. This
+shared per-user location lets random, C1, C2, C3, and repeated split-seed runs
+reuse the same frozen embeddings without manual configuration. Writes are
+transactional, payload checksums are verified on read, and every run records
+the cache path, encoder provenance, normalized input-set hash, declared
+embedding-contract hash, and realized embedding-table hash in
+`protein_encoder.json` and `performance.jsonl`.
+
+An explicit cache directory must remain outside `--run-dir`; otherwise later
+cache reuse could modify an already completed immutable run.
+
+The realized table hash excludes the encoder fingerprint. Consequently, two
+local models at different paths can have different declared contracts but
+identical realized embedding bytes. Remote commit revisions and checkpoint
+content hashes are exact identities; a local path plus a declared revision is
+reported as weaker identity. Deleting a cache causes regeneration under the
+same declared encoder contract, but exact bytes can still vary across hardware
+or numerical runtimes.
 
 Uncached sequences are sorted by tokenized length and batched under
 `--plm-max-batch-tokens`, with `--plm-max-batch-sequences` as a second safety
@@ -542,9 +576,10 @@ linear_svm sgd_logistic torch_mlp" PREPARE_YEAST_DATA=0 \
 
 The canonical training CLI uses `--classifier`, `--split-seed`, and explicit
 `--model-seeds`. The older `--classifiers`, `--seed`,
-`--model-seed`/`--num-reruns`, `--append-results`, `--execution-id`, and
-`--split-name` spellings remain accepted as hidden compatibility options but
-emit deprecation warnings where applicable.
+`--model-seed`/`--num-reruns`, `--execution-id`, and `--split-name` spellings
+remain accepted as hidden compatibility options but emit deprecation warnings
+where applicable. `--append-results` has been removed; pass every desired
+classifier in one invocation or use separate immutable run directories.
 
 ## Leakage-aware splits
 

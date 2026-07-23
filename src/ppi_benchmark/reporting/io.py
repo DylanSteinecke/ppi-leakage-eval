@@ -3,7 +3,6 @@
 from ..artifact_io import (
     append_dataframe,
     output_lock,
-    reset_output_file,
     write_dataframe_threadsafe,
 )
 
@@ -11,6 +10,5 @@ from ..artifact_io import (
 __all__ = (
     "append_dataframe",
     "output_lock",
-    "reset_output_file",
     "write_dataframe_threadsafe",
 )

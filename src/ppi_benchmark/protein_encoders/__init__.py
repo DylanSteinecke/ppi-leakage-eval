@@ -1,8 +1,10 @@
 """Public API for reusable protein encoders and embedding caches."""
 
 from .base import (
+    SEQUENCE_NORMALIZATION_SCHEMA_ID,
     EncoderSpec,
     ProteinEncoder,
+    encoder_identity_strength,
     normalize_protein_sequence,
     sequence_sha256,
 )
@@ -55,6 +57,7 @@ __all__ = [
     "PLM_PRECISION_CHOICES",
     "PLM_TRUNCATION_CHOICES",
     "PROTEIN_ENCODER_ADAPTER_CHOICES",
+    "SEQUENCE_NORMALIZATION_SCHEMA_ID",
     "CachedEmbedding",
     "EmbeddingCache",
     "EncoderSpec",
@@ -75,6 +78,7 @@ __all__ = [
     "TokenRepresentationEncoder",
     "create_protein_encoder",
     "default_embedding_cache_dir",
+    "encoder_identity_strength",
     "get_protein_encoder_preset",
     "normalize_protein_sequence",
     "prepare_prottrans_sequence",

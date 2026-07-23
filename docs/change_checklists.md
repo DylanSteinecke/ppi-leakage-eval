@@ -154,8 +154,8 @@ should not fail runs unless a future explicit validation mode is added.
 - Update `prepare_outputs()`.
 - Decide whether the artifact exists always, only with validation, only with
   test evaluation, or only when plots are enabled.
-- Update fresh-run cleanup behavior.
-- Update append-mode behavior.
+- Add the artifact to immutable-run integrity and role classification.
+- Decide whether historical aggregation should discover or normalize it.
 - Add the path to `split_metadata.json` if useful for auditability.
 - Update benchmark aggregation only if the artifact contributes to cross-run
   summaries.
@@ -168,7 +168,7 @@ should not fail runs unless a future explicit validation mode is added.
 - Update CLI choices if needed.
 - Add fast unit tests or CLI smoke tests.
 - Ensure model metadata appears in metrics rows.
-- Ensure append mode works when combining this model with existing models.
+- Ensure mixed model selections work within one immutable invocation.
 - Avoid heavy tests for expensive models; use small smoke tests.
 
 ## When Adding a Feature Type
@@ -189,7 +189,7 @@ should not fail runs unless a future explicit validation mode is added.
 - Keep `split_metadata.json` as the main audit artifact.
 - Preserve `source_row_index`.
 - Ensure metadata remains JSON-serializable.
-- Update append-mode compatibility checks if the change affects split identity.
+- Update run-fingerprint identity when the field affects cross-run comparison.
 - Update tests that read `split_metadata.json`.
 - Update benchmark aggregation if new metadata should become a manifest or
   summary column.
@@ -213,8 +213,7 @@ should not fail runs unless a future explicit validation mode is added.
 - Keep environment variables documented near the top of the script.
 - Ensure extra user args still pass through to the Python CLI.
 - Ensure run directories remain stable and timestamped.
-- Ensure append behavior still writes multiple model/feature runs into the same
-  run directory only when the split is identical.
+- Ensure every generated configuration uses a distinct immutable run directory.
 - Ensure benchmark aggregation still runs when `AGGREGATE_RESULTS=1`.
 
 ## When Preparing Future PTM Support
@@ -257,8 +256,8 @@ For CLI-affecting changes, add tests that cover:
 - required/removed flags
 - run-dir outputs
 - validation vs test behavior
-- append mode
-- fresh-run cleanup
+- atomic run claims and immutable-directory failures
+- completion fingerprint integrity
 - metadata fields
 - benchmark aggregation if relevant
 

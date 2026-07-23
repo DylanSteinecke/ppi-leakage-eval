@@ -36,6 +36,7 @@ ppi-prepare = "ppi_benchmark.cli.prepare:main"
 ppi-aggregate = "ppi_benchmark.cli.aggregate:main"
 ppi-grid = "ppi_benchmark.cli.grid:main"
 ppi-make-toy-data = "ppi_benchmark.cli.make_toy_data:main"
+protein-benchmark = "ppi_benchmark.cli.benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

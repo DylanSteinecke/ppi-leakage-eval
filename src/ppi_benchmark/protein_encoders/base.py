@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
 
 import numpy as np
@@ -13,6 +14,10 @@ import numpy as np
 
 ENCODER_SPEC_VERSION = 1
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+HUGGINGFACE_COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+SEQUENCE_NORMALIZATION_SCHEMA_ID = (
+    "protein.uppercase_remove_whitespace.v1"
+)
 
 
 def normalize_protein_sequence(sequence: str) -> str:
@@ -27,6 +32,19 @@ def sequence_sha256(sequence: str) -> str:
     """Return the content hash of one canonicalized protein sequence."""
     normalized = normalize_protein_sequence(sequence)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def encoder_identity_strength(spec: "EncoderSpec") -> str:
+    """Return the declared strength of one encoder's checkpoint identity."""
+    if spec.checkpoint_sha256 is not None:
+        return "checkpoint_hash"
+    if (
+        not Path(spec.model_name).expanduser().exists()
+        and HUGGINGFACE_COMMIT_PATTERN.fullmatch(spec.model_revision)
+        and HUGGINGFACE_COMMIT_PATTERN.fullmatch(spec.tokenizer_revision)
+    ):
+        return "immutable_remote_revision"
+    return "declared_local_revision"
 
 
 @dataclass(frozen=True)

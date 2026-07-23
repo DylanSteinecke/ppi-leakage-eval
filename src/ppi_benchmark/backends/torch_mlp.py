@@ -14,7 +14,6 @@ import torch
 from torch import nn
 
 from ..evaluation import binary_classification_metrics
-from ..schema import EVALUATION_SCHEMA_VERSION
 from ..training.checkpoints import (
     TORCH_CHECKPOINT_FORMAT_VERSION,
     TorchCheckpointManager,
@@ -316,7 +315,7 @@ class TorchMLPBackend:
             last_checkpoint_path: str | Path | None = None,
             resume_from: str | Path | None = None,
             task_name: str = "binary_classification",
-            task_schema_version: int = EVALUATION_SCHEMA_VERSION,
+            task_schema_version: int = 1,
         ):
         self.config = config
         self.random_state = random_state

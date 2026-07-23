@@ -1,7 +1,7 @@
 """Stable identifiers shared by result-producing pipeline modules."""
 
 
-EVALUATION_SCHEMA_VERSION = 2
+EVALUATION_SCHEMA_VERSION = 3
 STANDARD_PREDICTION_COLUMNS = (
     "evaluation_schema_version",
     "task",

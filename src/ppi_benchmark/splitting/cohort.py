@@ -327,41 +327,9 @@ def select_examples(
 
 def write_selection_manifest(
         selection_manifest: pd.DataFrame | None, output_path: Path,
-        append_results: bool,
     ) -> None:
-    """Write or validate the selected-example audit artifact."""
+    """Write the selected-example audit artifact when sampling applies."""
     if selection_manifest is None:
-        if append_results and output_path.exists():
-            raise ValueError(
-                f"Cannot append results to {output_path.parent.parent}: the "
-                "existing run uses cohort sampling but this invocation does "
-                "not. Use a new --run-dir or matching sampling arguments."
-            )
-        if not append_results and output_path.exists():
-            output_path.unlink()
         return
-
-    if append_results:
-        if not output_path.exists():
-            raise ValueError(
-                f"Cannot append results to {output_path.parent.parent}: the "
-                "existing run has no sampling manifest. Use a new --run-dir "
-                "or matching sampling arguments."
-            )
-        existing_manifest = pd.read_csv(output_path)
-        try:
-            pd.testing.assert_frame_equal(
-                existing_manifest,
-                selection_manifest,
-                check_dtype=False,
-            )
-        except AssertionError as exc:
-            raise ValueError(
-                f"Cannot append results to {output_path.parent.parent}: "
-                "selected_examples.csv does not match this invocation. Use "
-                "a new --run-dir or matching sampling arguments."
-            ) from exc
-        return
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     selection_manifest.to_csv(output_path, index=False)

@@ -125,7 +125,6 @@ def test_metadata_contains_required_audit_fields(tmp_path):
         pairs=str(pairs_path),
         fasta=str(fasta_path),
         run_dir=str(tmp_path / "run"),
-        append_results=False,
         execution_id=None,
         log_level="INFO",
         no_metrics_plots=False,
@@ -211,7 +210,7 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     }
     assert required_keys <= set(metadata)
     assert metadata["execution_id"] == "test-execution"
-    assert metadata["evaluation_schema_version"] == 2
+    assert metadata["evaluation_schema_version"] == 3
     assert metadata["task"] == "ppi"
     assert metadata["n_val"] == 0
     assert metadata["actual_val_size"] == 0.0
@@ -227,7 +226,7 @@ def test_metadata_contains_required_audit_fields(tmp_path):
     assert metadata["invocations_path"].endswith("invocations.jsonl")
 
 
-def test_append_rejects_different_split_assignments(tmp_path):
+def test_split_artifacts_write_one_immutable_snapshot(tmp_path):
     split_dir = tmp_path / "splits"
     output_paths = SimpleNamespace(
         split_assignments_path=split_dir / "split_assignments.csv",
@@ -247,54 +246,9 @@ def test_append_rejects_different_split_assignments(tmp_path):
         dropped_pairs=dropped_pairs,
         split_metadata=metadata,
         output_paths=output_paths,
-        append_results=False,
-    )
-    write_split_artifacts(
-        split_assignments=assignments.copy(),
-        dropped_pairs=dropped_pairs,
-        split_metadata=metadata,
-        output_paths=output_paths,
-        append_results=True,
     )
 
-    changed_assignments = assignments.copy()
-    changed_assignments.loc[0, "split"] = "test"
-    with pytest.raises(ValueError, match="different split"):
-        write_split_artifacts(
-            split_assignments=changed_assignments,
-            dropped_pairs=dropped_pairs,
-            split_metadata=metadata,
-            output_paths=output_paths,
-            append_results=True,
-        )
-
-
-def test_append_rejects_mixed_evaluation_schema_versions(tmp_path):
-    split_dir = tmp_path / "splits"
-    output_paths = SimpleNamespace(
-        split_assignments_path=split_dir / "split_assignments.csv",
-        dropped_pairs_path=split_dir / "dropped_pairs.csv",
-        split_metadata_path=split_dir / "split_metadata.json",
-    )
-    assignments = pd.DataFrame({
-        "source_row_index": [0, 1],
-        "split": ["train", "test"],
-    })
-    dropped_pairs = pd.DataFrame(
-        columns=["source_row_index", "drop_reason"])
-    write_split_artifacts(
-        split_assignments=assignments,
-        dropped_pairs=dropped_pairs,
-        split_metadata={"evaluation_schema_version": 1},
-        output_paths=output_paths,
-        append_results=False,
-    )
-
-    with pytest.raises(ValueError, match="schema versions differ"):
-        write_split_artifacts(
-            split_assignments=assignments,
-            dropped_pairs=dropped_pairs,
-            split_metadata={"evaluation_schema_version": 2},
-            output_paths=output_paths,
-            append_results=True,
-        )
+    observed = pd.read_csv(output_paths.split_assignments_path)
+    pd.testing.assert_frame_equal(observed, assignments)
+    assert output_paths.dropped_pairs_path.exists()
+    assert output_paths.split_metadata_path.exists()

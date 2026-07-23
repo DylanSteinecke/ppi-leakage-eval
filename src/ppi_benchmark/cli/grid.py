@@ -48,7 +48,6 @@ CONFIG_FILENAME = "benchmark_config.json"
 RUNS_DIRNAME = "runs"
 SAFE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 GRID_OWNED_TRAIN_FLAGS = frozenset({
-    "--append-results",
     "--classifier",
     "--classifiers",
     "--degree-bin-quantiles",
@@ -89,6 +88,7 @@ GRID_OWNED_TRAIN_FLAGS = frozenset({
     "--train-size",
     "--val-size",
 })
+REMOVED_TRAIN_FLAGS = frozenset({"--append-results"})
 
 
 @dataclass(frozen=True)
@@ -600,6 +600,16 @@ def _string_tuple(value: Sequence[str], key: str) -> tuple[str, ...]:
 
 def _validate_extra_train_args(train_args: Sequence[str]) -> None:
     """Reject extra arguments that would override grid-owned dimensions."""
+    removed_flags = sorted({
+        token.partition("=")[0]
+        for token in train_args
+        if token.startswith("--")
+        and token.partition("=")[0] in REMOVED_TRAIN_FLAGS
+    })
+    if removed_flags:
+        raise ValueError(
+            f"Removed ppi-train flags are not supported: {removed_flags}"
+        )
     conflicting_flags = sorted({
         token.partition("=")[0]
         for token in train_args

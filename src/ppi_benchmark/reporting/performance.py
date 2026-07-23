@@ -21,7 +21,6 @@ from scipy import sparse
 
 from ..schema import EVALUATION_SCHEMA_VERSION
 from ..artifact_io import output_lock
-from ..matrix_provenance import matrix_records_by_source_split
 
 
 PERFORMANCE_FILENAME = "performance.jsonl"
@@ -187,10 +186,21 @@ class PerformanceTracker:
         for name, matrix in matrices.items():
             statistics = matrix_statistics(matrix)
             if statistics is not None:
-                self.matrices[name] = {
+                record = {
                     **statistics,
                     **dict(metadata.get(name, {})),
                 }
+                matrix_source = str(
+                    record.get("matrix_source") or "unspecified")
+                split_name = str(record.get("split") or name)
+                record["matrix_source"] = matrix_source
+                record["split"] = split_name
+                source_records = self.matrices.setdefault(matrix_source, {})
+                if split_name in source_records:
+                    raise ValueError(
+                        f"Duplicate matrix record {matrix_source}/{split_name}."
+                    )
+                source_records[split_name] = record
 
     def add_model_runs(self, model_runs: list[dict[str, Any]]) -> None:
         """Append model-level timing and solver observations."""
@@ -225,84 +235,16 @@ class PerformanceTracker:
         }
 
 
-def _validate_append_compatibility(
-    report: Mapping[str, Any],
-    existing_reports: Iterator[Mapping[str, Any]],
-    output_path: Path,
-) -> None:
-    """Require one schema and exact matrices within an append run."""
-    incoming_version = report.get("evaluation_schema_version")
-    if incoming_version is None:
-        raise ValueError("Performance reports require evaluation_schema_version.")
-    incoming = matrix_records_by_source_split(report.get("matrices", {}))
-    for existing_report in existing_reports:
-        existing_version = existing_report.get("evaluation_schema_version")
-        if existing_version != incoming_version:
-            raise ValueError(
-                f"Cannot append to {output_path.parent}: evaluation schema "
-                f"versions differ ({existing_version!r} != "
-                f"{incoming_version!r})."
-            )
-        existing = matrix_records_by_source_split(
-            existing_report.get("matrices", {}))
-        for key in incoming.keys() & existing.keys():
-            incoming_record = incoming[key]
-            existing_record = existing[key]
-            for hash_field in (
-                "matrix_contract_sha256",
-                "row_identity_sha256",
-                "matrix_sha256",
-            ):
-                if incoming_record.get(hash_field) != existing_record.get(
-                    hash_field
-                ):
-                    raise ValueError(
-                        f"Cannot append to {output_path.parent}: matrix "
-                        f"{key} has a different {hash_field}."
-                    )
-
-
-def _performance_reports(output_path: Path) -> Iterator[Mapping[str, Any]]:
-    if not output_path.exists():
-        return
-    with output_path.open("r", encoding="utf-8") as input_file:
-        for line in input_file:
-            if line.strip():
-                yield json.loads(line)
-
-
-def validate_performance_append(
-    *,
-    evaluation_schema_version: int,
-    matrices: Mapping[str, Mapping[str, Any]],
-    output_path: Path,
-) -> None:
-    """Preflight append compatibility before model artifacts are written."""
-    if not output_path.exists():
-        return
-    report = {
-        "evaluation_schema_version": evaluation_schema_version,
-        "matrices": matrices,
-    }
-    with output_lock(output_path):
-        _validate_append_compatibility(
-            report,
-            _performance_reports(output_path),
-            output_path,
-        )
-
-
-def append_performance_report(
+def write_performance_report(
         report: dict[str, Any], output_path: Path,
     ) -> None:
-    """Append one performance record as thread-safe JSONL."""
+    """Write one performance JSONL record for an immutable run."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(report, sort_keys=True) + "\n"
     with output_lock(output_path):
-        _validate_append_compatibility(
-            report,
-            _performance_reports(output_path),
-            output_path,
-        )
-        with output_path.open("a", encoding="utf-8") as fout:
+        if output_path.exists():
+            raise ValueError(
+                f"Performance report already exists: {output_path}"
+            )
+        with output_path.open("x", encoding="utf-8") as fout:
             fout.write(serialized)

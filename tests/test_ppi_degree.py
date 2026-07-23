@@ -734,5 +734,5 @@ def test_benchmark_aggregation_writes_hash_gated_degree_lift(
     )
     baseline_degree.loc[changed, "auprc"] += 0.01
     baseline_degree.to_csv(baseline_degree_path, index=False)
-    with pytest.raises(ValueError, match="locked fitted degree control"):
+    with pytest.raises(ValueError, match="artifact integrity check failed"):
         aggregate_benchmark_results(benchmark_dir)

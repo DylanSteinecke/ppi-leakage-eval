@@ -425,6 +425,36 @@ def test_toml_config_and_cli_overrides_are_resolved(tmp_path):
     assert config.train_args == ("--no-metrics-plots",)
 
 
+def test_embedding_cache_cli_overrides_toml(tmp_path):
+    config_path = tmp_path / "grid.toml"
+    toml_cache = tmp_path / "toml-cache"
+    cli_cache = tmp_path / "cli-cache"
+    config_path.write_text(
+        "\n".join([
+            "[grid]",
+            f'pairs = "{tmp_path / "pairs.csv"}"',
+            f'fasta = "{tmp_path / "proteins.fasta"}"',
+            f'out_dir = "{tmp_path / "results"}"',
+            'profile = "laptop"',
+            "aggregate_results = false",
+            "",
+            "[plm]",
+            f'embedding_cache_dir = "{toml_cache}"',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    from_toml = resolve_grid_config(["--config", str(config_path)])
+    from_cli = resolve_grid_config([
+        "--config", str(config_path),
+        "--embedding-cache-dir", str(cli_cache),
+    ])
+
+    assert from_toml.embedding_cache_dir == toml_cache
+    assert from_cli.embedding_cache_dir == cli_cache
+
+
 def test_toml_resolves_mmseqs_auto_settings(tmp_path):
     config_path = tmp_path / "mmseqs-grid.toml"
     config_path.write_text(

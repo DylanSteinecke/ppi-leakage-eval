@@ -1,8 +1,8 @@
 """
 Split audit helpers for PPI pipeline runs.
 
-This module owns source-row tracking, split assignment outputs, split metadata,
-and append-mode split compatibility checks.
+This module owns source-row tracking, split assignment outputs, and split
+metadata.
 """
 
 import json
@@ -36,13 +36,6 @@ DROPPED_PAIRS_FILENAME = "dropped_pairs.csv"
 SPLIT_METADATA_FILENAME = "split_metadata.json"
 SEQUENCE_CLUSTER_ASSIGNMENTS_FILENAME = "sequence_cluster_assignments.csv"
 INVOCATIONS_FILENAME = "invocations.jsonl"
-INPUT_HASH_FIELDS = (
-    "pairs_file_sha256",
-    "fasta_file_sha256",
-    "dataset_metadata_file_sha256",
-    "protein_metadata_file_sha256",
-    "sequence_clusters_file_sha256",
-)
 
 
 #######################
@@ -176,7 +169,6 @@ def invocation_log_entry(
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "execution_id": execution_id,
         "run_dir": str(output_paths.run_dir),
-        "append_results": bool(args.append_results),
         "command": shlex.join([sys.executable, *sys.argv]),
         "argv": list(sys.argv),
         "python_executable": sys.executable,
@@ -516,63 +508,9 @@ def write_metadata_json(metadata: dict[str, Any], output_path: Path) -> None:
     )
 
 
-def validate_append_split_assignments(
-        new_assignments: pd.DataFrame, existing_path: Path,
-    ) -> None:
-    """
-    Fail if append mode would mix metrics from different splits.
-    """
-    existing_assignments = pd.read_csv(existing_path)
-    try:
-        pd.testing.assert_frame_equal(
-            existing_assignments,
-            new_assignments,
-            check_dtype=False,
-        )
-    except AssertionError as exc:
-        raise ValueError(
-            f"Cannot append results to {existing_path.parent.parent}: "
-            "existing split_assignments.csv does not match the split for "
-            "this run. The same run-dir is being reused with a different "
-            "split. Use a new --run-dir or rerun without --append-results."
-        ) from exc
-
-
-def validate_append_input_files(
-        new_metadata: dict[str, Any], existing_path: Path,
-    ) -> None:
-    """
-    Fail if append mode would mix results from different input contents.
-    """
-    if not existing_path.exists():
-        return
-
-    with existing_path.open("r", encoding="utf-8") as fin:
-        existing_metadata = json.load(fin)
-    existing_schema = existing_metadata.get("evaluation_schema_version")
-    new_schema = new_metadata.get("evaluation_schema_version")
-    if existing_schema != new_schema:
-        raise ValueError(
-            f"Cannot append results to {existing_path.parent.parent}: "
-            "evaluation schema versions differ "
-            f"({existing_schema!r} != {new_schema!r}). Use a new --run-dir."
-        )
-    changed_fields = [
-        field
-        for field in INPUT_HASH_FIELDS
-        if existing_metadata.get(field) != new_metadata.get(field)
-    ]
-    if changed_fields:
-        raise ValueError(
-            f"Cannot append results to {existing_path.parent.parent}: input "
-            f"file contents changed ({changed_fields}). Use a new --run-dir "
-            "or rerun without --append-results.")
-
-
 def write_split_artifacts(
         split_assignments: pd.DataFrame, dropped_pairs: pd.DataFrame,
         split_metadata: dict[str, Any], output_paths: Any,
-        append_results: bool,
         sequence_cluster_assignments: pd.DataFrame | None = None,
     ) -> None:
     """
@@ -586,49 +524,6 @@ def write_split_artifacts(
         "sequence_cluster_assignments_path",
         None,
     )
-
-    if append_results and split_assignments_path.exists():
-        validate_append_split_assignments(
-            new_assignments=split_assignments,
-            existing_path=split_assignments_path,
-        )
-        validate_append_input_files(
-            new_metadata=split_metadata,
-            existing_path=split_metadata_path,
-        )
-        if not dropped_pairs_path.exists():
-            dropped_pairs.to_csv(dropped_pairs_path, index=False)
-        if not split_metadata_path.exists():
-            write_metadata_json(split_metadata, split_metadata_path)
-        if (
-            sequence_cluster_assignments is not None
-            and sequence_cluster_path is not None
-        ):
-            if sequence_cluster_path.exists():
-                existing_clusters = pd.read_csv(
-                    sequence_cluster_path,
-                    dtype="string",
-                )
-                try:
-                    pd.testing.assert_frame_equal(
-                        existing_clusters,
-                        sequence_cluster_assignments.astype("string"),
-                        check_dtype=False,
-                    )
-                except AssertionError as exc:
-                    raise ValueError(
-                        f"Cannot append results to "
-                        f"{sequence_cluster_path.parent.parent}: existing "
-                        "sequence_cluster_assignments.csv does not match "
-                        "the mapping for this run. Use a new --run-dir or "
-                        "rerun without --append-results."
-                    ) from exc
-            else:
-                sequence_cluster_assignments.to_csv(
-                    sequence_cluster_path,
-                    index=False,
-                )
-        return
 
     split_assignments_path.parent.mkdir(parents=True, exist_ok=True)
     split_assignments.to_csv(split_assignments_path, index=False)
